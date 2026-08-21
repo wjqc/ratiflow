@@ -14,8 +14,26 @@
   "contributes": {
     "commands": [
       { "command": "sixgates.openDiagnostics", "title": "SixGates: 打开本地运行诊断" },
-      { "command": "sixgates.openProject", "title": "SixGates: 打开当前项目" }
+      { "command": "sixgates.openProject", "title": "SixGates: 打开当前项目" },
+      { "command": "sixgates.refreshWorkItems", "title": "SixGates: 刷新工作项" }
     ],
+    "views": {
+      "explorer": [
+        {
+          "id": "sixgatesWorkItems",
+          "name": "通关 SixGates · 工作项"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "sixgates.refreshWorkItems",
+          "when": "view == sixgatesWorkItems",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "SixGates",
       "properties": {
