@@ -52,8 +52,8 @@ func newEnv(t *testing.T) *e2eEnv {
 		{Response: integrations.CompletionResponse{Content: `{"action":"final","summary":"PRD 草案完成"}`}},
 	}
 	pol := policy.NewService(s, outbox, policy.Snapshot{
-		ToolRules:    []policy.ToolRule{{Tool: "read_file", Risk: policy.RiskLow}, {Tool: "write_file", Risk: policy.RiskMedium}},
-		ApprovalTTL:  "1h",
+		ToolRules:   []policy.ToolRule{{Tool: "read_file", Risk: policy.RiskLow}, {Tool: "write_file", Risk: policy.RiskMedium}},
+		ApprovalTTL: "1h",
 	})
 	gateway := modelgw.New(s, model, modelgw.CostPerToken{In: 1, Out: 1})
 	authSvc := auth.NewService(s)
@@ -183,10 +183,10 @@ func TestGoldenFlowSixGates(t *testing.T) {
 	_, dep := e.call(http.MethodPost, "/api/v1/deployments", map[string]any{
 		"workItemId": wiID,
 		"plan": map[string]any{
-			"target":       map[string]any{"host": "deploy.test", "user": "deploy", "expectedFingerprint": "SHA256:x", "remoteDir": "/srv"},
-			"imageDigest":  "sha256:abcdef123456",
-			"deploySteps":  []map[string]any{{"seq": 0, "name": "up", "argv": []string{"docker", "compose", "up", "-d"}}},
-			"verifyChecks": []map[string]any{{"name": "health", "argv": []string{"curl", "-f", "http://localhost/h"}}},
+			"target":        map[string]any{"host": "deploy.test", "user": "deploy", "expectedFingerprint": "SHA256:x", "remoteDir": "/srv"},
+			"imageDigest":   "sha256:abcdef123456",
+			"deploySteps":   []map[string]any{{"seq": 0, "name": "up", "argv": []string{"docker", "compose", "up", "-d"}}},
+			"verifyChecks":  []map[string]any{{"name": "health", "argv": []string{"curl", "-f", "http://localhost/h"}}},
 			"rollbackSteps": []map[string]any{{"seq": 0, "name": "down", "argv": []string{"docker", "compose", "down"}}},
 		},
 	})

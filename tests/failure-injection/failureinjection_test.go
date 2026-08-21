@@ -255,9 +255,9 @@ type fakeStep struct {
 	onApply func()
 }
 
-func (f *fakeStep) Name() string                   { return f.name }
-func (f *fakeStep) Digest() []byte                 { return []byte(f.key) }
-func (f *fakeStep) IdempotencyKey(string) string   { return f.key }
+func (f *fakeStep) Name() string                                         { return f.name }
+func (f *fakeStep) Digest() []byte                                       { return []byte(f.key) }
+func (f *fakeStep) IdempotencyKey(string) string                         { return f.key }
 func (f *fakeStep) Check(context.Context) (bool, json.RawMessage, error) { return false, nil, nil }
 func (f *fakeStep) Apply(ctx context.Context) (json.RawMessage, error) {
 	if f.onApply != nil {
@@ -268,9 +268,9 @@ func (f *fakeStep) Apply(ctx context.Context) (json.RawMessage, error) {
 
 func validFIPlan() delivery.Plan {
 	return delivery.Plan{
-		Target:      integrations.SSHTarget{Host: "h", User: "u", ExpectedFingerprint: "SHA256:x", RemoteDir: "/srv"},
-		ImageDigest: "sha256:abc",
-		DeploySteps: []delivery.PlanStep{{Name: "up", Argv: []string{"docker", "compose", "up", "-d"}}},
+		Target:       integrations.SSHTarget{Host: "h", User: "u", ExpectedFingerprint: "SHA256:x", RemoteDir: "/srv"},
+		ImageDigest:  "sha256:abc",
+		DeploySteps:  []delivery.PlanStep{{Name: "up", Argv: []string{"docker", "compose", "up", "-d"}}},
 		VerifyChecks: []delivery.VerificationCheck{{Name: "health", Argv: []string{"curl", "-f", "http://l/h"}}},
 	}
 }

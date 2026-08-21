@@ -1,4 +1,4 @@
-.PHONY: help install build build-web build-extension build-go test test-web test-go typecheck ci run clean
+.PHONY: help install build build-web build-extension build-go test test-web test-go typecheck ci run clean arch-check openapi-check package security failure-injection e2e bench
 
 .DEFAULT_GOAL := help
 
@@ -23,14 +23,35 @@ test-web: ## Run frontend unit tests
 	npm run test:web
 
 test-go: ## Run isolated Go tests
-	go test ./...
+	go test ./internal/... -count=1
 
-test: test-web test-go ## Run all tests
+test: test-web test-go ## Run all unit tests
 
 typecheck: ## Type-check TypeScript workspaces
 	npm run typecheck
 
-ci: typecheck test build ## Run the local CI sequence
+arch-check: ## Enforce architecture dependency rules
+	./scripts/check-deps.sh
+
+openapi-check: ## Validate OpenAPI/JSON Schema files parse
+	go run ./scripts/contractcheck
+
+security: ## Run security test suite
+	go test ./tests/security/... -count=1 -timeout 300s
+
+failure-injection: ## Run failure injection suite
+	go test ./tests/failure-injection/... -count=1 -timeout 300s
+
+e2e: ## Run end-to-end golden flow suite
+	go test ./tests/e2e/... -count=1 -timeout 300s
+
+bench: ## Run performance benchmarks
+	go test ./tests/performance/... -bench=. -benchtime=1x -run='^$$'
+
+ci: typecheck arch-check openapi-check test security failure-injection e2e build ## Run the local CI sequence
+
+package: ## Build release artifacts with checksums and SBOM (VERSION=v)
+	./scripts/package.sh "$${VERSION:-dev}"
 
 run: build-web ## Run the local service
 	go run ./cmd/sixgates --address 127.0.0.1:7666 --data-dir ./data

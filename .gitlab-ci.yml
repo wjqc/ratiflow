@@ -1,10 +1,19 @@
 stages:
   - validate
-  - test
+  - unit
+  - integration
+  - security
   - build
+  - e2e
+  - package
 
 default:
   interruptible: true
+
+variables:
+  GOPROXY: https://goproxy.cn,direct
+
+# --- validate ---
 
 node-validate:
   stage: validate
@@ -17,13 +26,72 @@ node-validate:
     - npm ci --cache .npm --prefer-offline
     - npm run typecheck
 
-web-test:
-  stage: test
+go-validate:
+  stage: validate
+  image: golang:1.26-alpine
+  script:
+    - gofmt -l . | tee /dev/stderr | (! read)
+    - go vet ./...
+
+contract-validate:
+  stage: validate
+  image: golang:1.26-alpine
+  script:
+    - go run ./scripts/contractcheck
+
+arch-validate:
+  stage: validate
+  image: golang:1.26-alpine
+  script:
+    - ./scripts/check-deps.sh
+
+secret-scan:
+  stage: validate
+  image: golang:1.26-alpine
+  # 禁止秘密扫描：扫描仓库内容中高风险秘密模式（与运行时 scan 包同规则）。
+  script:
+    - go test ./internal/scan/... -count=1
+    - |
+      if grep -rInE '(AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{36,})' \
+        --include='*.go' --include='*.ts' --include='*.tsx' --include='*.yaml' --include='*.json' . ; then
+        echo "发现疑似秘密，提交被拒绝。"; exit 1
+      fi
+
+# --- unit / integration ---
+
+web-unit:
+  stage: unit
   image: node:26-alpine
   needs: [node-validate]
   script:
     - npm ci --cache .npm --prefer-offline
     - npm run test:web
+
+go-unit:
+  stage: unit
+  image: golang:1.26-alpine
+  needs: [go-validate]
+  script:
+    - go test ./internal/... -count=1 -race
+
+go-integration:
+  stage: integration
+  image: golang:1.26-alpine
+  needs: [go-unit]
+  script:
+    # SQLite 集成与适配器契约测试（fake server，不访问真实外部服务）。
+    - go test ./internal/store/... ./internal/integrations/... ./internal/api/... -count=1 -timeout 300s
+
+# --- security ---
+
+go-security:
+  stage: security
+  image: golang:1.26-alpine
+  needs: [go-integration]
+  script:
+    - go test ./tests/security/... -count=1 -timeout 600s
+
+# --- build ---
 
 web-build:
   stage: build
@@ -39,22 +107,47 @@ web-build:
       - internal/web/dist/
       - apps/vscode-extension/dist/
 
-go-test:
-  stage: test
-  image: golang:1.26.6-alpine
-  script:
-    - test -z "$(gofmt -l .)"
-    - go test -race ./...
-
 go-build:
   stage: build
-  image: golang:1.26.6-alpine
+  image: golang:1.26-alpine
   needs:
     - job: web-build
       artifacts: true
-    - job: go-test
+    - job: go-security
   script:
     - go build -trimpath -ldflags "-X main.version=$CI_COMMIT_SHORT_SHA" -o dist/sixgates ./cmd/sixgates
+    # 校验 Web 已嵌入且无需 Node 运行时。
+    - grep -q "SixGates" internal/web/dist/index.html
   artifacts:
     expire_in: 7 days
     paths: [dist/sixgates]
+
+# --- e2e ---
+
+go-e2e:
+  stage: e2e
+  image: golang:1.26-alpine
+  needs: [go-build]
+  script:
+    - go test ./tests/e2e/... ./tests/failure-injection/... -count=1 -timeout 600s
+
+# --- package ---
+
+release-package:
+  stage: package
+  image: golang:1.26-alpine
+  needs: [go-e2e]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - ./scripts/package.sh "$CI_COMMIT_TAG"
+  artifacts:
+    expire_in: 30 days
+    paths: [dist/release-*/]
+
+# 只有当前 MR head SHA 的 Pipeline 可用于过关（门禁在运行时主动复核）。
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
