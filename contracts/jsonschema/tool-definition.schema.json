@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sixgates.local/schemas/tool-definition.json",
+  "title": "SixGates ToolDefinition",
+  "description": "工具注册声明（手册 §11.2）：Schema、风险、权限、数据等级、超时与审批要求。",
+  "type": "object",
+  "required": ["name", "description", "inputSchema", "risk", "dataLevel", "timeoutSec", "maxResultBytes", "requiresApproval"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,40}$" },
+    "description": { "type": "string", "minLength": 10 },
+    "inputSchema": { "type": "object", "required": ["type"], "properties": { "type": { "const": "object" } } },
+    "risk": { "enum": ["low", "medium", "high"] },
+    "dataLevel": { "enum": ["public", "internal", "confidential"] },
+    "timeoutSec": { "type": "integer", "minimum": 1, "maximum": 600 },
+    "maxResultBytes": { "type": "integer", "minimum": 1, "maximum": 33554432 },
+    "requiresApproval": { "type": "boolean" }
+  }
+}

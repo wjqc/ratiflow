@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sixgates.local/schemas/evidence.json",
+  "title": "SixGates Evidence",
+  "description": "机器可复验证据（FR-PLT-010）：本地保留完整哈希，共享摘要提交 GitLab。",
+  "type": "object",
+  "required": ["id", "workItemId", "gate", "kind", "source", "verified", "createdAt"],
+  "properties": {
+    "id": { "type": "string" },
+    "workItemId": { "type": "string" },
+    "gate": { "enum": ["requirements", "design", "development", "testing", "deployment", "verification"] },
+    "kind": {
+      "enum": ["ci_pipeline", "test_report", "review", "deployment", "smoke", "metrics", "log_scan", "manual"]
+    },
+    "title": { "type": "string" },
+    "objectSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "payload": { "type": "object" },
+    "source": { "enum": ["local", "gitlab"] },
+    "verified": { "type": "boolean" },
+    "verifiedAt": { "type": "string", "format": "date-time" },
+    "verifiedBy": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" }
+  }
+}

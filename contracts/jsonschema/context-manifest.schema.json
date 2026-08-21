@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sixgates.local/schemas/context-manifest.json",
+  "title": "SixGates Context Manifest",
+  "description": "一次任务可见上下文的裁剪范围（FR-TECH-001）。",
+  "type": "object",
+  "required": ["id", "workItemId", "scope", "dataPolicy"],
+  "properties": {
+    "id": { "type": "string" },
+    "workItemId": { "type": "string" },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "allowedPaths": { "type": "array", "items": { "type": "string" } },
+        "allowedArtifactKinds": { "type": "array", "items": { "type": "string" } },
+        "includeBaseline": { "type": "boolean" },
+        "maxContextBytes": { "type": "integer", "default": 262144, "maximum": 4194304 }
+      }
+    },
+    "dataPolicy": { "enum": ["standard", "strict"] }
+  }
+}

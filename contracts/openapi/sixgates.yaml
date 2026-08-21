@@ -1,75 +1,745 @@
 openapi: 3.1.0
 info:
   title: SixGates Local API
-  version: 0.1.0
-  description: 本机 SixGates 与 VS Code/Web 控制台之间的 loopback API。
+  version: 1.0.0
+  description: |
+    本机 SixGates 与 VS Code 扩展 / Web 控制台之间的 loopback API。
+    约定：Base path /api/v1；写请求支持 Idempotency-Key；错误返回 application/problem+json；
+    草稿并发编辑使用 ETag/If-Match；列表使用游标分页；时间为 UTC ISO-8601；
+    SSE 以 sequence 作为事件 ID，支持 Last-Event-ID 续传。
 servers:
   - url: http://127.0.0.1:7666/api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: system
+  - name: auth
+  - name: workitems
+  - name: artifacts
+  - name: agent
+  - name: gates
+  - name: evidence
+  - name: delivery
+  - name: approvals
+  - name: events
+
 paths:
   /meta:
     get:
+      tags: [system]
+      security: []
       operationId: getMeta
       responses:
         '200':
-          description: Local service metadata
+          description: 本地服务元数据（含协议版本）
           content:
             application/json:
-              schema:
-                type: object
-                required: [name, version, localOnly, apiVersion]
-                properties:
-                  name: { type: string }
-                  version: { type: string }
-                  localOnly: { type: boolean, const: true }
-                  apiVersion: { type: string }
+              schema: { $ref: '#/components/schemas/Meta' }
   /diagnostics:
     get:
+      tags: [system]
+      security: []
       operationId: getDiagnostics
       responses:
         '200':
-          description: Current local and required-integration diagnostics
+          description: 本地健康与必需集成诊断
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DiagnosticReport' }
   /diagnostics/recheck:
     post:
+      tags: [system]
+      security: []
       operationId: recheckDiagnostics
       responses:
         '200':
-          description: Refreshed diagnostics
+          description: 已刷新的诊断
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DiagnosticReport' }
   /integrations/vscode/heartbeat:
     post:
-      operationId: sendVSCodeHeartbeat
+      tags: [system]
+      security: []
+      operationId: vscodeHeartbeat
+      description: VS Code 扩展心跳与协议版本协商
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HeartbeatRequest' }
+      responses:
+        '200':
+          description: 协商结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HeartbeatResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+  /auth/sessions:
+    post:
+      tags: [auth]
+      security: []
+      operationId: createSession
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: false
+              required: [label]
               properties:
-                version: { type: string }
-                workspace: { type: string }
+                label: { type: string }
       responses:
-        '200': { description: Heartbeat accepted }
-        '400': { description: Invalid payload }
+        '201':
+          description: 会话已创建（token 仅此一次返回）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, token]
+                properties:
+                  session: { $ref: '#/components/schemas/Session' }
+                  token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+  /projects:
+    post:
+      tags: [auth]
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectInput' }
+      responses:
+        '201':
+          description: 项目（幂等登记）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /projects/{id}:
+    get:
+      tags: [auth]
+      operationId: getProject
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 项目
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /workitems:
+    get:
+      tags: [workitems]
+      operationId: listWorkItems
+      parameters:
+        - { name: projectId, in: query, required: true, schema: { type: string } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+      responses:
+        '200':
+          description: 工作项列表（游标分页）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/WorkItem' }
+                  nextCursor: { type: string }
+    post:
+      tags: [workitems]
+      operationId: createWorkItem
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkItemInput' }
+      responses:
+        '201':
+          description: 已创建（含六关初始状态）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkItem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /workitems/{id}:
+    get:
+      tags: [workitems]
+      operationId: getWorkItem
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 工作项与六关阶段
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workItem, stages]
+                properties:
+                  workItem: { $ref: '#/components/schemas/WorkItem' }
+                  stages:
+                    type: array
+                    items: { $ref: '#/components/schemas/Stage' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /workitems/{id}/stages/{gate}:
+    patch:
+      tags: [workitems]
+      operationId: setStage
+      description: 阶段状态迁移（非法迁移返回 409）
+      parameters:
+        - { $ref: '#/components/parameters/ID' }
+        - name: gate
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/GateName' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state]
+              properties:
+                state: { $ref: '#/components/schemas/StageState' }
+                inputBaselineSha: { type: string }
+      responses:
+        '200': { description: 已更新 }
+        '409': { $ref: '#/components/responses/Problem' }
+  /workitems/{id}/artifacts:
+    get:
+      tags: [artifacts]
+      operationId: listArtifacts
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 工件列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Artifact' }
+    post:
+      tags: [artifacts]
+      operationId: createArtifact
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, title]
+              properties:
+                kind: { type: string, enum: [prd, tech_design, task_graph, adr, test_plan, deploy_plan, runbook, rules] }
+                title: { type: string }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Artifact' }
+  /artifacts/{id}/revisions:
+    get:
+      tags: [artifacts]
+      operationId: listRevisions
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 修订列表（新到旧）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Revision' }
+    post:
+      tags: [artifacts]
+      operationId: createDraft
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        '201':
+          description: 新草稿修订（响应含 ETag 头）
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Revision' }
+  /revisions/{id}:
+    put:
+      tags: [artifacts]
+      operationId: updateDraft
+      description: 草稿并发编辑；If-Match 必须 matching 当前 ETag
+      parameters:
+        - { $ref: '#/components/parameters/ID' }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        '200':
+          description: 新修订
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Revision' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /revisions/{id}/reviews:
+    post:
+      tags: [artifacts]
+      operationId: addReview
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reviewer, verdict]
+              properties:
+                reviewer: { type: string }
+                verdict: { type: string, enum: [approved, rejected, changes_requested] }
+                comment: { type: string }
+                gitlabMrIid: { type: string }
+      responses:
+        '201':
+          description: 评审记录
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Review' }
+  /workitems/{id}/baselines:
+    post:
+      tags: [artifacts]
+      operationId: freezeBaseline
+      description: 冻结输入基线（旧基线 superseded，下游 stale）
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [gate, revisionIds]
+              properties:
+                gate: { $ref: '#/components/schemas/GateName' }
+                revisionIds: { type: array, items: { type: string } }
+                gitlabCommitSha: { type: string }
+      responses:
+        '201':
+          description: 基线
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Baseline' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /workitems/{id}/context-manifests:
+    post:
+      tags: [agent]
+      operationId: createContextManifest
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scope: { $ref: '#/components/schemas/ContextScope' }
+                dataPolicy: { type: string, enum: [standard, strict], default: standard }
+      responses:
+        '201':
+          description: 上下文清单
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContextManifest' }
+  /workitems/{id}/agent-runs:
+    post:
+      tags: [agent]
+      operationId: startAgentRun
+      parameters:
+        - { $ref: '#/components/parameters/ID' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [goal, contextManifestId]
+              properties:
+                taskId: { type: string }
+                goal: { type: string }
+                contextManifestId: { type: string }
+                toolAllowlist: { type: array, items: { type: string } }
+                idempotencyKey: { type: string }
+                inputBaselineSha: { type: string }
+      responses:
+        '200':
+          description: Agent Run 结果（completed_execution 不等于过关）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentRun' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /agent-runs/{id}:
+    get:
+      tags: [agent]
+      operationId: getAgentRun
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: Run 详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentRun' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /agent-runs/{id}/cancel:
+    post:
+      tags: [agent]
+      operationId: cancelAgentRun
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200': { description: 已取消 }
+  /agent-runs/{id}/proposals:
+    get:
+      tags: [agent]
+      operationId: listToolProposals
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 工具提案列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ToolProposal' }
+  /workitems/{id}/gates/{gate}/evaluate:
+    post:
+      tags: [gates]
+      operationId: evaluateGate
+      description: 聚合六项输入计算 GateResult；unknown 输入不放行
+      parameters:
+        - { $ref: '#/components/parameters/ID' }
+        - name: gate
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/GateName' }
+      responses:
+        '200':
+          description: 门禁结论
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateResult' }
+  /workitems/{id}/evidences:
+    get:
+      tags: [evidence]
+      operationId: listEvidence
+      parameters:
+        - { $ref: '#/components/parameters/ID' }
+        - { name: gate, in: query, schema: { $ref: '#/components/schemas/GateName' } }
+      responses:
+        '200':
+          description: 证据列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Evidence' }
+    post:
+      tags: [evidence]
+      operationId: recordEvidence
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvidenceInput' }
+      responses:
+        '201':
+          description: 已登记
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Evidence' }
+  /evidences/{id}/verify:
+    post:
+      tags: [evidence]
+      operationId: verifyEvidence
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                verifiedBy: { type: string }
+      responses:
+        '200': { description: 已复验 }
+        '409': { $ref: '#/components/responses/Problem' }
+  /workitems/{id}/passports:
+    post:
+      tags: [evidence]
+      operationId: issuePassport
+      description: 签发通关文牒（六关必须全部通过）
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sharedSummary: { type: object }
+      responses:
+        '201':
+          description: 通关文牒
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Passport' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /workitems/{id}/passports/latest:
+    get:
+      tags: [evidence]
+      operationId: latestPassport
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 最新文牒
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Passport' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /deployments:
+    post:
+      tags: [delivery]
+      operationId: createDeployment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workItemId, plan]
+              properties:
+                workItemId: { type: string }
+                plan: { $ref: '#/components/schemas/DeploymentPlan' }
+      responses:
+        '201':
+          description: 部署（draft）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Deployment' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /deployments/{id}:
+    get:
+      tags: [delivery]
+      operationId: getDeployment
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 部署详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Deployment' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /deployments/{id}/submit:
+    post:
+      tags: [delivery]
+      operationId: submitDeployment
+      description: 提交审批（绑定 ActionDigest）
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200': { description: awaiting_approval }
+        '409': { $ref: '#/components/responses/Problem' }
+  /deployments/{id}/deploy:
+    post:
+      tags: [delivery]
+      operationId: deploy
+      description: 审批通过后执行 SSH 预检 + 部署步骤
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: awaiting_verification
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Deployment' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /deployments/{id}/verify:
+    post:
+      tags: [delivery]
+      operationId: verifyDeployment
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: verified
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Deployment' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /deployments/{id}/rollback:
+    post:
+      tags: [delivery]
+      operationId: rollbackDeployment
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: rolled_back / rollback_failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Deployment' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /approvals:
+    get:
+      tags: [approvals]
+      operationId: listPendingApprovals
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 100 } }
+      responses:
+        '200':
+          description: 待审批列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Approval' }
+  /approvals/{id}/decide:
+    post:
+      tags: [approvals]
+      operationId: decideApproval
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [approved, rejected] }
+                decidedBy: { type: string }
+                reason: { type: string }
+      responses:
+        '200':
+          description: 决定结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approval' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /audit:
+    get:
+      tags: [system]
+      operationId: listAudit
+      parameters:
+        - { name: afterSeq, in: query, schema: { type: integer, format: int64 } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        '200':
+          description: 审计日志（追加式）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditEntry' }
+  /backup:
+    post:
+      tags: [system]
+      operationId: createBackup
+      responses:
+        '201':
+          description: 备份清单
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupManifest' }
+  /events:
+    get:
+      tags: [events]
+      security: []
+      operationId: subscribeEvents
+      description: SSE 事件流；id 为全局 sequence，支持 Last-Event-ID 续传
+      parameters:
+        - { name: Last-Event-ID, in: header, schema: { type: string } }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, maxLength: 128 }
+  responses:
+    Problem:
+      description: 错误（application/problem+json）
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
   schemas:
-    DiagnosticStatus:
-      type: string
-      enum: [ready, needs_configuration, checking, unavailable]
-    DiagnosticItem:
+    Meta:
       type: object
-      required: [id, label, status, detail, required]
+      required: [name, version, localOnly, apiVersion, protocolVersion]
       properties:
-        id: { type: string }
-        label: { type: string }
-        status: { $ref: '#/components/schemas/DiagnosticStatus' }
+        name: { type: string }
+        version: { type: string }
+        localOnly: { type: boolean, const: true }
+        apiVersion: { type: string, const: v1 }
+        protocolVersion: { type: string }
+    Problem:
+      type: object
+      required: [status, errorCode, detail]
+      properties:
+        status: { type: integer }
+        errorCode: { type: string }
         detail: { type: string }
-        required: { type: boolean }
     DiagnosticReport:
       type: object
       required: [generatedAt, ready, integrations, local]
@@ -82,3 +752,326 @@ components:
         local:
           type: array
           items: { $ref: '#/components/schemas/DiagnosticItem' }
+    DiagnosticItem:
+      type: object
+      required: [id, label, status, detail, required]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        status: { type: string, enum: [ready, needs_configuration, checking, unavailable] }
+        detail: { type: string }
+        required: { type: boolean }
+    HeartbeatRequest:
+      type: object
+      required: [version]
+      properties:
+        version: { type: string }
+        workspace: { type: string }
+        vscodeVersion: { type: string }
+        protocolVersion: { type: string }
+    HeartbeatResponse:
+      type: object
+      required: [status, serverVersion, protocolVersion, compatible]
+      properties:
+        status: { type: string }
+        serverVersion: { type: string }
+        protocolVersion: { type: string }
+        compatible: { type: boolean }
+        upgradeHint: { type: string }
+    Session:
+      type: object
+      required: [id, label, createdAt, expiresAt]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+    ProjectInput:
+      type: object
+      required: [gitlabInstance, namespace, project]
+      properties:
+        gitlabInstance: { type: string }
+        namespace: { type: string }
+        project: { type: string }
+        defaultBranch: { type: string, default: main }
+    Project:
+      allOf:
+        - $ref: '#/components/schemas/ProjectInput'
+        - type: object
+          required: [id, createdAt]
+          properties:
+            id: { type: string }
+            createdAt: { type: string, format: date-time }
+    GateName:
+      type: string
+      enum: [requirements, design, development, testing, deployment, verification]
+    StageState:
+      type: string
+      enum: [not_started, running, blocked, awaiting_approval, passed, failed, cancelled, stale]
+    WorkItemInput:
+      type: object
+      required: [projectId, title]
+      properties:
+        projectId: { type: string }
+        title: { type: string }
+        description: { type: string }
+        gitlabIssueIid: { type: string }
+        labels: { type: array, items: { type: string } }
+    WorkItem:
+      allOf:
+        - $ref: '#/components/schemas/WorkItemInput'
+        - type: object
+          required: [id, currentGate, createdAt, updatedAt]
+          properties:
+            id: { type: string }
+            currentGate: { $ref: '#/components/schemas/GateName' }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+    Stage:
+      type: object
+      required: [gate, state, updatedAt]
+      properties:
+        gate: { $ref: '#/components/schemas/GateName' }
+        state: { $ref: '#/components/schemas/StageState' }
+        inputBaselineSha: { type: string }
+        updatedAt: { type: string, format: date-time }
+    Artifact:
+      type: object
+      required: [id, workItemId, kind, title]
+      properties:
+        id: { type: string }
+        workItemId: { type: string }
+        kind: { type: string }
+        title: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Revision:
+      type: object
+      required: [id, artifactId, revNo, contentSha256, size, status, etag]
+      properties:
+        id: { type: string }
+        artifactId: { type: string }
+        revNo: { type: integer }
+        contentSha256: { type: string }
+        size: { type: integer }
+        status: { type: string, enum: [draft, in_review, frozen, superseded] }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        etag: { type: string }
+    Review:
+      type: object
+      required: [id, revisionId, reviewer, verdict, decidedAt]
+      properties:
+        id: { type: string }
+        revisionId: { type: string }
+        reviewer: { type: string }
+        verdict: { type: string, enum: [approved, rejected, changes_requested] }
+        comment: { type: string }
+        gitlabMrIid: { type: string }
+        decidedAt: { type: string, format: date-time }
+    Baseline:
+      type: object
+      required: [id, workItemId, gate, revisionMap, inputsSha256, frozenAt]
+      properties:
+        id: { type: string }
+        workItemId: { type: string }
+        gate: { $ref: '#/components/schemas/GateName' }
+        revisionMap:
+          type: object
+          additionalProperties: { type: string }
+        inputsSha256: { type: string }
+        gitlabCommitSha: { type: string }
+        frozenAt: { type: string, format: date-time }
+        supersededBy: { type: string }
+    ContextScope:
+      type: object
+      properties:
+        allowedPaths: { type: array, items: { type: string } }
+        allowedArtifactKinds: { type: array, items: { type: string } }
+        includeBaseline: { type: boolean }
+        maxContextBytes: { type: integer, default: 262144 }
+    ContextManifest:
+      type: object
+      required: [id, workItemId, scope, dataPolicy]
+      properties:
+        id: { type: string }
+        workItemId: { type: string }
+        scope: { $ref: '#/components/schemas/ContextScope' }
+        dataPolicy: { type: string, enum: [standard, strict] }
+    AgentRun:
+      type: object
+      required: [id, workItemId, goal, status]
+      properties:
+        id: { type: string }
+        workItemId: { type: string }
+        taskId: { type: string }
+        goal: { type: string }
+        inputBaselineSha: { type: string }
+        contextManifestId: { type: string }
+        toolAllowlist: { type: array, items: { type: string } }
+        status: { type: string, enum: [queued, running, paused, completed_execution, failed, cancelled] }
+        result: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ToolProposal:
+      type: object
+      required: [id, runId, tool, risk, actionDigest, decision]
+      properties:
+        id: { type: string }
+        runId: { type: string }
+        tool: { type: string }
+        arguments: { type: object }
+        risk: { type: string, enum: [low, medium, high] }
+        actionDigest: { type: string }
+        decision: { type: string, enum: [proposed, approved, rejected, executed, exec_failed, cancelled] }
+        result: { type: string }
+        createdAt: { type: string, format: date-time }
+    GateResult:
+      type: object
+      required: [gate, passed, failedInputs, computedAt, inputs]
+      properties:
+        gate: { $ref: '#/components/schemas/GateName' }
+        passed: { type: boolean }
+        failedInputs:
+          type: array
+          items:
+            type: string
+            enum: [required_artifacts_frozen, required_checks_passed, approvals_valid, evidence_complete, no_blocking_risk, inputs_current]
+        computedAt: { type: string, format: date-time }
+        inputs: { type: object }
+    Evidence:
+      type: object
+      required: [id, workItemId, gate, kind, source, verified]
+      properties:
+        id: { type: string }
+        workItemId: { type: string }
+        gate: { $ref: '#/components/schemas/GateName' }
+        kind: { type: string }
+        title: { type: string }
+        objectSha256: { type: string }
+        payload: { type: object }
+        source: { type: string, enum: [local, gitlab] }
+        verified: { type: boolean }
+        verifiedAt: { type: string, format: date-time }
+        verifiedBy: { type: string }
+        createdAt: { type: string, format: date-time }
+    EvidenceInput:
+      type: object
+      required: [gate, kind]
+      properties:
+        gate: { $ref: '#/components/schemas/GateName' }
+        kind: { type: string }
+        title: { type: string }
+        content: { type: string }
+        payload: { type: object }
+        source: { type: string, enum: [local, gitlab] }
+    Passport:
+      type: object
+      required: [id, workItemId, objectSha256, inputsSha256, gates]
+      properties:
+        id: { type: string }
+        workItemId: { type: string }
+        objectSha256: { type: string }
+        inputsSha256: { type: string }
+        sharedSummary: { type: object }
+        gates:
+          type: array
+          items:
+            type: object
+            required: [gate, passed, evidenceIds]
+            properties:
+              gate: { $ref: '#/components/schemas/GateName' }
+              passed: { type: boolean }
+              evidenceIds: { type: array, items: { type: string } }
+              failedInputs: { type: array, items: { type: string } }
+        createdAt: { type: string, format: date-time }
+    SSHTarget:
+      type: object
+      required: [host, user]
+      properties:
+        host: { type: string }
+        port: { type: integer, default: 22 }
+        user: { type: string }
+        expectedFingerprint: { type: string }
+        remoteDir: { type: string }
+    PlanStep:
+      type: object
+      required: [name, argv]
+      properties:
+        seq: { type: integer }
+        name: { type: string }
+        argv: { type: array, items: { type: string } }
+        timeoutSec: { type: integer }
+    VerifyCheck:
+      type: object
+      required: [name, argv]
+      properties:
+        name: { type: string }
+        argv: { type: array, items: { type: string } }
+        required: { type: boolean, default: true }
+    DeploymentPlan:
+      type: object
+      required: [target, imageDigest, deploySteps, verifyChecks]
+      properties:
+        target: { $ref: '#/components/schemas/SSHTarget' }
+        imageDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{6,64}$'
+          description: 不可变镜像 digest；可漂移 tag 被拒绝
+        previousDigest: { type: string }
+        deploySteps: { type: array, items: { $ref: '#/components/schemas/PlanStep' } }
+        verifyChecks: { type: array, items: { $ref: '#/components/schemas/VerifyCheck' } }
+        rollbackSteps: { type: array, items: { $ref: '#/components/schemas/PlanStep' } }
+        timeoutSec: { type: integer }
+    Deployment:
+      type: object
+      required: [id, workItemId, target, state]
+      properties:
+        id: { type: string }
+        workItemId: { type: string }
+        target: { type: string }
+        imageDigest: { type: string }
+        state:
+          type: string
+          enum: [draft, awaiting_approval, approved, deploying, awaiting_verification, verified, verification_failed, deploy_failed, rolling_back, rolled_back, rollback_failed]
+        actionDigest: { type: string }
+        result: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Approval:
+      type: object
+      required: [id, subjectType, subjectId, actionDigest, risk, status, expiresAt]
+      properties:
+        id: { type: string }
+        subjectType: { type: string, enum: [tool_proposal, deployment, baseline, risk] }
+        subjectId: { type: string }
+        actionDigest: { type: string }
+        risk: { type: string, enum: [low, medium, high] }
+        status: { type: string, enum: [requested, approved, rejected, expired] }
+        requestedBy: { type: string }
+        decidedBy: { type: string }
+        decidedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        reason: { type: string }
+        createdAt: { type: string, format: date-time }
+    AuditEntry:
+      type: object
+      required: [seq, actor, action, targetType, targetId, createdAt]
+      properties:
+        seq: { type: integer, format: int64 }
+        actor: { type: string }
+        action: { type: string }
+        targetType: { type: string }
+        targetId: { type: string }
+        detail: { type: object }
+        createdAt: { type: string, format: date-time }
+    BackupManifest:
+      type: object
+      required: [schemaVersion, snapshotSha256, objectsCount, objectsRootHash, sixgatesVersion, createdAt]
+      properties:
+        schemaVersion: { type: integer }
+        snapshotSha256: { type: string }
+        objectsCount: { type: integer }
+        objectsRootHash: { type: string }
+        sixgatesVersion: { type: string }
+        createdAt: { type: string, format: date-time }

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sixgates.local/schemas/execution-manifest.json",
+  "title": "SixGates ExecutionManifest",
+  "description": "执行器唯一输入（手册 §11.3）：不接受 sh -c <model text>；argv 直接 exec。",
+  "type": "object",
+  "required": ["argv", "timeoutSec"],
+  "additionalProperties": false,
+  "properties": {
+    "argv": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1, "not": { "anyOf": [
+        { "pattern": ";" }, { "pattern": "\\|" }, { "pattern": "&" },
+        { "pattern": "`" }, { "pattern": "\\$" }, { "pattern": ">" }, { "pattern": "<" },
+        { "pattern": "\\n" }
+      ] } }
+    },
+    "workDir": { "type": "string" },
+    "image": { "type": "string" },
+    "mounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["hostPath", "containerPath"],
+        "properties": {
+          "hostPath": { "type": "string", "pattern": "^/" },
+          "containerPath": { "type": "string", "pattern": "^/", "not": { "anyOf": [{ "pattern": "^/etc" }, { "const": "/var/run/docker.sock" }] } },
+          "readOnly": { "type": "boolean", "default": false }
+        }
+      }
+    },
+    "networkOff": { "type": "boolean", "default": true },
+    "memoryMB": { "type": "integer", "minimum": 16, "maximum": 8192 },
+    "cpus": { "type": "number", "minimum": 0.1, "maximum": 8 },
+    "timeoutSec": { "type": "integer", "minimum": 1, "maximum": 3600 },
+    "writesFiles": { "type": "boolean", "default": false },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "maxBytes": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  }
+}

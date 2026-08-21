@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sixgates.local/schemas/agent-decision.json",
+  "title": "SixGates Agent Decision",
+  "description": "Agent 循环中模型每轮必须输出的结构化决策；模型不能直接执行工具。",
+  "type": "object",
+  "required": ["action", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "oneOf": [
+        { "const": "final" },
+        { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,40}$" }
+      ],
+      "description": "final 或工具名"
+    },
+    "arguments": { "type": "object" },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 4000 }
+  }
+}
