@@ -1,0 +1,84 @@
+openapi: 3.1.0
+info:
+  title: SixGates Local API
+  version: 0.1.0
+  description: 本机 SixGates 与 VS Code/Web 控制台之间的 loopback API。
+servers:
+  - url: http://127.0.0.1:7666/api/v1
+paths:
+  /meta:
+    get:
+      operationId: getMeta
+      responses:
+        '200':
+          description: Local service metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, version, localOnly, apiVersion]
+                properties:
+                  name: { type: string }
+                  version: { type: string }
+                  localOnly: { type: boolean, const: true }
+                  apiVersion: { type: string }
+  /diagnostics:
+    get:
+      operationId: getDiagnostics
+      responses:
+        '200':
+          description: Current local and required-integration diagnostics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiagnosticReport' }
+  /diagnostics/recheck:
+    post:
+      operationId: recheckDiagnostics
+      responses:
+        '200':
+          description: Refreshed diagnostics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiagnosticReport' }
+  /integrations/vscode/heartbeat:
+    post:
+      operationId: sendVSCodeHeartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                version: { type: string }
+                workspace: { type: string }
+      responses:
+        '200': { description: Heartbeat accepted }
+        '400': { description: Invalid payload }
+components:
+  schemas:
+    DiagnosticStatus:
+      type: string
+      enum: [ready, needs_configuration, checking, unavailable]
+    DiagnosticItem:
+      type: object
+      required: [id, label, status, detail, required]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        status: { $ref: '#/components/schemas/DiagnosticStatus' }
+        detail: { type: string }
+        required: { type: boolean }
+    DiagnosticReport:
+      type: object
+      required: [generatedAt, ready, integrations, local]
+      properties:
+        generatedAt: { type: string, format: date-time }
+        ready: { type: boolean }
+        integrations:
+          type: array
+          items: { $ref: '#/components/schemas/DiagnosticItem' }
+        local:
+          type: array
+          items: { $ref: '#/components/schemas/DiagnosticItem' }

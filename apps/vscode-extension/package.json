@@ -1,0 +1,39 @@
+{
+  "name": "@sixgates/vscode-extension",
+  "displayName": "通关 SixGates",
+  "description": "连接本机 SixGates，查看六关状态并打开本地诊断控制台。",
+  "version": "0.1.0",
+  "publisher": "sixgates",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "sixgates.openDiagnostics", "title": "SixGates: 打开本地运行诊断" },
+      { "command": "sixgates.openProject", "title": "SixGates: 打开当前项目" }
+    ],
+    "configuration": {
+      "title": "SixGates",
+      "properties": {
+        "sixgates.localUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:7666",
+          "description": "本机 SixGates 服务地址。只允许 loopback 地址。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.9.3"
+  }
+}

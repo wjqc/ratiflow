@@ -1,0 +1,13 @@
+.DS_Store
+.env
+data/
+dist/
+coverage/
+node_modules/
+apps/*/node_modules/
+apps/*/dist/
+internal/web/dist/*
+!internal/web/dist/index.html
+*.log
+*.vsix
+*.tsbuildinfo

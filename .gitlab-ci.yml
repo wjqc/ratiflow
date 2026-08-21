@@ -1,0 +1,60 @@
+stages:
+  - validate
+  - test
+  - build
+
+default:
+  interruptible: true
+
+node-validate:
+  stage: validate
+  image: node:26-alpine
+  cache:
+    key:
+      files: [package-lock.json]
+    paths: [.npm/]
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm run typecheck
+
+web-test:
+  stage: test
+  image: node:26-alpine
+  needs: [node-validate]
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm run test:web
+
+web-build:
+  stage: build
+  image: node:26-alpine
+  needs: [node-validate]
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm run build:web
+    - npm run build:extension
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - internal/web/dist/
+      - apps/vscode-extension/dist/
+
+go-test:
+  stage: test
+  image: golang:1.26.6-alpine
+  script:
+    - test -z "$(gofmt -l .)"
+    - go test -race ./...
+
+go-build:
+  stage: build
+  image: golang:1.26.6-alpine
+  needs:
+    - job: web-build
+      artifacts: true
+    - job: go-test
+  script:
+    - go build -trimpath -ldflags "-X main.version=$CI_COMMIT_SHORT_SHA" -o dist/sixgates ./cmd/sixgates
+  artifacts:
+    expire_in: 7 days
+    paths: [dist/sixgates]

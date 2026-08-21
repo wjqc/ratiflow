@@ -1,0 +1,20 @@
+{
+  "name": "sixgates-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/web",
+    "apps/vscode-extension"
+  ],
+  "scripts": {
+    "build": "npm run build:web && npm run build:extension",
+    "build:web": "npm --workspace @sixgates/web run build",
+    "build:extension": "npm --workspace @sixgates/vscode-extension run build",
+    "dev:web": "npm --workspace @sixgates/web run dev",
+    "test:web": "npm --workspace @sixgates/web run test",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
