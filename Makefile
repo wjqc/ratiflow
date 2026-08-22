@@ -1,62 +1,53 @@
-.PHONY: help install build build-web build-extension build-go test test-web test-go typecheck ci run clean arch-check openapi-check package security failure-injection e2e bench
+.PHONY: help install codegen typecheck test test-rust test-web e2e build build-core build-desktop run package clean fmt clippy ci
 
 .DEFAULT_GOAL := help
 
 help: ## Show available commands
-	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z_-]+:.*## / {printf "%-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z_-]+:.*## / {printf "%-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-install: ## Install JavaScript dependencies
-	npm install
+install: ## Install JS dependencies (Electron via npmmirror)
+	ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm install
 
-build-web: ## Build React into Go embedded assets
-	npm run build:web
+codegen: ## Generate TS protocol types from contracts/rpc
+	node packages/protocol/generate.mjs
 
-build-extension: ## Compile the VS Code extension
-	npm run build:extension
-
-build-go: ## Build the local Go binary (requires Go 1.26+)
-	go build -trimpath -ldflags "-X main.version=0.1.0" -o dist/sixgates ./cmd/sixgates
-
-build: build-web build-extension build-go ## Build all deliverables
-
-test-web: ## Run frontend unit tests
-	npm run test:web
-
-test-go: ## Run isolated Go tests
-	go test ./internal/... -count=1
-
-test: test-web test-go ## Run all unit tests
-
-typecheck: ## Type-check TypeScript workspaces
+typecheck: ## TypeScript typecheck (renderer + main + preload + protocol)
 	npm run typecheck
 
-arch-check: ## Enforce architecture dependency rules
-	./scripts/check-deps.sh
+fmt: ## cargo fmt
+	cargo fmt --all
 
-openapi-check: ## Validate OpenAPI/JSON Schema files parse
-	go run ./scripts/contractcheck
+clippy: ## cargo clippy (warnings as errors)
+	cargo clippy --all-targets -- -D warnings
 
-security: ## Run security test suite
-	go test ./tests/security/... -count=1 -timeout 300s
+test-rust: ## Rust test suite
+	cargo test
 
-failure-injection: ## Run failure injection suite
-	go test ./tests/failure-injection/... -count=1 -timeout 300s
+test-web: ## Renderer component tests
+	npm run test
 
-e2e: ## Run end-to-end golden flow suite
-	go test ./tests/e2e/... -count=1 -timeout 300s
+test: test-rust test-web ## All unit tests
 
-bench: ## Run performance benchmarks
-	go test ./tests/performance/... -bench=. -benchtime=1x -run='^$$'
+e2e: ## Protocol E2E golden flow (requires release core build)
+	cargo build --release -p sixgates-core
+	node tests/e2e-protocol/e2e.mjs
 
-ci: typecheck arch-check openapi-check test security failure-injection e2e build ## Run the local CI sequence
+build-core: ## Release build of Rust core
+	cargo build --release -p sixgates-core
 
-package: ## Build release artifacts with checksums and SBOM (VERSION=v)
-	./scripts/package.sh "$${VERSION:-dev}"
+build-desktop: ## Build Electron main/preload/renderer
+	npm --workspace @sixgates/desktop run build
 
-run: build-web ## Run the local service
-	go run ./cmd/sixgates --address 127.0.0.1:7666 --data-dir ./data
+build: build-core build-desktop ## Build everything
 
-clean: ## Remove generated build output, preserving source and local data
-	find apps -type d -name dist -prune -exec rm -r {} +
-	find internal/web/dist -mindepth 1 ! -name index.html -delete
-	rm -r dist 2>/dev/null || true
+run: build ## Launch desktop app
+	npm --workspace @sixgates/desktop run start
+
+package: build ## Package desktop app (dir, unsigned)
+	npm --workspace @sixgates/desktop run package
+
+ci: fmt clippy codegen typecheck test e2e ## Local CI sequence
+
+clean: ## Clean build outputs
+	cargo clean
+	rm -rf apps/desktop/dist

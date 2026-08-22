@@ -13,3 +13,4 @@ internal/web/dist/*
 *.tsbuildinfo
 .idea/
 target/
+release/
