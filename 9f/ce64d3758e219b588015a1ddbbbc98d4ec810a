@@ -1,0 +1,40 @@
+apps/desktop/src/renderer/src/app/settings/components/StatusPill.tsx
+  s_912ffb5b75230f::t_bfa1904a284663 1-22
+apps/desktop/src/renderer/src/app/settings/settings-routes.ts
+  s_912ffb5b75230f::t_e622f4d6fce018 1-128
+apps/desktop/src/renderer/src/app/settings/components/SettingsPageHeader.tsx
+  s_912ffb5b75230f::t_48fe4ead7d3be4 1-28
+apps/desktop/src/renderer/src/app/settings/components/SettingsSection.tsx
+  s_912ffb5b75230f::t_02606e98f80792 1-26
+apps/desktop/src/renderer/src/lib/redact.ts
+  s_912ffb5b75230f::t_53c6331136f54d 1-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "9fce64d3758e219b588015a1ddbbbc98d4ec810a",
+  "prompts": {},
+  "sessions": {
+    "s_912ffb5b75230f": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a89935b7fbc3f178f693fdc",
+        "model": "kimi-k3"
+      },
+      "human_author": "wenjian3 <wenjian3@asiainfo.com>",
+      "custom_attributes": {
+        "edit_kind": "file_edit",
+        "source_scene": "agent",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "tool_use_id": "6a89963e7fbc3f178f694068",
+        "dedupe_key": "6a89935b7fbc3f178f693fdc:6a89963e7fbc3f178f694068:afterEdit:985ffd19",
+        "client_type": "ide",
+        "session_id": "6a89935b7fbc3f178f693fdc",
+        "external_session_id": "6a89935b7fbc3f178f693fdc",
+        "tool_type": "builtin",
+        "runtime_client": "trae-tob-git-ai",
+        "operation_id": "6a89963e7fbc3f178f694068"
+      }
+    }
+  }
+}
