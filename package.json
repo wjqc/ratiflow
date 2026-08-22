@@ -1,18 +1,21 @@
 {
   "name": "sixgates-monorepo",
   "private": true,
-  "version": "0.1.0",
+  "version": "3.0.0",
   "workspaces": [
-    "apps/web",
-    "apps/vscode-extension"
+    "apps/desktop",
+    "packages/protocol",
+    "packages/ui"
   ],
   "scripts": {
-    "build": "npm run build:web && npm run build:extension",
-    "build:web": "npm --workspace @sixgates/web run build",
-    "build:extension": "npm --workspace @sixgates/vscode-extension run build",
-    "dev:web": "npm --workspace @sixgates/web run dev",
-    "test:web": "npm --workspace @sixgates/web run test",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build:renderer": "npm --workspace @sixgates/desktop run build:renderer",
+    "build:core": "cargo build --release -p sixgates-core",
+    "start": "npm --workspace @sixgates/desktop run start",
+    "package": "npm --workspace @sixgates/desktop run package",
+    "codegen:protocol": "node packages/protocol/generate.mjs",
+    "ci": "npm run codegen:protocol && npm run typecheck && npm run test && cargo fmt --check && cargo clippy -- -D warnings && cargo test"
   },
   "engines": {
     "node": ">=22"

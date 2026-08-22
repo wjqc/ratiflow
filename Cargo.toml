@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/store",
+    "crates/project",
+    "crates/knowledge",
+    "crates/workitem",
+    "crates/artifact",
+    "crates/attachment",
+    "crates/workflow",
+    "crates/agent",
+    "crates/policy",
+    "crates/evidence",
+    "crates/executor",
+    "crates/integrations",
+    "crates/timeline",
+    "crates/sixgates-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+regex = "1"
+getrandom = "0.2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+ureq = { version = "2", features = ["json"] }
+
+# 内部 crate
+sg-protocol = { path = "crates/protocol" }
+sg-store = { path = "crates/store" }
+sg-project = { path = "crates/project" }
+sg-knowledge = { path = "crates/knowledge" }
+sg-workitem = { path = "crates/workitem" }
+sg-artifact = { path = "crates/artifact" }
+sg-attachment = { path = "crates/attachment" }
+sg-workflow = { path = "crates/workflow" }
+sg-agent = { path = "crates/agent" }
+sg-policy = { path = "crates/policy" }
+sg-evidence = { path = "crates/evidence" }
+sg-executor = { path = "crates/executor" }
+sg-integrations = { path = "crates/integrations" }
+sg-timeline = { path = "crates/timeline" }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

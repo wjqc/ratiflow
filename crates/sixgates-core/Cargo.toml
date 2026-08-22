@@ -1,0 +1,28 @@
+[package]
+name = "sixgates-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sixgates-core"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+sg-protocol = { workspace = true }
+sg-store = { workspace = true }
+sg-project = { workspace = true }
+sg-knowledge = { workspace = true }
+sg-workitem = { workspace = true }
+sg-artifact = { workspace = true }
+sg-attachment = { workspace = true }
+sg-workflow = { workspace = true }
+sg-agent = { workspace = true }
+sg-policy = { workspace = true }
+sg-evidence = { workspace = true }
+sg-executor = { workspace = true }
+sg-integrations = { workspace = true }
+sg-timeline = { workspace = true }
