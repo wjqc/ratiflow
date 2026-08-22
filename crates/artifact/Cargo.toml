@@ -8,3 +8,5 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 sg-store = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }

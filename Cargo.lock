@@ -592,15 +592,18 @@ dependencies = [
 name = "sg-artifact"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sg-store",
+ "sha2",
 ]
 
 [[package]]
 name = "sg-attachment"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sg-store",
@@ -610,6 +613,7 @@ dependencies = [
 name = "sg-evidence"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sg-store",
