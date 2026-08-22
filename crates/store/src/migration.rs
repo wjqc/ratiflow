@@ -16,6 +16,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (12, include_str!("../migrations/0012_v3_knowledge.sql")),
     (13, include_str!("../migrations/0013_v3_attachments.sql")),
     (14, include_str!("../migrations/0014_v3_context_items.sql")),
+    (15, include_str!("../migrations/0015_v3_settings.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

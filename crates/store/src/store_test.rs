@@ -36,9 +36,20 @@ mod tests {
     }
 
     #[test]
+    fn migration_versions_strictly_increasing_and_unique() {
+        let versions: Vec<i64> = crate::migration::MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        let mut sorted = versions.clone();
+        sorted.sort();
+        assert_eq!(versions, sorted, "迁移必须按版本升序");
+        let mut dedup = versions.clone();
+        dedup.dedup();
+        assert_eq!(versions.len(), dedup.len(), "迁移版本不得重复");
+    }
+
+    #[test]
     fn migrations_apply_and_are_idempotent() {
         let (store, _guard) = open();
-        assert!(store.schema_version().unwrap() >= 14);
+        assert!(store.schema_version().unwrap() >= 15);
         migration::run(&store).unwrap();
         assert_eq!(
             store.schema_version().unwrap(),
