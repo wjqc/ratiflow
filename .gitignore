@@ -12,3 +12,4 @@ internal/web/dist/*
 *.vsix
 *.tsbuildinfo
 .idea/
+target/
