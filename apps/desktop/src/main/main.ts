@@ -245,7 +245,15 @@ function createWindow(): void {
       } catch (error) {
         console.error('[sg-debug] executeJavaScript failed:', String(error));
       }
-    });
+      // 延迟复检：等待异步 project.list/workitem.list 返回后再看真实 UI 状态。
+      setTimeout(async () => {
+        try {
+          const later = await mainWindow!.webContents.executeJavaScript(`(() => ({
+            bodyText: document.body.innerText.slice(0, 160),
+          }))()`);
+          console.error('[sg-debug+5s]', JSON.stringify(later));
+        } catch {}
+      }, 5000);
   }
 }
 
