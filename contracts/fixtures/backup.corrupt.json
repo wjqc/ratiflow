@@ -1,0 +1,11 @@
+{
+  "method": "backup.verify",
+  "backupId": "bk_bad",
+  "verified": false,
+  "problems": [
+    {
+      "code": "BACKUP_CORRUPT",
+      "detail": "snapshot sha256 mismatch"
+    }
+  ]
+}

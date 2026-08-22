@@ -1,0 +1,19 @@
+{
+  "method": "audit.get",
+  "entry": {
+    "seq": 42,
+    "actor": "local",
+    "actorKind": "user",
+    "action": "credentialRef.create",
+    "targetType": "credential_ref",
+    "targetId": "cr_01",
+    "result": "success",
+    "correlationId": "corr_ab12",
+    "beforeSummary": null,
+    "afterSummary": {
+      "hasSecret": true
+    },
+    "metadataRedacted": true,
+    "createdAt": "2026-08-22T10:40:00Z"
+  }
+}

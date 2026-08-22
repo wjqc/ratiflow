@@ -1,155 +1,1941 @@
 {
   "methods": [
-    { "name": "core.version", "params": [], "result": "value" },
-    { "name": "diagnostics.check", "params": [], "result": "value" },
-    { "name": "project.list", "params": [{ "name": "includeArchived", "type": "boolean", "required": false }], "result": "value" },
-    { "name": "project.get", "params": [{ "name": "projectId", "type": "string", "required": true }], "result": "value" },
-    { "name": "project.create", "params": [
-      { "name": "gitlabInstance", "type": "string", "required": true },
-      { "name": "namespace", "type": "string", "required": true },
-      { "name": "project", "type": "string", "required": true },
-      { "name": "defaultBranch", "type": "string", "required": false },
-      { "name": "name", "type": "string", "required": false },
-      { "name": "localRoot", "type": "string", "required": false }
-    ], "result": "value" },
-    { "name": "project.update", "params": [
-      { "name": "projectId", "type": "string", "required": true },
-      { "name": "name", "type": "string", "required": false },
-      { "name": "localRoot", "type": "string", "required": false },
-      { "name": "defaultBranch", "type": "string", "required": false },
-      { "name": "status", "type": "string", "required": false }
-    ], "result": "value" },
-    { "name": "project.archive", "params": [{ "name": "projectId", "type": "string", "required": true }, { "name": "archived", "type": "boolean", "required": false }], "result": "value" },
-    { "name": "project.summary", "params": [{ "name": "projectId", "type": "string", "required": true }], "result": "value" },
-    { "name": "knowledge.list", "params": [{ "name": "projectId", "type": "string", "required": true }], "result": "value" },
-    { "name": "knowledge.create", "params": [
-      { "name": "projectId", "type": "string", "required": true },
-      { "name": "kind", "type": "string", "required": true },
-      { "name": "name", "type": "string", "required": true },
-      { "name": "locator", "type": "string", "required": true }
-    ], "result": "value" },
-    { "name": "knowledge.update", "params": [{ "name": "sourceId", "type": "string", "required": true }, { "name": "enabled", "type": "boolean", "required": false }, { "name": "name", "type": "string", "required": false }], "result": "value" },
-    { "name": "knowledge.remove", "params": [{ "name": "sourceId", "type": "string", "required": true }], "result": "value" },
-    { "name": "knowledge.scan", "params": [{ "name": "sourceId", "type": "string", "required": true }, { "name": "projectRoot", "type": "string", "required": false }], "result": "value" },
-    { "name": "knowledge.search", "params": [{ "name": "projectId", "type": "string", "required": true }, { "name": "query", "type": "string", "required": true }, { "name": "limit", "type": "number", "required": false }], "result": "value" },
-    { "name": "context.preview", "params": [{ "name": "projectId", "type": "string", "required": true }, { "name": "query", "type": "string", "required": true }, { "name": "maxBytes", "type": "number", "required": false }], "result": "value" },
-    { "name": "context.create", "params": [
-      { "name": "projectId", "type": "string", "required": true },
-      { "name": "workItemId", "type": "string", "required": true },
-      { "name": "query", "type": "string", "required": true },
-      { "name": "selectedSources", "type": "array", "required": false }
-    ], "result": "value" },
-    { "name": "attachment.import", "params": [
-      { "name": "workItemId", "type": "string", "required": true },
-      { "name": "filename", "type": "string", "required": true },
-      { "name": "contentBase64", "type": "string", "required": true }
-    ], "result": "value" },
-    { "name": "attachment.list", "params": [{ "name": "workItemId", "type": "string", "required": true }], "result": "value" },
-    { "name": "attachment.parse", "params": [
-      { "name": "attachmentId", "type": "string", "required": true },
-      { "name": "state", "type": "string", "required": true },
-      { "name": "extractedText", "type": "string", "required": false },
-      { "name": "error", "type": "string", "required": false }
-    ], "result": "value" },
-    { "name": "attachment.remove", "params": [{ "name": "attachmentId", "type": "string", "required": true }], "result": "value" },
-    { "name": "workitem.list", "params": [{ "name": "projectId", "type": "string", "required": true }, { "name": "cursor", "type": "string", "required": false }, { "name": "limit", "type": "number", "required": false }], "result": "value" },
-    { "name": "workitem.get", "params": [{ "name": "workItemId", "type": "string", "required": true }], "result": "value" },
-    { "name": "workitem.create", "params": [
-      { "name": "projectId", "type": "string", "required": true },
-      { "name": "title", "type": "string", "required": true },
-      { "name": "description", "type": "string", "required": false },
-      { "name": "gitlabIssueIid", "type": "string", "required": false },
-      { "name": "labels", "type": "array", "required": false }
-    ], "result": "value" },
-    { "name": "workitem.setStage", "params": [
-      { "name": "workItemId", "type": "string", "required": true },
-      { "name": "gate", "type": "string", "required": true },
-      { "name": "state", "type": "string", "required": true },
-      { "name": "inputBaselineSha", "type": "string", "required": false }
-    ], "result": "value" },
-    { "name": "workitem.progress", "params": [{ "name": "workItemId", "type": "string", "required": true }], "result": "value" },
-    { "name": "workitem.documents", "params": [{ "name": "workItemId", "type": "string", "required": true }], "result": "value" },
-    { "name": "workitem.getDocument", "params": [{ "name": "workItemId", "type": "string", "required": true }, { "name": "name", "type": "string", "required": true }], "result": "value" },
-    { "name": "workitem.importDocument", "params": [
-      { "name": "projectId", "type": "string", "required": true },
-      { "name": "filename", "type": "string", "required": true },
-      { "name": "content", "type": "string", "required": true }
-    ], "result": "value" },
-    { "name": "workitem.importIssue", "params": [
-      { "name": "projectId", "type": "string", "required": true },
-      { "name": "gitlabProjectId", "type": "string", "required": true },
-      { "name": "issueIid", "type": "string", "required": true }
-    ], "result": "value" },
-    { "name": "artifact.list", "params": [{ "name": "workItemId", "type": "string", "required": true }], "result": "value" },
-    { "name": "artifact.create", "params": [{ "name": "workItemId", "type": "string", "required": true }, { "name": "kind", "type": "string", "required": true }, { "name": "title", "type": "string", "required": true }], "result": "value" },
-    { "name": "artifact.createDraft", "params": [{ "name": "artifactId", "type": "string", "required": true }, { "name": "content", "type": "string", "required": true }], "result": "value" },
-    { "name": "artifact.updateDraft", "params": [{ "name": "revisionId", "type": "string", "required": true }, { "name": "etag", "type": "string", "required": true }, { "name": "content", "type": "string", "required": true }], "result": "value" },
-    { "name": "artifact.listRevisions", "params": [{ "name": "artifactId", "type": "string", "required": true }], "result": "value" },
-    { "name": "artifact.revisionContent", "params": [{ "name": "revisionId", "type": "string", "required": true }], "result": "value" },
-    { "name": "artifact.addReview", "params": [
-      { "name": "revisionId", "type": "string", "required": true },
-      { "name": "reviewer", "type": "string", "required": true },
-      { "name": "verdict", "type": "string", "required": true },
-      { "name": "comment", "type": "string", "required": false },
-      { "name": "gitlabMrIid", "type": "string", "required": false }
-    ], "result": "value" },
-    { "name": "artifact.freezeBaseline", "params": [
-      { "name": "workItemId", "type": "string", "required": true },
-      { "name": "gate", "type": "string", "required": true },
-      { "name": "revisionIds", "type": "array", "required": true },
-      { "name": "gitlabCommitSha", "type": "string", "required": false }
-    ], "result": "value" },
-    { "name": "agent.run", "params": [
-      { "name": "workItemId", "type": "string", "required": true },
-      { "name": "goal", "type": "string", "required": true },
-      { "name": "contextManifestId", "type": "string", "required": true },
-      { "name": "toolAllowlist", "type": "array", "required": false },
-      { "name": "idempotencyKey", "type": "string", "required": false },
-      { "name": "budget", "type": "object", "required": false }
-    ], "result": "value" },
-    { "name": "agent.get", "params": [{ "name": "runId", "type": "string", "required": true }], "result": "value" },
-    { "name": "agent.cancel", "params": [{ "name": "runId", "type": "string", "required": true }], "result": "value" },
-    { "name": "agent.proposals", "params": [{ "name": "runId", "type": "string", "required": true }], "result": "value" },
-    { "name": "gate.evaluate", "params": [{ "name": "workItemId", "type": "string", "required": true }, { "name": "gate", "type": "string", "required": true }], "result": "value" },
-    { "name": "approval.list", "params": [{ "name": "limit", "type": "number", "required": false }], "result": "value" },
-    { "name": "approval.decide", "params": [
-      { "name": "approvalId", "type": "string", "required": true },
-      { "name": "decision", "type": "string", "required": true },
-      { "name": "decidedBy", "type": "string", "required": true },
-      { "name": "reason", "type": "string", "required": false }
-    ], "result": "value" },
-    { "name": "approval.listByWorkItem", "params": [{ "name": "workItemId", "type": "string", "required": true }], "result": "value" },
-    { "name": "evidence.list", "params": [{ "name": "workItemId", "type": "string", "required": true }, { "name": "gate", "type": "string", "required": false }], "result": "value" },
-    { "name": "evidence.record", "params": [
-      { "name": "workItemId", "type": "string", "required": true },
-      { "name": "gate", "type": "string", "required": true },
-      { "name": "kind", "type": "string", "required": true },
-      { "name": "title", "type": "string", "required": false },
-      { "name": "content", "type": "string", "required": false },
-      { "name": "payload", "type": "string", "required": false },
-      { "name": "source", "type": "string", "required": false }
-    ], "result": "value" },
-    { "name": "evidence.verify", "params": [{ "name": "evidenceId", "type": "string", "required": true }, { "name": "verifiedBy", "type": "string", "required": true }], "result": "value" },
-    { "name": "passport.issue", "params": [{ "name": "workItemId", "type": "string", "required": true }, { "name": "sharedSummary", "type": "string", "required": false }], "result": "value" },
-    { "name": "passport.latest", "params": [{ "name": "workItemId", "type": "string", "required": true }], "result": "value" },
-    { "name": "deployment.create", "params": [{ "name": "workItemId", "type": "string", "required": true }, { "name": "plan", "type": "object", "required": true }], "result": "value" },
-    { "name": "deployment.get", "params": [{ "name": "deploymentId", "type": "string", "required": true }], "result": "value" },
-    { "name": "deployment.submit", "params": [{ "name": "deploymentId", "type": "string", "required": true }], "result": "value" },
-    { "name": "deployment.deploy", "params": [{ "name": "deploymentId", "type": "string", "required": true }], "result": "value" },
-    { "name": "deployment.verify", "params": [{ "name": "deploymentId", "type": "string", "required": true }], "result": "value" },
-    { "name": "deployment.rollback", "params": [{ "name": "deploymentId", "type": "string", "required": true }], "result": "value" },
-    { "name": "timeline.snapshot", "params": [{ "name": "workItemId", "type": "string", "required": false }, { "name": "afterSeq", "type": "number", "required": false }], "result": "value" },
-    { "name": "backup.create", "params": [], "result": "value" },
-    { "name": "audit.list", "params": [{ "name": "afterSeq", "type": "number", "required": false }, { "name": "limit", "type": "number", "required": false }], "result": "value" }
+    {
+      "name": "core.version",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "diagnostics.check",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "project.list",
+      "params": [
+        {
+          "name": "includeArchived",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "project.get",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "project.create",
+      "params": [
+        {
+          "name": "gitlabInstance",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "namespace",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "defaultBranch",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "localRoot",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "project.update",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "localRoot",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "defaultBranch",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "project.archive",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "archived",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "project.summary",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.list",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.create",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "locator",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.update",
+      "params": [
+        {
+          "name": "sourceId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.remove",
+      "params": [
+        {
+          "name": "sourceId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.scan",
+      "params": [
+        {
+          "name": "sourceId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "projectRoot",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.search",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "context.preview",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "maxBytes",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "context.create",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "selectedSources",
+          "type": "array",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "attachment.import",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "filename",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "contentBase64",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "attachment.list",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "attachment.parse",
+      "params": [
+        {
+          "name": "attachmentId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "extractedText",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "error",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "attachment.remove",
+      "params": [
+        {
+          "name": "attachmentId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.list",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.get",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.create",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "gitlabIssueIid",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "labels",
+          "type": "array",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.setStage",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "inputBaselineSha",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.progress",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.documents",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.getDocument",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.importDocument",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "filename",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.importIssue",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gitlabProjectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "issueIid",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "artifact.list",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "artifact.create",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "artifact.createDraft",
+      "params": [
+        {
+          "name": "artifactId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "artifact.updateDraft",
+      "params": [
+        {
+          "name": "revisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "etag",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "artifact.listRevisions",
+      "params": [
+        {
+          "name": "artifactId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "artifact.revisionContent",
+      "params": [
+        {
+          "name": "revisionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "artifact.addReview",
+      "params": [
+        {
+          "name": "revisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reviewer",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "verdict",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "comment",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "gitlabMrIid",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "artifact.freezeBaseline",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "revisionIds",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "gitlabCommitSha",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agent.run",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "goal",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "contextManifestId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "toolAllowlist",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "budget",
+          "type": "object",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agent.get",
+      "params": [
+        {
+          "name": "runId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agent.cancel",
+      "params": [
+        {
+          "name": "runId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agent.proposals",
+      "params": [
+        {
+          "name": "runId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.evaluate",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "approval.list",
+      "params": [
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "approval.decide",
+      "params": [
+        {
+          "name": "approvalId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "approval.listByWorkItem",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "evidence.list",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "evidence.record",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "payload",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "source",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "evidence.verify",
+      "params": [
+        {
+          "name": "evidenceId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "verifiedBy",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "passport.issue",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "sharedSummary",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "passport.latest",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "deployment.create",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "plan",
+          "type": "object",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "deployment.get",
+      "params": [
+        {
+          "name": "deploymentId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "deployment.submit",
+      "params": [
+        {
+          "name": "deploymentId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "deployment.deploy",
+      "params": [
+        {
+          "name": "deploymentId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "deployment.verify",
+      "params": [
+        {
+          "name": "deploymentId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "deployment.rollback",
+      "params": [
+        {
+          "name": "deploymentId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "timeline.snapshot",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "afterSeq",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "backup.create",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "audit.list",
+      "params": [
+        {
+          "name": "afterSeq",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "settings.summary",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "settings.get",
+      "params": [
+        {
+          "name": "scope",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "keys",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "settings.update",
+      "params": [
+        {
+          "name": "scope",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "patches",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "expectedRevisions",
+          "type": "object",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "settings.effective",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "keys",
+          "type": "array",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "modelProfile.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "modelProfile.get",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "modelProfile.create",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "providerKind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "baseUrl",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "defaultModel",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "capabilities",
+          "type": "object",
+          "required": false
+        },
+        {
+          "name": "limits",
+          "type": "object",
+          "required": false
+        },
+        {
+          "name": "dataPolicy",
+          "type": "object",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "modelProfile.update",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "baseUrl",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "defaultModel",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "limits",
+          "type": "object",
+          "required": false
+        },
+        {
+          "name": "dataPolicy",
+          "type": "object",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "modelProfile.remove",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "modelProfile.test",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "modelProfile.syncModels",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "modelRoute.get",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "modelRoute.update",
+      "params": [
+        {
+          "name": "route",
+          "type": "object",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "toolPolicy.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "toolPolicy.update",
+      "params": [
+        {
+          "name": "toolId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "risk",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "requiresApproval",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "network",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "toolPolicy.effective",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "executionProfile.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "executionProfile.create",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limits",
+          "type": "object",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "executionProfile.update",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "limits",
+          "type": "object",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "executionProfile.remove",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gitlabProfile.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "gitlabProfile.create",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "baseUrl",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gitlabProfile.update",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "baseUrl",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gitlabProfile.remove",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gitlabProfile.test",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gitlabProfile.capabilities",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "sshTarget.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "sshTarget.get",
+      "params": [
+        {
+          "name": "targetId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "sshTarget.create",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "host",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "port",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "user",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "remoteDir",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "jumpHost",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "sshTarget.update",
+      "params": [
+        {
+          "name": "targetId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "host",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "port",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "user",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "remoteDir",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "jumpHost",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "sshTarget.remove",
+      "params": [
+        {
+          "name": "targetId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "sshTarget.test",
+      "params": [
+        {
+          "name": "targetId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "sshTarget.acceptHostKey",
+      "params": [
+        {
+          "name": "targetId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "fingerprint",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "credentialRef.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "credentialRef.create",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "provider",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "secret",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "scope",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "credentialRef.replace",
+      "params": [
+        {
+          "name": "refId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "secret",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "credentialRef.remove",
+      "params": [
+        {
+          "name": "refId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "force",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "credentialRef.verify",
+      "params": [
+        {
+          "name": "refId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "backup.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "backup.verify",
+      "params": [
+        {
+          "name": "backupId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "backup.restore",
+      "params": [
+        {
+          "name": "backupId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "backup.delete",
+      "params": [
+        {
+          "name": "backupId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "audit.get",
+      "params": [
+        {
+          "name": "entryId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "audit.export",
+      "params": [
+        {
+          "name": "filters",
+          "type": "object",
+          "required": false
+        },
+        {
+          "name": "afterSeq",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "logs.list",
+      "params": [
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "logs.exportDiagnosticBundle",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "operation.get",
+      "params": [
+        {
+          "name": "operationId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.settings.get",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.settings.update",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "settings",
+          "type": "object",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.searchV2",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "includeTests",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "project.inspectRoot",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    }
   ],
   "events": [
-    "project.created", "workitem.created", "stage.passed", "stage.running", "stage.stale",
-    "gate.evaluated", "baseline.frozen", "artifact.reviewed", "approval.requested",
-    "approval.approved", "approval.rejected", "evidence.recorded", "passport.issued",
-    "attachment.imported", "knowledge.scanned", "tool.proposed", "run.completed_execution",
-    "run.failed", "run.cancelled", "deployment.draft", "deployment.awaiting_approval",
-    "deployment.approved", "deployment.deploying", "deployment.awaiting_verification",
-    "deployment.verified", "deployment.verification_failed", "deployment.deploy_failed",
-    "deployment.rolling_back", "deployment.rolled_back", "deployment.rollback_failed"
+    "approval.approved",
+    "approval.rejected",
+    "approval.requested",
+    "artifact.reviewed",
+    "attachment.imported",
+    "backup.changed",
+    "baseline.frozen",
+    "credentialRef.changed",
+    "deployment.approved",
+    "deployment.awaiting_approval",
+    "deployment.awaiting_verification",
+    "deployment.deploy_failed",
+    "deployment.deploying",
+    "deployment.draft",
+    "deployment.rollback_failed",
+    "deployment.rolled_back",
+    "deployment.rolling_back",
+    "deployment.verification_failed",
+    "deployment.verified",
+    "diagnostics.completed",
+    "evidence.recorded",
+    "executionProfile.changed",
+    "gate.evaluated",
+    "gitlabProfile.changed",
+    "knowledge.scanned",
+    "knowledge.settingsChanged",
+    "modelProfile.changed",
+    "modelRoute.changed",
+    "operation.progress",
+    "passport.issued",
+    "policy.changed",
+    "project.changed",
+    "project.created",
+    "run.cancelled",
+    "run.completed_execution",
+    "run.failed",
+    "settings.changed",
+    "sshTarget.changed",
+    "stage.passed",
+    "stage.running",
+    "stage.stale",
+    "tool.proposed",
+    "workitem.created"
   ]
 }

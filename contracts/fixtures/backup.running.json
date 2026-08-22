@@ -1,0 +1,15 @@
+{
+  "method": "backup.create",
+  "operation": {
+    "operationId": "op_bk01",
+    "kind": "backup.create",
+    "status": "running",
+    "progress": {
+      "completed": 2,
+      "total": 5,
+      "labelKey": "backup.step.objects"
+    },
+    "cancellable": false,
+    "startedAt": "2026-08-22T10:30:00Z"
+  }
+}

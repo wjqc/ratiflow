@@ -1,0 +1,8 @@
+{
+  "code": "REVISION_CONFLICT",
+  "message": "设置已被其他会话修改",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_ex01",
+  "details": null
+}

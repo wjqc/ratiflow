@@ -61,7 +61,58 @@ export type RpcMethodName =
   | 'deployment.rollback'
   | 'timeline.snapshot'
   | 'backup.create'
-  | 'audit.list';
+  | 'audit.list'
+  | 'settings.summary'
+  | 'settings.get'
+  | 'settings.update'
+  | 'settings.effective'
+  | 'modelProfile.list'
+  | 'modelProfile.get'
+  | 'modelProfile.create'
+  | 'modelProfile.update'
+  | 'modelProfile.remove'
+  | 'modelProfile.test'
+  | 'modelProfile.syncModels'
+  | 'modelRoute.get'
+  | 'modelRoute.update'
+  | 'toolPolicy.list'
+  | 'toolPolicy.update'
+  | 'toolPolicy.effective'
+  | 'executionProfile.list'
+  | 'executionProfile.create'
+  | 'executionProfile.update'
+  | 'executionProfile.remove'
+  | 'gitlabProfile.list'
+  | 'gitlabProfile.create'
+  | 'gitlabProfile.update'
+  | 'gitlabProfile.remove'
+  | 'gitlabProfile.test'
+  | 'gitlabProfile.capabilities'
+  | 'sshTarget.list'
+  | 'sshTarget.get'
+  | 'sshTarget.create'
+  | 'sshTarget.update'
+  | 'sshTarget.remove'
+  | 'sshTarget.test'
+  | 'sshTarget.acceptHostKey'
+  | 'credentialRef.list'
+  | 'credentialRef.create'
+  | 'credentialRef.replace'
+  | 'credentialRef.remove'
+  | 'credentialRef.verify'
+  | 'backup.list'
+  | 'backup.verify'
+  | 'backup.restore'
+  | 'backup.delete'
+  | 'audit.get'
+  | 'audit.export'
+  | 'logs.list'
+  | 'logs.exportDiagnosticBundle'
+  | 'operation.get'
+  | 'knowledge.settings.get'
+  | 'knowledge.settings.update'
+  | 'knowledge.searchV2'
+  | 'project.inspectRoot';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -123,39 +174,103 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'timeline.snapshot',
   'backup.create',
   'audit.list',
+  'settings.summary',
+  'settings.get',
+  'settings.update',
+  'settings.effective',
+  'modelProfile.list',
+  'modelProfile.get',
+  'modelProfile.create',
+  'modelProfile.update',
+  'modelProfile.remove',
+  'modelProfile.test',
+  'modelProfile.syncModels',
+  'modelRoute.get',
+  'modelRoute.update',
+  'toolPolicy.list',
+  'toolPolicy.update',
+  'toolPolicy.effective',
+  'executionProfile.list',
+  'executionProfile.create',
+  'executionProfile.update',
+  'executionProfile.remove',
+  'gitlabProfile.list',
+  'gitlabProfile.create',
+  'gitlabProfile.update',
+  'gitlabProfile.remove',
+  'gitlabProfile.test',
+  'gitlabProfile.capabilities',
+  'sshTarget.list',
+  'sshTarget.get',
+  'sshTarget.create',
+  'sshTarget.update',
+  'sshTarget.remove',
+  'sshTarget.test',
+  'sshTarget.acceptHostKey',
+  'credentialRef.list',
+  'credentialRef.create',
+  'credentialRef.replace',
+  'credentialRef.remove',
+  'credentialRef.verify',
+  'backup.list',
+  'backup.verify',
+  'backup.restore',
+  'backup.delete',
+  'audit.get',
+  'audit.export',
+  'logs.list',
+  'logs.exportDiagnosticBundle',
+  'operation.get',
+  'knowledge.settings.get',
+  'knowledge.settings.update',
+  'knowledge.searchV2',
+  'project.inspectRoot',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
+  'approval.approved',
+  'approval.rejected',
+  'approval.requested',
+  'artifact.reviewed',
+  'attachment.imported',
+  'backup.changed',
+  'baseline.frozen',
+  'credentialRef.changed',
+  'deployment.approved',
+  'deployment.awaiting_approval',
+  'deployment.awaiting_verification',
+  'deployment.deploy_failed',
+  'deployment.deploying',
+  'deployment.draft',
+  'deployment.rollback_failed',
+  'deployment.rolled_back',
+  'deployment.rolling_back',
+  'deployment.verification_failed',
+  'deployment.verified',
+  'diagnostics.completed',
+  'evidence.recorded',
+  'executionProfile.changed',
+  'gate.evaluated',
+  'gitlabProfile.changed',
+  'knowledge.scanned',
+  'knowledge.settingsChanged',
+  'modelProfile.changed',
+  'modelRoute.changed',
+  'operation.progress',
+  'passport.issued',
+  'policy.changed',
+  'project.changed',
   'project.created',
-  'workitem.created',
+  'run.cancelled',
+  'run.completed_execution',
+  'run.failed',
+  'settings.changed',
+  'sshTarget.changed',
   'stage.passed',
   'stage.running',
   'stage.stale',
-  'gate.evaluated',
-  'baseline.frozen',
-  'artifact.reviewed',
-  'approval.requested',
-  'approval.approved',
-  'approval.rejected',
-  'evidence.recorded',
-  'passport.issued',
-  'attachment.imported',
-  'knowledge.scanned',
   'tool.proposed',
-  'run.completed_execution',
-  'run.failed',
-  'run.cancelled',
-  'deployment.draft',
-  'deployment.awaiting_approval',
-  'deployment.approved',
-  'deployment.deploying',
-  'deployment.awaiting_verification',
-  'deployment.verified',
-  'deployment.verification_failed',
-  'deployment.deploy_failed',
-  'deployment.rolling_back',
-  'deployment.rolled_back',
-  'deployment.rollback_failed',
+  'workitem.created',
 ] as const;
 
 export interface TimelineEvent {
@@ -470,4 +585,265 @@ export type BackupCreateParams = Record<string, never>;
 export interface AuditListParams {
   afterSeq?: number;
   limit?: number;
+}
+
+export type SettingsSummaryParams = Record<string, never>;
+
+export interface SettingsGetParams {
+  scope: string;
+  keys?: unknown[];
+  projectId?: string;
+}
+
+export interface SettingsUpdateParams {
+  scope: string;
+  patches: unknown[];
+  projectId?: string;
+  expectedRevisions?: unknown;
+}
+
+export interface SettingsEffectiveParams {
+  projectId?: string;
+  keys?: unknown[];
+}
+
+export type ModelProfileListParams = Record<string, never>;
+
+export interface ModelProfileGetParams {
+  profileId: string;
+}
+
+export interface ModelProfileCreateParams {
+  name: string;
+  providerKind: string;
+  baseUrl?: string;
+  credentialRefId?: string;
+  defaultModel?: string;
+  capabilities?: unknown;
+  limits?: unknown;
+  dataPolicy?: unknown;
+}
+
+export interface ModelProfileUpdateParams {
+  profileId: string;
+  expectedRevision: number;
+  name?: string;
+  baseUrl?: string;
+  credentialRefId?: string;
+  defaultModel?: string;
+  limits?: unknown;
+  dataPolicy?: unknown;
+}
+
+export interface ModelProfileRemoveParams {
+  profileId: string;
+  expectedRevision: number;
+}
+
+export interface ModelProfileTestParams {
+  profileId: string;
+  credentialRefId?: string;
+}
+
+export interface ModelProfileSyncModelsParams {
+  profileId: string;
+}
+
+export type ModelRouteGetParams = Record<string, never>;
+
+export interface ModelRouteUpdateParams {
+  route: unknown;
+  expectedRevision: number;
+}
+
+export type ToolPolicyListParams = Record<string, never>;
+
+export interface ToolPolicyUpdateParams {
+  toolId: string;
+  expectedRevision: number;
+  enabled?: boolean;
+  risk?: string;
+  requiresApproval?: boolean;
+  network?: string;
+  projectId?: string;
+}
+
+export interface ToolPolicyEffectiveParams {
+  projectId?: string;
+}
+
+export type ExecutionProfileListParams = Record<string, never>;
+
+export interface ExecutionProfileCreateParams {
+  name: string;
+  mode: string;
+  limits?: unknown;
+}
+
+export interface ExecutionProfileUpdateParams {
+  profileId: string;
+  expectedRevision: number;
+  name?: string;
+  mode?: string;
+  limits?: unknown;
+}
+
+export interface ExecutionProfileRemoveParams {
+  profileId: string;
+  expectedRevision: number;
+}
+
+export type GitlabProfileListParams = Record<string, never>;
+
+export interface GitlabProfileCreateParams {
+  name: string;
+  baseUrl: string;
+  credentialRefId?: string;
+}
+
+export interface GitlabProfileUpdateParams {
+  profileId: string;
+  expectedRevision: number;
+  name?: string;
+  baseUrl?: string;
+  credentialRefId?: string;
+}
+
+export interface GitlabProfileRemoveParams {
+  profileId: string;
+  expectedRevision: number;
+}
+
+export interface GitlabProfileTestParams {
+  profileId: string;
+  credentialRefId?: string;
+}
+
+export interface GitlabProfileCapabilitiesParams {
+  profileId: string;
+}
+
+export type SshTargetListParams = Record<string, never>;
+
+export interface SshTargetGetParams {
+  targetId: string;
+}
+
+export interface SshTargetCreateParams {
+  name: string;
+  host: string;
+  user: string;
+  port?: number;
+  remoteDir?: string;
+  credentialRefId?: string;
+  jumpHost?: string;
+}
+
+export interface SshTargetUpdateParams {
+  targetId: string;
+  expectedRevision: number;
+  name?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  remoteDir?: string;
+  credentialRefId?: string;
+  jumpHost?: string;
+}
+
+export interface SshTargetRemoveParams {
+  targetId: string;
+  expectedRevision: number;
+}
+
+export interface SshTargetTestParams {
+  targetId: string;
+}
+
+export interface SshTargetAcceptHostKeyParams {
+  targetId: string;
+  fingerprint: string;
+  expectedRevision?: number;
+}
+
+export type CredentialRefListParams = Record<string, never>;
+
+export interface CredentialRefCreateParams {
+  name: string;
+  kind: string;
+  secret: string;
+  provider?: string;
+  scope?: string;
+  projectId?: string;
+}
+
+export interface CredentialRefReplaceParams {
+  refId: string;
+  secret: string;
+  expectedRevision: number;
+}
+
+export interface CredentialRefRemoveParams {
+  refId: string;
+  expectedRevision: number;
+  force?: boolean;
+}
+
+export interface CredentialRefVerifyParams {
+  refId: string;
+}
+
+export type BackupListParams = Record<string, never>;
+
+export interface BackupVerifyParams {
+  backupId: string;
+}
+
+export interface BackupRestoreParams {
+  backupId: string;
+}
+
+export interface BackupDeleteParams {
+  backupId: string;
+}
+
+export interface AuditGetParams {
+  entryId: string;
+}
+
+export interface AuditExportParams {
+  filters?: unknown;
+  afterSeq?: number;
+  limit?: number;
+}
+
+export interface LogsListParams {
+  limit?: number;
+}
+
+export type LogsExportDiagnosticBundleParams = Record<string, never>;
+
+export interface OperationGetParams {
+  operationId: string;
+}
+
+export interface KnowledgeSettingsGetParams {
+  projectId?: string;
+}
+
+export interface KnowledgeSettingsUpdateParams {
+  settings: unknown;
+  expectedRevision: number;
+  projectId?: string;
+}
+
+export interface KnowledgeSearchV2Params {
+  projectId: string;
+  query: string;
+  includeTests?: boolean;
+  limit?: number;
+}
+
+export interface ProjectInspectRootParams {
+  path: string;
 }

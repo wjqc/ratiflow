@@ -1,0 +1,8 @@
+{
+  "code": "HOST_KEY_FIRST_USE",
+  "message": "首次连接需确认主机指纹",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_ex01",
+  "details": null
+}

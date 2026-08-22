@@ -1,0 +1,47 @@
+{
+  "method": "settings.summary",
+  "overallStatus": "ready",
+  "checkedAt": "2026-08-22T10:14:23Z",
+  "blockers": [],
+  "components": [
+    {
+      "id": "model",
+      "status": "ready",
+      "profileCount": 1,
+      "managedOnly": false
+    },
+    {
+      "id": "gitlab",
+      "status": "ready",
+      "profileCount": 1,
+      "managedOnly": false
+    },
+    {
+      "id": "ssh",
+      "status": "ready",
+      "targetCount": 1
+    },
+    {
+      "id": "knowledge",
+      "status": "ready",
+      "sourceCount": 2
+    }
+  ],
+  "dataSafety": {
+    "credentialRefCount": 2,
+    "lastBackup": {
+      "id": "bk_01",
+      "createdAt": "2026-08-22T09:00:00Z",
+      "verified": true
+    },
+    "auditEventsLast7Days": 18
+  },
+  "recentChanges": [
+    {
+      "key": "model.route",
+      "revision": 4,
+      "updatedAt": "2026-08-22T09:58:11Z",
+      "updatedBy": "local"
+    }
+  ]
+}

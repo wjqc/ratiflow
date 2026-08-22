@@ -1,0 +1,8 @@
+{
+  "code": "MODEL_CAPABILITY_MISSING",
+  "message": "当前 Profile 不支持所需能力",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_ex01",
+  "details": null
+}

@@ -1,0 +1,30 @@
+{
+  "method": "gitlabProfile.test",
+  "profileId": "glp_01",
+  "status": "error",
+  "startedAt": "2026-08-22T10:20:00Z",
+  "durationMs": 1834,
+  "steps": [
+    {
+      "name": "resolve",
+      "status": "passed",
+      "durationMs": 41,
+      "errorCode": null,
+      "detail": null
+    },
+    {
+      "name": "tls",
+      "status": "passed",
+      "durationMs": 122,
+      "errorCode": null,
+      "detail": null
+    },
+    {
+      "name": "auth",
+      "status": "failed",
+      "durationMs": 1671,
+      "errorCode": "CREDENTIAL_AUTH_FAILED",
+      "detail": "HTTP 401"
+    }
+  ]
+}

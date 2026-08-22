@@ -1,0 +1,26 @@
+{
+  "method": "sshTarget.test",
+  "targetId": "ssh_01",
+  "status": "error",
+  "durationMs": 870,
+  "steps": [
+    {
+      "name": "network",
+      "status": "passed",
+      "durationMs": 11,
+      "errorCode": null,
+      "detail": null
+    },
+    {
+      "name": "host_key",
+      "status": "failed",
+      "durationMs": 859,
+      "errorCode": "HOST_KEY_CHANGED",
+      "detail": {
+        "expectedFingerprint": "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        "actualFingerprint": "SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+        "blocked": true
+      }
+    }
+  ]
+}

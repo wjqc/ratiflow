@@ -1,0 +1,32 @@
+{
+  "method": "settings.summary",
+  "overallStatus": "degraded",
+  "checkedAt": "2026-08-22T10:14:23Z",
+  "blockers": [
+    {
+      "id": "gitlab_auth_failed",
+      "severity": "degraded",
+      "scope": "profile:glp_01",
+      "capabilities": [
+        "issue_import",
+        "mr"
+      ],
+      "titleKey": "settings.blocker.gitlabAuth",
+      "targetRoute": "/settings/gitlab"
+    }
+  ],
+  "components": [
+    {
+      "id": "gitlab",
+      "status": "degraded",
+      "profileCount": 1,
+      "managedOnly": false
+    }
+  ],
+  "dataSafety": {
+    "credentialRefCount": 1,
+    "lastBackup": null,
+    "auditEventsLast7Days": 12
+  },
+  "recentChanges": []
+}

@@ -1,0 +1,8 @@
+{
+  "code": "MANAGED_READ_ONLY",
+  "message": "该配置由环境策略管理",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_ex01",
+  "details": null
+}

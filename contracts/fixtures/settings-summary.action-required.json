@@ -1,0 +1,31 @@
+{
+  "method": "settings.summary",
+  "overallStatus": "action_required",
+  "checkedAt": "2026-08-22T10:14:23Z",
+  "blockers": [
+    {
+      "id": "model_not_configured",
+      "severity": "blocking",
+      "scope": "global",
+      "capabilities": [
+        "agent_run"
+      ],
+      "titleKey": "settings.blocker.modelMissing",
+      "targetRoute": "/settings/models"
+    }
+  ],
+  "components": [
+    {
+      "id": "model",
+      "status": "error",
+      "profileCount": 0,
+      "managedOnly": false
+    }
+  ],
+  "dataSafety": {
+    "credentialRefCount": 0,
+    "lastBackup": null,
+    "auditEventsLast7Days": 3
+  },
+  "recentChanges": []
+}
