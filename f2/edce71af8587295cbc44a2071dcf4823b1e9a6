@@ -1,0 +1,84 @@
+apps/desktop/src/main/main.ts
+  s_912ffb5b75230f::t_fa610363edfba3 6
+  s_912ffb5b75230f::t_c457bae5faf3d5 309-327
+apps/desktop/vitest.config.ts
+  s_912ffb5b75230f::t_100ca621750d8b 9
+apps/desktop/src/renderer/styles/tokens.css
+  s_912ffb5b75230f::t_d9542aad72d603 48-70
+  s_912ffb5b75230f::t_ce04ec8fa3b65c 1066-1197
+  s_912ffb5b75230f::t_566afff2eb31c6 1038
+  s_912ffb5b75230f::t_04f0710db4b0fc 13-14
+apps/desktop/src/renderer/src/app/settings/UpdatesPage.tsx
+  s_912ffb5b75230f::t_2d8ba66a191412 1-9,11-76,78-97
+  s_912ffb5b75230f::t_8bc7a555242084 10
+  s_912ffb5b75230f::t_5dc80fdb7c02d9 77
+apps/desktop/src/renderer/src/app/settings/BackupPage.tsx
+  s_912ffb5b75230f::t_f5f7b875dbdcdf 1-119
+apps/desktop/src/renderer/src/rpc/client.ts
+  s_912ffb5b75230f::t_697545b9d1dbfe 9-11
+apps/desktop/src/preload/preload.ts
+  s_912ffb5b75230f::t_91321b39ce7034 33-42
+apps/desktop/src/renderer/src/app/settings/components/ContractPending.tsx
+  s_912ffb5b75230f::t_388364d89ff803 1-47
+apps/desktop/src/renderer/src/app/settings/PendingPages.tsx
+  s_912ffb5b75230f::t_9924f642aa1064 1-161
+apps/desktop/src/renderer/src/app/settings/settings.test.ts
+  s_912ffb5b75230f::t_e1df349e172053 1-101
+apps/desktop/src/renderer/src/app/settings/AuditPage.tsx
+  s_912ffb5b75230f::t_94c6c80ae8e204 1-230
+apps/desktop/src/renderer/src/app/settings/SettingsShell.tsx
+  s_912ffb5b75230f::t_1f646ad0be388c 1-114
+apps/desktop/src/renderer/src/app/settings/LogsPage.tsx
+  s_912ffb5b75230f::t_7375fc7431220f 1-68
+apps/desktop/src/renderer/src/app/settings/ProjectsPage.tsx
+  s_912ffb5b75230f::t_9900453685d943 3
+  s_912ffb5b75230f::t_61a7c60c085d58 1-2,4-30,32-50,52-349
+  s_912ffb5b75230f::t_f3b15c1ae55731 51
+  s_912ffb5b75230f::t_9468d88c315522 31
+apps/desktop/src/renderer/src/app/settings/DiagnosticsPage.tsx
+  s_912ffb5b75230f::t_40e7b9c5851975 1-136
+apps/desktop/src/renderer/src/app/settings/types.ts
+  s_912ffb5b75230f::t_40415a4f73ca24 1-67
+apps/desktop/src/renderer/src/app/AppShell.tsx
+  s_912ffb5b75230f::t_81e3889ee871e0 204
+  s_912ffb5b75230f::t_3cd5cfa69801f6 107-133
+  s_912ffb5b75230f::t_e0f75827886e58 237,242
+  s_912ffb5b75230f::t_35987c3f14047e 9-10,23-59,62,77-81
+apps/desktop/src/renderer/src/app/settings/OverviewPage.tsx
+  s_912ffb5b75230f::t_45e552ba3bda45 1-2,12-202,204-219
+  s_912ffb5b75230f::t_0744533e718a31 203
+  s_912ffb5b75230f::t_694c6f4831afe2 4-11
+  s_912ffb5b75230f::t_18ba016439ad92 3
+docs/dev-notes/2026-08-22-settings-center.md
+  s_912ffb5b75230f::t_13a4280a028277 18-22,25-29,32-33,36,39-40,43-45
+  s_912ffb5b75230f::t_52da91ebc08afb 60,62-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "f2edce71af8587295cbc44a2071dcf4823b1e9a6",
+  "prompts": {},
+  "sessions": {
+    "s_912ffb5b75230f": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a89935b7fbc3f178f693fdc",
+        "model": "kimi-k3"
+      },
+      "human_author": "wenjian3 <wenjian3@asiainfo.com>",
+      "custom_attributes": {
+        "source_scene": "agent",
+        "external_session_id": "6a89935b7fbc3f178f693fdc",
+        "tool_use_id": "6a8999867fbc3f178f69412b",
+        "dedupe_key": "6a89935b7fbc3f178f693fdc:6a8999867fbc3f178f69412b:afterEdit:1813550e",
+        "session_id": "6a89935b7fbc3f178f693fdc",
+        "client_type": "ide",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "tool_type": "builtin",
+        "runtime_client": "trae-tob-git-ai",
+        "operation_id": "6a8999867fbc3f178f69412b",
+        "edit_kind": "file_edit"
+      }
+    }
+  }
+}
