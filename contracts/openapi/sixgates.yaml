@@ -166,6 +166,32 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/WorkItem' }
         '422': { $ref: '#/components/responses/Problem' }
+  /workitems/import-issue:
+    post:
+      tags: [workitems]
+      operationId: importIssue
+      description: 从 GitLab Issue 导入创建工作项（GitLab 未配置返回 503 诊断）
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectId, issueIid, gitlabProjectId]
+              properties:
+                projectId: { type: string }
+                issueIid: { type: string }
+                gitlabProjectId: { type: string, description: GitLab 数字项目 ID }
+      responses:
+        '201':
+          description: 已导入（含 Issue 标题/正文/labels）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkItem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        '502': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
   /workitems/{id}:
     get:
       tags: [workitems]
@@ -312,6 +338,19 @@ paths:
               schema: { $ref: '#/components/schemas/Revision' }
         '412': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
+  /revisions/{id}/content:
+    get:
+      tags: [artifacts]
+      operationId: getRevisionContent
+      description: 修订正文（草稿编辑回显）
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 正文（text/plain）
+          content:
+            text/plain:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Problem' }
   /revisions/{id}/reviews:
     post:
       tags: [artifacts]

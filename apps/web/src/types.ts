@@ -99,6 +99,30 @@ export interface DeploymentInfo {
   state: string;
 }
 
+export interface RevisionInfo {
+  id: string;
+  artifactId: string;
+  revNo: number;
+  contentSha256: string;
+  size: number;
+  status: 'draft' | 'in_review' | 'frozen' | 'superseded';
+  etag: string;
+  createdAt: string;
+}
+
+export interface AgentRunInfo {
+  id: string;
+  goal: string;
+  status: 'queued' | 'running' | 'paused' | 'completed_execution' | 'failed' | 'cancelled';
+  result: string;
+}
+
+export const riskLabels: Record<string, string> = {
+  low: '低风险',
+  medium: '中风险',
+  high: '高风险',
+};
+
 export const gateLabels: Record<GateName, string> = {
   requirements: '需求关',
   design: '方案关',
