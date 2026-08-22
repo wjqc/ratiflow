@@ -790,6 +790,7 @@ dependencies = [
  "sg-policy",
  "sg-project",
  "sg-protocol",
+ "sg-settings",
  "sg-store",
  "sg-timeline",
  "sg-workflow",

@@ -4,6 +4,7 @@
 
 mod dispatch;
 mod migrate;
+mod settings_dispatch;
 mod state;
 
 use std::io::{BufRead, Write};

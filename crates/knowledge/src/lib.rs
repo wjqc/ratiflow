@@ -661,3 +661,150 @@ mod tests {
         assert_eq!(fetched["workitemId"], "wi");
     }
 }
+
+/// 结构化 hit（手册 §12）：默认排除 docs/history、测试文件（除非 includeTests）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchHit {
+    pub hit_id: String,
+    pub source_id: String,
+    pub source_name: String,
+    pub path: String,
+    pub title: String,
+    pub content_type: String,
+    pub score: i64,
+    pub score_breakdown: serde_json::Value,
+    pub highlights: Vec<String>,
+    pub snippet: String,
+    pub updated_at: String,
+    pub inclusion_state: String,
+    pub exclusion_reason: String,
+}
+
+const DEFAULT_EXCLUDED_PREFIXES: [&str; 3] = ["docs/history/", ".git/", "legacy/"];
+
+pub fn search_v2(
+    store: &Store,
+    project_id: &str,
+    query: &str,
+    include_tests: bool,
+    limit: i64,
+) -> Result<serde_json::Value, Error> {
+    let raw = search(store, project_id, query, limit * 3)?; // 预筛后截断
+    let source_names: std::collections::HashMap<String, String> = list_sources(store, project_id)?
+        .into_iter()
+        .map(|s| (s.id, s.name))
+        .collect();
+
+    let terms: Vec<String> = query.split_whitespace().map(String::from).collect();
+    let mut hits: Vec<SearchHit> = Vec::new();
+    for item in raw {
+        let body = item["snippet"].as_str().unwrap_or_default().to_string();
+        let (path, content) = body.split_once('\n').unwrap_or(("", body.as_str()));
+        let path = path.to_string();
+
+        let mut exclusion = String::new();
+        if DEFAULT_EXCLUDED_PREFIXES
+            .iter()
+            .any(|pfx| path.starts_with(pfx))
+        {
+            exclusion = "default_excluded_history".into();
+        } else if !include_tests
+            && (path.contains("/tests/") || path.starts_with("tests/") || path.contains("_test."))
+        {
+            exclusion = "test_file_not_requested".into();
+        }
+        if !exclusion.is_empty() {
+            hits.push(SearchHit {
+                hit_id: item["chunkId"].as_str().unwrap_or_default().into(),
+                source_id: item["sourceId"].as_str().unwrap_or_default().into(),
+                source_name: source_names
+                    .get(item["sourceId"].as_str().unwrap_or_default())
+                    .cloned()
+                    .unwrap_or_default(),
+                path,
+                title: String::new(),
+                content_type: "text/markdown".into(),
+                score: 0,
+                score_breakdown: serde_json::json!({}),
+                highlights: vec![],
+                snippet: String::new(),
+                updated_at: String::new(),
+                inclusion_state: "excluded".into(),
+                exclusion_reason: exclusion,
+            });
+            continue;
+        }
+        // 秘密 fail closed：命中秘密的片段不返回原文。
+        if scan::has_high_risk(&scan::scan(content.as_bytes())) {
+            hits.push(SearchHit {
+                hit_id: item["chunkId"].as_str().unwrap_or_default().into(),
+                source_id: item["sourceId"].as_str().unwrap_or_default().into(),
+                source_name: String::new(),
+                path: path.clone(),
+                title: String::new(),
+                content_type: String::new(),
+                score: 0,
+                score_breakdown: serde_json::json!({}),
+                highlights: vec![],
+                snippet: String::new(),
+                updated_at: String::new(),
+                inclusion_state: "excluded".into(),
+                exclusion_reason: "secret_hit_fail_closed".into(),
+            });
+            continue;
+        }
+
+        // 稳定排名：词频 + 路径长度惩罚（短路径优先）+ 标题命中加成。
+        let lower = content.to_lowercase();
+        let mut term_hits = 0i64;
+        let mut highlights = Vec::new();
+        for line in content.lines().take(200) {
+            if terms
+                .iter()
+                .any(|t| line.to_lowercase().contains(&t.to_lowercase()))
+            {
+                if highlights.len() < 3 {
+                    let trimmed = if line.len() > 160 { &line[..160] } else { line };
+                    highlights.push(trimmed.to_string());
+                }
+                term_hits += 1;
+            }
+        }
+        let term_freq: i64 = terms
+            .iter()
+            .map(|t| lower.matches(&t.to_lowercase()).count() as i64)
+            .sum();
+        let path_boost = if path.len() < 40 { 2 } else { 0 };
+        let title = content
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches('#')
+            .trim()
+            .to_string();
+        let title_hit = if terms
+            .iter()
+            .any(|t| title.to_lowercase().contains(&t.to_lowercase()))
+        {
+            3
+        } else {
+            0
+        };
+        let score = term_freq + path_boost + title_hit + term_hits;
+
+        hits.push(SearchHit {
+            hit_id: item["chunkId"].as_str().unwrap_or_default().into(),
+            source_id: item["sourceId"].as_str().unwrap_or_default().into(),
+            source_name: source_names.get(item["sourceId"].as_str().unwrap_or_default()).cloned().unwrap_or_default(),
+            path, title, content_type: "text/markdown".into(),
+            score, score_breakdown: serde_json::json!({"termFrequency": term_freq, "pathBoost": path_boost, "titleHit": title_hit}),
+            highlights, snippet: content.chars().take(200).collect(), updated_at: String::new(),
+            inclusion_state: "included".into(), exclusion_reason: String::new(),
+        });
+    }
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path))); // 稳定：同分按路径
+    hits.truncate(limit as usize);
+    Ok(
+        serde_json::json!({"items": hits, "query": query, "totalShown": hits.iter().filter(|h| h.inclusion_state == "included").count()}),
+    )
+}

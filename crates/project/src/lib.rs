@@ -259,6 +259,60 @@ impl OptionalRow for Result<String, rusqlite::Error> {
     }
 }
 
+/// 根目录检查（S10）：git、权限、技术栈、.sixgates、blockers。
+pub fn inspect_root(path: &str) -> Result<serde_json::Value, Error> {
+    let root = std::path::Path::new(path);
+    if !root.is_absolute() {
+        return Err(Error::Message("必须提供绝对路径".into()));
+    }
+    let canonical = root
+        .canonicalize()
+        .map_err(|e| Error::Message(format!("路径不可达：{e}")))?;
+
+    let mut blockers = Vec::new();
+    let is_git = canonical.join(".git").exists();
+    if !is_git {
+        blockers.push(serde_json::json!({"id": "not_a_git_repo", "severity": "warning", "detail": "未发现 .git；版本控制能力受限"}));
+    }
+
+    let readable = std::fs::read_dir(&canonical).is_ok();
+    let writable = std::fs::write(canonical.join(".sixgates-probe"), b"1").is_ok();
+    if writable {
+        let _ = std::fs::remove_file(canonical.join(".sixgates-probe"));
+    }
+    if !readable {
+        blockers.push(serde_json::json!({"id": "not_readable", "severity": "blocking"}));
+    }
+    if !writable {
+        blockers.push(serde_json::json!({"id": "not_writable", "severity": "blocking", "detail": "需要写权限建立 worktree/缓存"}));
+    }
+
+    let markers = [
+        ("go.mod", "go"),
+        ("Cargo.toml", "rust"),
+        ("package.json", "node"),
+        ("pom.xml", "java-maven"),
+        ("build.gradle", "java-gradle"),
+        ("pyproject.toml", "python"),
+        ("composer.json", "php"),
+    ];
+    let stacks: Vec<&str> = markers
+        .iter()
+        .filter(|(f, _)| canonical.join(f).exists())
+        .map(|(_, s)| *s)
+        .collect();
+
+    Ok(serde_json::json!({
+        "path": canonical.to_string_lossy(),
+        "isGitRepo": is_git,
+        "readable": readable,
+        "writable": writable,
+        "stacks": stacks,
+        "hasSixgatesDir": canonical.join(".sixgates").exists(),
+        "blockers": blockers,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

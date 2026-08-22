@@ -64,7 +64,7 @@ mkdirSync('packages/protocol/src', { recursive: true });
 writeFileSync('packages/protocol/src/generated.ts', code);
 
 // 方法 ↔ dispatch 实现对齐检查（契约测试数据）。
-const rustDispatch = readFileSync('crates/sixgates-core/src/dispatch.rs', 'utf8');
+const rustDispatch = readFileSync('crates/sixgates-core/src/dispatch.rs', 'utf8') + readFileSync('crates/sixgates-core/src/settings_dispatch.rs', 'utf8');
 const missing = contract.methods.filter((m) => !rustDispatch.includes(`"${m.name}"`));
 if (missing.length > 0) {
   console.error('契约中声明但 Rust 未实现的方法：', missing.map((m) => m.name));

@@ -688,3 +688,14 @@ pub fn reveal_for(
     credentials::get(store, ref_id)?;
     credentials::reveal(backend, ref_id)
 }
+
+/// 测试后回写状态（不动 revision 之外的配置）。
+pub fn gitlab_update_status(store: &Store, id: &str, status: &str) -> SettingsResult<()> {
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE gitlab_profiles SET status=?1, last_tested_at=?2, revision=revision+1, updated_at=?2 WHERE id=?3",
+            rusqlite::params![status, timefmt::now(), id],
+        )?;
+        Ok(())
+    }).map_err(store_err)
+}

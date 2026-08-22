@@ -57,6 +57,9 @@ fn opt_str_param(params: &Value, key: &str) -> Option<String> {
 
 /// 分发一个 RPC 请求。返回 (结果, 待推送事件截止 sequence)。
 pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
+    if let Some(result) = crate::settings_dispatch::dispatch(state, method, params) {
+        return result;
+    }
     match method {
         // --- 系统 ---
         "core.version" => Ok(

@@ -13,6 +13,7 @@ pub struct AppState {
     pub model: Arc<Gateway>,
     pub ssh: Arc<dyn sg_integrations::SSHAdapter>,
     pub policy: Snapshot,
+    pub credentials: std::sync::Arc<dyn sg_settings::credentials::CredentialStore>,
     pub executor_mode: sg_executor::Mode,
     pub core_version: String,
     /// 已推送事件的最高 sequence（notification 增量推送）。
@@ -83,6 +84,12 @@ impl AppState {
             ],
             approval_ttl_secs: 3600,
         };
+        let credentials: std::sync::Arc<dyn sg_settings::credentials::CredentialStore> =
+            if cfg!(target_os = "macos") {
+                std::sync::Arc::new(sg_settings::credentials::MacKeychain)
+            } else {
+                std::sync::Arc::new(sg_settings::credentials::InMemoryCredentials::default())
+            };
         let executor_mode = sg_executor::detect_mode(
             sg_executor::docker_available(),
             std::env::var("SIXGATES_UNSAFE_EXEC")
@@ -95,6 +102,7 @@ impl AppState {
             model: Arc::new(model),
             ssh,
             policy,
+            credentials,
             executor_mode,
             core_version: core_version.into(),
             last_pushed: AtomicI64::new(0),
