@@ -10,3 +10,4 @@ serde_json = { workspace = true }
 sg-store = { workspace = true }
 sg-policy = { workspace = true }
 sg-integrations = { workspace = true }
+rusqlite = { workspace = true }

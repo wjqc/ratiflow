@@ -581,6 +581,7 @@ dependencies = [
 name = "sg-agent"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sg-integrations",
@@ -626,6 +627,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sg-store",
+ "thiserror",
 ]
 
 [[package]]
@@ -641,9 +643,11 @@ dependencies = [
 name = "sg-knowledge"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sg-store",
+ "sha2",
 ]
 
 [[package]]
@@ -704,9 +708,13 @@ dependencies = [
 name = "sg-workflow"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
+ "sg-integrations",
+ "sg-policy",
  "sg-store",
+ "sha2",
 ]
 
 [[package]]
