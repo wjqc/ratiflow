@@ -433,6 +433,16 @@ mod tests {
     }
 
     #[test]
+    fn progress_aggregate_works() {
+        let s = setup();
+        let wi = create(&s, "pj", "进度任务", "", None, &[]).unwrap();
+        let p = progress::progress(&s, &wi.id).unwrap();
+        assert_eq!(p["workItemId"], serde_json::json!(wi.id));
+        assert_eq!(p["currentGate"], "requirements");
+        assert_eq!(p["evidenceCount"], serde_json::json!(0));
+    }
+
+    #[test]
     fn gate_helpers() {
         assert_eq!(Gate::parse("deployment"), Some(Gate::Deployment));
         assert_eq!(Gate::parse("nope"), None);

@@ -42,16 +42,36 @@ pub fn create_source(
     }
     let id = ids::new_id("ks");
     let now = timefmt::now();
-    store.with_conn(|conn| {
-        conn.execute(
+    let inserted = store.with_conn(|conn| {
+        let changed = conn.execute(
             "INSERT INTO knowledge_sources(id, project_id, kind, name, locator, enabled, scan_state, created_at, updated_at)
              VALUES (?1,?2,?3,?4,?5,1,'pending',?6,?6)
              ON CONFLICT(project_id, kind, locator) DO NOTHING",
             rusqlite::params![id, project_id, kind, name, locator, now],
         )?;
-        Ok(())
+        Ok(changed)
     })?;
+    if inserted == 0 {
+        // 幂等：同 (project, kind, locator) 已存在 → 返回既有来源。
+        return find_by_locator(store, project_id, kind, locator)?
+            .ok_or_else(|| Error::Message("source_conflict".into()));
+    }
     get_source(store, &id)
+}
+
+fn find_by_locator(store: &Store, project_id: &str, kind: &str, locator: &str) -> Result<Option<Source>, Error> {
+    let id: Option<String> = store.with_conn(|conn| {
+        let result: rusqlite::Result<String> = conn.query_row(
+            "SELECT id FROM knowledge_sources WHERE project_id=?1 AND kind=?2 AND locator=?3",
+            [project_id, kind, locator],
+            |r| r.get(0),
+        );
+        Ok(result.ok())
+    })?;
+    match id {
+        Some(id) => get_source(store, &id).map(Some),
+        None => Ok(None),
+    }
 }
 
 pub fn get_source(store: &Store, id: &str) -> Result<Source, Error> {
@@ -223,8 +243,9 @@ pub fn scan_source(
     // 计算内容根哈希并写入分块。
     use sha2::{Digest, Sha256};
     let mut root_hasher = Sha256::new();
-    let mut chunks: Vec<(usize, String, i64)> = Vec::new(); // (ordinal, object_sha, tokens)
-    let mut chunk_rows: Vec<(String, String, String)> = Vec::new(); // (chunk_id, ordinal_object, body) for FTS
+    let mut chunks: Vec<(usize, String, i64)> = Vec::new(); // (ordinal, object_sha, tokens) — ordinal 全局递增
+    let mut chunk_rows: Vec<(String, String, String)> = Vec::new(); // (chunk_id, object_sha, body) for FTS
+    let mut next_ordinal: usize = 0;
     for file in &files {
         let body = match std::fs::read(file) {
             Ok(b) => b,
@@ -242,16 +263,18 @@ pub fn scan_source(
             continue;
         }
         let text = String::from_utf8_lossy(&body);
-        for (ordinal, chunk) in chunk_text(&text, 2000).into_iter().enumerate() {
+        for chunk in chunk_text(&text, 2000) {
             let info = objects::put(store, chunk.as_bytes(), objects::PutOptions::default())?;
             let chunk_id = ids::new_id("kc");
             root_hasher.update(chunk.as_bytes());
-            chunks.push((ordinal, info.sha256.clone(), (chunk.len() / 4) as i64));
+            // ordinal 全局递增（文件内计数会在重复内容时触发 UNIQUE 冲突）。
+            chunks.push((next_ordinal, info.sha256.clone(), (chunk.len() / 4) as i64));
             chunk_rows.push((
                 chunk_id.clone(),
                 info.sha256,
                 format!("{}\n{}", rel.display(), chunk),
             ));
+            next_ordinal += 1;
         }
     }
     let content_sha = ids::hex(&root_hasher.finalize());
@@ -563,6 +586,33 @@ mod tests {
 
         let preview = context_preview(&store, "pj", "登录", 4096).unwrap();
         assert!(!preview["items"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_source_idempotent_returns_existing() {
+        let (store, _dir) = setup();
+        let first = create_source(&store, "pj", "repo_path", "主仓库", "/tmp/locator-x").unwrap();
+        let second = create_source(&store, "pj", "repo_path", "改名", "/tmp/locator-x").unwrap();
+        assert_eq!(first.id, second.id, "幂等创建必须返回既有来源");
+    }
+
+    #[test]
+    fn rescan_same_source_replaces_index() {
+        let (store, dir) = setup();
+        let repo = dir.path().join("repo3");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("a.md"), "# 相同内容
+重复分块一
+").unwrap();
+        std::fs::write(repo.join("b.md"), "# 相同内容
+重复分块一
+").unwrap();
+        let src = create_source(&store, "pj", "repo_path", "重复内容", repo.to_str().unwrap()).unwrap();
+        scan_source(&store, &src.id, None, 100, 64 << 10).unwrap();
+        // 二次扫描（重新索引）也必须成功：ordinal 全局唯一 + 先删后插。
+        scan_source(&store, &src.id, None, 100, 64 << 10).unwrap();
+        let hits = search(&store, "pj", "重复", 10).unwrap();
+        assert!(!hits.is_empty());
     }
 
     #[test]

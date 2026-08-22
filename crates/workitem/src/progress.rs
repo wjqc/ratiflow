@@ -22,7 +22,7 @@ pub fn progress(store: &Store, workitem_id: &str) -> Result<Value, Error> {
                 SELECT id FROM deployments WHERE workitem_id=?1
                 UNION ALL SELECT id FROM tool_proposals WHERE agent_run_id IN (
                     SELECT id FROM agent_runs WHERE workitem_id=?1))",
-            [workitem_id, workitem_id],
+            [workitem_id],
             |r| r.get(0),
         )
         .map_err(Error::from)
