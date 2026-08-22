@@ -102,7 +102,7 @@ pub fn update(
             Ok(result.ok())
         }).map_err(store_err)?;
         if managed.is_some() {
-            return Err(Box::new(SettingsError::new(
+            return Err(SettingsError::new(
                 codes::MANAGED_READ_ONLY,
                 format!("键 {} 由托管来源管理", patch.key),
             ));
@@ -131,8 +131,10 @@ pub fn update(
             Some((revision, _)) => {
                 if let Some(expected) = patch.expected_revision {
                     if expected != revision {
-                        return Err(Box::new(SettingsError::new(codes::REVISION_CONFLICT, format!("键 {} 期望 revision {} 实际 {}", patch.key, expected, revision))
-                            .with_details(serde_json::json!({"key": patch.key, "expectedRevision": expected, "actualRevision": revision})));
+                        return Err(SettingsError::new(
+                            codes::REVISION_CONFLICT,
+                            format!("键 {} 期望 revision {} 实际 {}", patch.key, expected, revision),
+                        ).with_details(serde_json::json!({"key": patch.key, "expectedRevision": expected, "actualRevision": revision})));
                     }
                 }
                 store.with_conn(|conn| {

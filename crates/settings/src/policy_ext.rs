@@ -45,7 +45,7 @@ pub fn tool_update(store: &Store, p: &Value, expected_revision: i64) -> Settings
     let tool_id = p
         .get("toolId")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Box::new(SettingsError::new("INVALID_PARAMS", "toolId 必填"))?
+        .ok_or_else(|| SettingsError::new("INVALID_PARAMS", "toolId 必填"))?
         .to_string();
     let project_id = p
         .get("projectId")
@@ -81,7 +81,7 @@ pub fn tool_update(store: &Store, p: &Value, expected_revision: i64) -> Settings
         }
         Some(rev) => {
             if rev != expected_revision {
-                return Err(Box::new(SettingsError::new(
+                return Err(SettingsError::new(
                     codes::REVISION_CONFLICT,
                     format!("策略期望 revision {expected_revision} 实际 {rev}"),
                 ));
@@ -103,10 +103,10 @@ pub fn tool_update(store: &Store, p: &Value, expected_revision: i64) -> Settings
         }
     }
     tool_list(store)
-        .map_err(|_| Box::new(SettingsError::new("INTERNAL", "读取更新后策略失败"))?
+        .map_err(|_| SettingsError::new("INTERNAL", "读取更新后策略失败"))?
         .into_iter()
         .find(|t| t.tool_id == tool_id && t.project_id == project_id)
-        .ok_or_else(|| Box::new(SettingsError::new("INTERNAL", "策略写入后不可见"))
+        .ok_or_else(|| SettingsError::new("INTERNAL", "策略写入后不可见"))
 }
 
 /// 合成：项目覆盖 > 全局 > 内置默认（read_file 低风险等）。
@@ -194,7 +194,7 @@ pub fn execution_create(
         mode,
         "docker" | "safe_restricted" | "unsafe_explicit" | "disabled"
     ) {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             "INVALID_PARAMS",
             format!("未知执行模式 {mode}"),
         ));
@@ -212,7 +212,7 @@ pub fn execution_create(
     execution_list(store)?
         .into_iter()
         .find(|p| p.id == id)
-        .ok_or_else(|| Box::new(SettingsError::new("INTERNAL", "写入后不可见"))
+        .ok_or_else(|| SettingsError::new("INTERNAL", "写入后不可见"))
 }
 
 pub fn execution_update(
@@ -224,9 +224,9 @@ pub fn execution_update(
     let current = execution_list(store)?
         .into_iter()
         .find(|x| x.id == id)
-        .ok_or_else(|| Box::new(SettingsError::new("NOT_FOUND", "执行 Profile 不存在"))?;
+        .ok_or_else(|| SettingsError::new("NOT_FOUND", "执行 Profile 不存在"))?;
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             "revision 不匹配",
         ));
@@ -251,16 +251,16 @@ pub fn execution_update(
     execution_list(store)?
         .into_iter()
         .find(|x| x.id == id)
-        .ok_or_else(|| Box::new(SettingsError::new("INTERNAL", "更新后不可见"))
+        .ok_or_else(|| SettingsError::new("INTERNAL", "更新后不可见"))
 }
 
 pub fn execution_remove(store: &Store, id: &str, expected_revision: i64) -> SettingsResult<()> {
     let current = execution_list(store)?
         .into_iter()
         .find(|x| x.id == id)
-        .ok_or_else(|| Box::new(SettingsError::new("NOT_FOUND", "执行 Profile 不存在"))?;
+        .ok_or_else(|| SettingsError::new("NOT_FOUND", "执行 Profile 不存在"))?;
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             "revision 不匹配",
         ));

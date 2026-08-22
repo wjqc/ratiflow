@@ -37,7 +37,10 @@ mod tests {
 
     #[test]
     fn migration_versions_strictly_increasing_and_unique() {
-        let versions: Vec<i64> = crate::migration::MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        let versions: Vec<i64> = crate::migration::MIGRATIONS
+            .iter()
+            .map(|(v, _)| *v)
+            .collect();
         let mut sorted = versions.clone();
         sorted.sort();
         assert_eq!(versions, sorted, "迁移必须按版本升序");

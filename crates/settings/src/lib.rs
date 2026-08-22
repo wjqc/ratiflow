@@ -63,19 +63,13 @@ impl std::fmt::Display for SettingsError {
     }
 }
 
-// clippy(result_large_err)：领域错误统一装箱传递。
-pub type SettingsResult<T> = Result<T, Box<SettingsError>>;
+pub type SettingsResult<T> = Result<T, SettingsError>;
 
-pub fn store_err(e: Error) -> Box<SettingsError> {
-    Box::new(SettingsError::new("INTERNAL", e.to_string()))
+pub fn store_err(e: Error) -> SettingsError {
+    SettingsError::new("INTERNAL", e.to_string())
 }
 
 /// correlationId 贯穿：请求层生成并写入审计/错误。
 pub fn new_correlation_id() -> String {
     sg_store::ids::new_id("corr")
-}
-
-/// 便捷装箱。
-pub fn serr(code: &'static str, msg: impl Into<String>) -> Box<SettingsError> {
-    Box::new(SettingsError::new(code, msg))
 }

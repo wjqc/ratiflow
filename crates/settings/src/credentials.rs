@@ -161,23 +161,20 @@ pub fn create(
         "gitlab_token" | "model_api_key" | "ssh_key" | "generic_secret"
     ) {
         return Err(
-            Box::new(SettingsError::new("INVALID_PARAMS", format!("未知凭据类型 {kind}"))
+            SettingsError::new("INVALID_PARAMS", format!("未知凭据类型 {kind}"))
                 .with_fields(serde_json::json!({"kind": "类型不合法"})),
         );
     }
     if !keychain_available(backend) {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::CREDENTIAL_STORE_UNAVAILABLE,
             format!("Keychain 后端 {} 不可用", backend.backend_name()),
         ));
     }
     let id = ids::new_id("cr");
     backend.put(&id, secret).map_err(|e| {
-        Box::new(SettingsError::new(
-            codes::CREDENTIAL_STORE_UNAVAILABLE,
-            "写入 Keychain 失败".to_string(),
-        )
-        .with_details(serde_json::json!({"backend": backend.backend_name(), "reason": e}))
+        SettingsError::new(codes::CREDENTIAL_STORE_UNAVAILABLE, "写入 Keychain 失败")
+            .with_details(serde_json::json!({"backend": backend.backend_name(), "reason": e}))
     })?;
 
     let now = timefmt::now();
@@ -192,7 +189,7 @@ pub fn create(
     if inserted == 0 {
         // 补偿：DB 失败删除 keychain 条目。
         let _ = backend.delete(&id);
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             "INTERNAL",
             "凭据登记失败（已回滚 Keychain）",
         ));
@@ -222,7 +219,7 @@ pub fn get(store: &Store, id: &str) -> SettingsResult<CredentialRef> {
             },
         ).ok())
     }).map_err(store_err)?;
-    row.ok_or_else(|| Box::new(SettingsError::new("NOT_FOUND", format!("凭据 {id} 不存在")))
+    row.ok_or_else(|| SettingsError::new("NOT_FOUND", format!("凭据 {id} 不存在")))
 }
 
 pub fn list(store: &Store) -> SettingsResult<Vec<CredentialRef>> {
@@ -252,7 +249,7 @@ pub fn replace(
 ) -> SettingsResult<CredentialRef> {
     let current = get(store, id)?;
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             format!(
                 "期望 revision {} 实际 {}",
@@ -261,7 +258,7 @@ pub fn replace(
         ));
     }
     backend.put(id, secret).map_err(|e| {
-        Box::new(SettingsError::new(codes::CREDENTIAL_STORE_UNAVAILABLE, "覆盖 Keychain 失败")
+        SettingsError::new(codes::CREDENTIAL_STORE_UNAVAILABLE, "覆盖 Keychain 失败")
             .with_details(serde_json::json!({"reason": e}))
     })?;
     store.with_conn(|conn| {
@@ -284,7 +281,7 @@ pub fn remove(
 ) -> SettingsResult<()> {
     let current = get(store, id)?;
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             format!(
                 "期望 revision {} 实际 {}",
@@ -304,7 +301,7 @@ pub fn remove(
         })
         .map_err(store_err)?;
     if dependents > 0 && !force {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             "CONFLICT",
             format!(
                 "凭据被 {} 个 Profile 引用；需 force 或先解除引用",
@@ -350,9 +347,9 @@ pub fn verify(
 /// 读取秘密（最窄作用域：仅集成适配器构造时调用）。
 pub fn reveal(backend: &dyn CredentialStore, id: &str) -> SettingsResult<String> {
     backend.get(id).map_err(|_| {
-        Box::new(SettingsError::new(
+        SettingsError::new(
             codes::CREDENTIAL_MISSING,
-            format!("凭据 {} 在 Keychain 中缺失（需重新绑定）", id),
+            format!("凭据 {id} 在 Keychain 中缺失（需重新绑定）"),
         )
     })
 }

@@ -40,7 +40,7 @@ pub fn record(store: &Store, id: &str) -> SettingsResult<BackupRecord> {
             },
         ).ok())
     }).map_err(store_err)?;
-    row.ok_or_else(|| Box::new(SettingsError::new("NOT_FOUND", format!("备份 {id} 不存在"))))
+    row.ok_or_else(|| SettingsError::new("NOT_FOUND", format!("备份 {id} 不存在")))
 }
 
 pub fn list(store: &Store) -> SettingsResult<Vec<BackupRecord>> {
@@ -162,10 +162,10 @@ pub struct RestoreOutcome {
 pub fn restore(store: &Store, id: &str) -> SettingsResult<RestoreOutcome> {
     let rec = record(store, id)?;
     if rec.status != "verified" {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::BACKUP_CORRUPT,
             "仅 verified 备份可恢复；先执行 backup.verify",
-        )));
+        ));
     }
     // 安全快照（当前状态可回滚）。
     let safety = backup::snapshot(store).map_err(store_err)?;
@@ -190,8 +190,10 @@ pub fn restore(store: &Store, id: &str) -> SettingsResult<RestoreOutcome> {
     if let Err(e) = std::fs::copy(&rec.path, &db_path) {
         // 回滚：用安全快照恢复。
         let _ = std::fs::copy(&safety.path, &db_path);
-        return Err(Box::new(SettingsError::new("INTERNAL", format!("恢复失败已回滚：{e}"))
-            .with_details(json!({"safetySnapshot": safety.path}))));
+        return Err(
+            SettingsError::new("INTERNAL", format!("恢复失败已回滚：{e}"))
+                .with_details(json!({"safetySnapshot": safety.path})),
+        );
     }
     // 完整性检查：裸连接 quick_check（不走 Store::open，避免迁移备份再触发写锁）。
     let check_ok = (|| -> Option<bool> {
@@ -204,10 +206,11 @@ pub fn restore(store: &Store, id: &str) -> SettingsResult<RestoreOutcome> {
     .unwrap_or(false);
     if !check_ok {
         let _ = std::fs::copy(&safety.path, &db_path);
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::BACKUP_CORRUPT,
             "恢复后完整性检查失败，已回滚安全快照",
-        ).with_details(json!({"safetySnapshot": safety.path}))));
+        )
+        .with_details(json!({"safetySnapshot": safety.path})));
     }
 
     store
@@ -276,7 +279,7 @@ pub fn export_diagnostic_bundle(store: &Store) -> SettingsResult<Value> {
     let body = summary.to_string();
     let (masked, _) = sg_store::scan::mask(body.as_bytes());
     serde_json::from_str::<Value>(&masked)
-        .map_err(|e| Box::new(SettingsError::new("INTERNAL", e.to_string())))
+        .map_err(|e| SettingsError::new("INTERNAL", e.to_string()))
 }
 
 fn dirs_log_dir() -> Option<std::path::PathBuf> {

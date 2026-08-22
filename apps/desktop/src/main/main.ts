@@ -3,6 +3,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from 'electron';
 import { ChildProcess, spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
 import * as readline from 'node:readline';
 
@@ -304,6 +305,25 @@ function registerIpc(): void {
     if (url.startsWith('http://') || url.startsWith('https://')) {
       await shell.openExternal(url);
     }
+  });
+
+  // 设置中心窄 IPC（契约 §3.1）：目录选择 / 版本与目录信息 / 打开日志目录。
+  ipcMain.handle('sg:selectDirectory', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openDirectory', 'createDirectory'] });
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle('sg:appInfo', () => ({
+    desktopVersion: app.getVersion(),
+    logDir: join(homedir(), 'Library', 'Logs', 'sixgates'),
+    userDataDir: app.getPath('userData'),
+  }));
+
+  ipcMain.handle('sg:openLogs', async () => {
+    await shell.openPath(join(homedir(), 'Library', 'Logs', 'sixgates'));
   });
 }
 

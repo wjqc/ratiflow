@@ -79,7 +79,7 @@ pub fn update(
         return Ok(1);
     }
     if current != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             format!("知识设置期望 revision {expected_revision} 实际 {current}"),
         ));

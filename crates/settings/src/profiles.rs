@@ -108,7 +108,7 @@ pub fn model_get(store: &Store, id: &str) -> SettingsResult<ModelProfile> {
             row_model,
         ).ok()))
         .map_err(store_err)?
-        .ok_or_else(|| Box::new(SettingsError::new("NOT_FOUND", format!("模型 Profile {id} 不存在")))
+        .ok_or_else(|| SettingsError::new("NOT_FOUND", format!("模型 Profile {id} 不存在")))
 }
 
 type ModelRow<'a> = rusqlite::Row<'a>;
@@ -145,12 +145,12 @@ fn row_model(r: &ModelRow<'_>) -> rusqlite::Result<ModelProfile> {
 
 pub fn model_create(store: &Store, p: &Value) -> SettingsResult<ModelProfile> {
     let name = opt(p, "name").ok_or_else(|| {
-        Box::new(SettingsError::new("INVALID_PARAMS", "name 必填")
+        SettingsError::new("INVALID_PARAMS", "name 必填")
             .with_fields(serde_json::json!({"name":"必填"}))
     })?;
     let kind = opt(p, "providerKind").unwrap_or_else(|| "openai_compatible".into());
     if !matches!(kind.as_str(), "openai_compatible" | "fake") {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             "INVALID_PARAMS",
             format!("providerKind {kind} 不受支持"),
         ));
@@ -186,13 +186,13 @@ pub fn model_update(
 ) -> SettingsResult<ModelProfile> {
     let current = model_get(store, id)?;
     if current.managed_source.is_some() {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::MANAGED_READ_ONLY,
             "环境导入的 Profile 只读；替代路径：创建新 Profile",
         ));
     }
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             format!(
                 "期望 revision {expected_revision} 实际 {}",
@@ -224,13 +224,13 @@ pub fn model_update(
 pub fn model_remove(store: &Store, id: &str, expected_revision: i64) -> SettingsResult<()> {
     let current = model_get(store, id)?;
     if current.managed_source.is_some() {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::MANAGED_READ_ONLY,
             "托管 Profile 不可删除",
         ));
     }
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             "revision 不匹配",
         ));
@@ -245,7 +245,7 @@ pub fn model_remove(store: &Store, id: &str, expected_revision: i64) -> Settings
         })
         .map_err(store_err)?;
     if routes > 0 {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             "CONFLICT",
             format!("Profile 被 {routes} 条路由引用"),
         ));
@@ -298,9 +298,9 @@ pub fn route_get(store: &Store) -> SettingsResult<Value> {
 
 pub fn route_update(store: &Store, route: &Value, expected_revision: i64) -> SettingsResult<Value> {
     let task_kind = opt(route, "taskKind")
-        .ok_or_else(|| Box::new(SettingsError::new("INVALID_PARAMS", "taskKind 必填"))?;
+        .ok_or_else(|| SettingsError::new("INVALID_PARAMS", "taskKind 必填"))?;
     let primary = opt(route, "primaryProfileId")
-        .ok_or_else(|| Box::new(SettingsError::new("INVALID_PARAMS", "primaryProfileId 必填"))?;
+        .ok_or_else(|| SettingsError::new("INVALID_PARAMS", "primaryProfileId 必填"))?;
     model_get(store, &primary)?; // 存在性校验
     let scope = opt(route, "scope").unwrap_or_else(|| "global".into());
     let current: Option<i64> = store
@@ -328,7 +328,7 @@ pub fn route_update(store: &Store, route: &Value, expected_revision: i64) -> Set
         }
         Some(rev) => {
             if rev != expected_revision {
-                return Err(Box::new(SettingsError::new(
+                return Err(SettingsError::new(
                     codes::REVISION_CONFLICT,
                     format!("路由期望 revision {expected_revision} 实际 {rev}"),
                 ));
@@ -392,13 +392,13 @@ pub fn gitlab_get(store: &Store, id: &str) -> SettingsResult<GitlabProfile> {
             },
         ).ok())
     }).map_err(store_err)?;
-    row.ok_or_else(|| Box::new(SettingsError::new("NOT_FOUND", format!("GitLab Profile {id} 不存在")))
+    row.ok_or_else(|| SettingsError::new("NOT_FOUND", format!("GitLab Profile {id} 不存在")))
 }
 
 pub fn gitlab_create(store: &Store, p: &Value) -> SettingsResult<GitlabProfile> {
-    let name = opt(p, "name").ok_or_else(|| Box::new(SettingsError::new("INVALID_PARAMS", "name 必填"))?;
+    let name = opt(p, "name").ok_or_else(|| SettingsError::new("INVALID_PARAMS", "name 必填"))?;
     let base_url =
-        opt(p, "baseUrl").ok_or_else(|| Box::new(SettingsError::new("INVALID_PARAMS", "baseUrl 必填"))?;
+        opt(p, "baseUrl").ok_or_else(|| SettingsError::new("INVALID_PARAMS", "baseUrl 必填"))?;
     let id = ids::new_id("glp");
     let now = timefmt::now();
     store.with_conn(|conn| {
@@ -421,13 +421,13 @@ pub fn gitlab_update(
 ) -> SettingsResult<GitlabProfile> {
     let current = gitlab_get(store, id)?;
     if current.managed_source.is_some() {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::MANAGED_READ_ONLY,
             "托管 Profile 只读",
         ));
     }
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             "revision 不匹配",
         ));
@@ -449,7 +449,7 @@ pub fn gitlab_update(
 pub fn gitlab_remove(store: &Store, id: &str, expected_revision: i64) -> SettingsResult<()> {
     let current = gitlab_get(store, id)?;
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             "revision 不匹配",
         ));
@@ -502,12 +502,12 @@ pub fn ssh_get(store: &Store, id: &str) -> SettingsResult<SshTarget> {
             },
         ).ok())
     }).map_err(store_err)?;
-    row.ok_or_else(|| Box::new(SettingsError::new("NOT_FOUND", format!("SSH 目标 {id} 不存在")))
+    row.ok_or_else(|| SettingsError::new("NOT_FOUND", format!("SSH 目标 {id} 不存在")))
 }
 
 pub fn ssh_create(store: &Store, p: &Value) -> SettingsResult<SshTarget> {
-    let host = opt(p, "host").ok_or_else(|| Box::new(SettingsError::new("INVALID_PARAMS", "host 必填"))?;
-    let user = opt(p, "user").ok_or_else(|| Box::new(SettingsError::new("INVALID_PARAMS", "user 必填"))?;
+    let host = opt(p, "host").ok_or_else(|| SettingsError::new("INVALID_PARAMS", "host 必填"))?;
+    let user = opt(p, "user").ok_or_else(|| SettingsError::new("INVALID_PARAMS", "user 必填"))?;
     let id = ids::new_id("ssh");
     let now = timefmt::now();
     store.with_conn(|conn| {
@@ -539,7 +539,7 @@ pub fn ssh_update(
 ) -> SettingsResult<SshTarget> {
     let current = ssh_get(store, id)?;
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             "revision 不匹配",
         ));
@@ -563,7 +563,7 @@ pub fn ssh_update(
 pub fn ssh_remove(store: &Store, id: &str, expected_revision: i64) -> SettingsResult<()> {
     let current = ssh_get(store, id)?;
     if current.revision != expected_revision {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             codes::REVISION_CONFLICT,
             "revision 不匹配",
         ));
@@ -585,7 +585,7 @@ pub fn ssh_accept_host_key(
 ) -> SettingsResult<SshTarget> {
     let current = ssh_get(store, id)?;
     if current.fingerprint_status == "changed" {
-        return Err(Box::new(SettingsError::new(
+        return Err(SettingsError::new(
             "HOST_KEY_CHANGED",
             "指纹已变化；确认新指纹前阻断",
         ));

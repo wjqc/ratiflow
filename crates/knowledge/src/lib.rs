@@ -59,7 +59,12 @@ pub fn create_source(
     get_source(store, &id)
 }
 
-fn find_by_locator(store: &Store, project_id: &str, kind: &str, locator: &str) -> Result<Option<Source>, Error> {
+fn find_by_locator(
+    store: &Store,
+    project_id: &str,
+    kind: &str,
+    locator: &str,
+) -> Result<Option<Source>, Error> {
     let id: Option<String> = store.with_conn(|conn| {
         let result: rusqlite::Result<String> = conn.query_row(
             "SELECT id FROM knowledge_sources WHERE project_id=?1 AND kind=?2 AND locator=?3",
@@ -601,13 +606,28 @@ mod tests {
         let (store, dir) = setup();
         let repo = dir.path().join("repo3");
         std::fs::create_dir_all(&repo).unwrap();
-        std::fs::write(repo.join("a.md"), "# 相同内容
+        std::fs::write(
+            repo.join("a.md"),
+            "# 相同内容
 重复分块一
-").unwrap();
-        std::fs::write(repo.join("b.md"), "# 相同内容
+",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("b.md"),
+            "# 相同内容
 重复分块一
-").unwrap();
-        let src = create_source(&store, "pj", "repo_path", "重复内容", repo.to_str().unwrap()).unwrap();
+",
+        )
+        .unwrap();
+        let src = create_source(
+            &store,
+            "pj",
+            "repo_path",
+            "重复内容",
+            repo.to_str().unwrap(),
+        )
+        .unwrap();
         scan_source(&store, &src.id, None, 100, 64 << 10).unwrap();
         // 二次扫描（重新索引）也必须成功：ordinal 全局唯一 + 先删后插。
         scan_source(&store, &src.id, None, 100, 64 << 10).unwrap();

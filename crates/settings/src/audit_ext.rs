@@ -42,8 +42,18 @@ pub struct AuditEvent<'a> {
 
 /// 追加写（metadata 自动脱敏；审计不可经普通 API 修改/删除）。
 pub fn append(store: &Store, event: &AuditEvent<'_>) -> SettingsResult<i64> {
-    let AuditEvent { actor, actor_kind, action, target_type, target_id, result,
-        correlation_id, project_id, before_summary, after_summary } = *event;
+    let AuditEvent {
+        actor,
+        actor_kind,
+        action,
+        target_type,
+        target_id,
+        result,
+        correlation_id,
+        project_id,
+        before_summary,
+        after_summary,
+    } = *event;
     let redact = |v: Option<&Value>| -> Option<String> {
         v.map(|x| {
             let body = x.to_string();
@@ -62,7 +72,8 @@ pub fn append(store: &Store, event: &AuditEvent<'_>) -> SettingsResult<i64> {
                 correlation_id, project_id, before, after, sg_store::timefmt::now()],
         )?;
         Ok(conn.last_insert_rowid())
-    }).map_err(store_err)
+    })
+    .map_err(store_err)
 }
 
 fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntryExt> {

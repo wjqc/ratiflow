@@ -6,6 +6,9 @@ declare global {
       hello(): Promise<{ ok: boolean; error?: string } | null>;
       selectFile(): Promise<{ path: string; filename: string; contentBase64: string; size: number } | null>;
       openExternal(url: string): Promise<void>;
+      selectDirectory(): Promise<string | null>;
+      appInfo(): Promise<{ desktopVersion: string; logDir: string; userDataDir: string }>;
+      openLogs(): Promise<void>;
     };
   }
 }

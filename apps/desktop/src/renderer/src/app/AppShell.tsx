@@ -6,7 +6,8 @@ import { Workbench } from './Workbench';
 import NewTaskPage from './NewTaskPage';
 import ApprovalsPage from './ApprovalsPage';
 import KnowledgePage from './KnowledgePage';
-import SettingsPage from './SettingsPage';
+import SettingsShell from './settings/SettingsShell';
+import { isSettingsRouteId, type SettingsRouteId } from './settings/settings-routes';
 import { relativeTime } from '../lib/format';
 import { IconInbox, IconSend } from '../components/Icons';
 
@@ -19,10 +20,46 @@ export type Route =
   | { page: 'task'; projectId: string; workItemId: string }
   | { page: 'approvals' }
   | { page: 'knowledge'; projectId: string }
-  | { page: 'settings' };
+  | { page: 'settings'; section?: SettingsRouteId };
+
+// 刷新/重启恢复（契约 FR-DESK-008）：最近页面与最近项目；任务上下文仅恢复 section 级页面。
+const LS_ROUTE = 'sg:lastRoute';
+const LS_PROJECT = 'sg:lastProject';
+
+function loadStoredRoute(): Route | null {
+  try {
+    const raw = localStorage.getItem(LS_ROUTE);
+    if (!raw) return null;
+    const r = JSON.parse(raw) as Route;
+    if (r.page === 'settings') {
+      return { page: 'settings', section: isSettingsRouteId(r.section) ? r.section : undefined };
+    }
+    if (r.page === 'approvals') return { page: 'approvals' };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function loadStoredProject(): string | null {
+  try {
+    return localStorage.getItem(LS_PROJECT);
+  } catch {
+    return null;
+  }
+}
+
+function storeLast(route: Route, projectId: string | null): void {
+  try {
+    localStorage.setItem(LS_ROUTE, JSON.stringify(route));
+    if (projectId) localStorage.setItem(LS_PROJECT, projectId);
+  } catch {
+    /* 隐私模式等场景忽略 */
+  }
+}
 
 export default function AppShell() {
-  const [route, setRoute] = useState<Route>({ page: 'home' });
+  const [route, setRoute] = useState<Route>(() => loadStoredRoute() ?? { page: 'home' });
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [workItems, setWorkItems] = useState<WorkItemSummary[]>([]);
@@ -37,7 +74,11 @@ export default function AppShell() {
         setCoreReady(true);
         const result = await rpc<{ items: Project[] }>('project.list');
         setProjects(result.items ?? []);
-        if (result.items?.length) setActiveProjectId((prev) => prev ?? result.items[0].id);
+        if (result.items?.length) {
+          const stored = loadStoredProject();
+          const hit = result.items.find((p) => p.id === stored);
+          setActiveProjectId((prev) => prev ?? hit?.id ?? result.items[0].id);
+        }
       } catch {
         setCoreReady(false);
       }
@@ -63,7 +104,33 @@ export default function AppShell() {
     if (activeProjectId) void loadProjectData(activeProjectId);
   }, [activeProjectId, loadProjectData]);
 
-  const navigate = useCallback((next: Route) => setRoute(next), []);
+  const navigate = useCallback((next: Route) => {
+    setRoute((prev) => {
+      // 进入设置中心未指定 section 时，沿用当前/最近的 section。
+      if (next.page === 'settings' && !next.section) {
+        const stored = loadStoredRoute();
+        const fallback =
+          prev.page === 'settings' ? prev.section : stored?.page === 'settings' ? stored.section : undefined;
+        return fallback ? { ...next, section: fallback } : next;
+      }
+      return next;
+    });
+  }, []);
+
+  // 设置中心内部导航（SettingsShell 通过事件上抛，保持路由单一事实源）。
+  useEffect(() => {
+    const onSettingsNav = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (isSettingsRouteId(detail)) navigate({ page: 'settings', section: detail });
+    };
+    window.addEventListener('sg:settings-navigate', onSettingsNav);
+    return () => window.removeEventListener('sg:settings-navigate', onSettingsNav);
+  }, [navigate]);
+
+  // 路由/项目变化时持久化，供刷新与重启恢复。
+  useEffect(() => {
+    storeLast(route, activeProjectId);
+  }, [route, activeProjectId]);
 
   const openTask = useCallback(
     (projectId: string, workItemId: string) => {
@@ -134,7 +201,7 @@ export default function AppShell() {
         {route.page === 'knowledge' && (
           <KnowledgePage projectId={route.projectId} projectName={activeProject?.name} />
         )}
-        {route.page === 'settings' && <SettingsPage />}
+        {route.page === 'settings' && <SettingsShell section={route.section} />}
       </main>
     </div>
   );
@@ -167,12 +234,12 @@ function HomePage({
                 <IconInbox size={32} style={{ color: 'var(--sg-border-strong)' }} />
                 <div>还没有项目</div>
                 <div className="sg-sub">
-                  先在「设置与诊断 → 常规」登记一个本地项目目录，再回来发起需求
+                  先在「设置与诊断 → 项目与目录」登记一个本地项目目录，再回来发起需求
                 </div>
                 <button
                   className="sg-btn sg-btn--primary"
                   style={{ marginTop: 8 }}
-                  onClick={() => onNavigate({ page: 'settings' })}
+                  onClick={() => onNavigate({ page: 'settings', section: 'projects' })}
                 >
                   去登记项目
                 </button>

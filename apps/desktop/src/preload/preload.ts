@@ -30,6 +30,16 @@ const api = {
   openExternal(url: string): Promise<void> {
     return ipcRenderer.invoke('sg:openExternal', url);
   },
+  // 设置中心窄 IPC：目录选择 / 应用信息 / 打开日志目录。
+  selectDirectory(): Promise<string | null> {
+    return ipcRenderer.invoke('sg:selectDirectory');
+  },
+  appInfo(): Promise<{ desktopVersion: string; logDir: string; userDataDir: string }> {
+    return ipcRenderer.invoke('sg:appInfo');
+  },
+  openLogs(): Promise<void> {
+    return ipcRenderer.invoke('sg:openLogs');
+  },
 };
 
 export type SixGatesBridge = typeof api;
