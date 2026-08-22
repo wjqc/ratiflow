@@ -40,7 +40,10 @@ mod tests {
         let (store, _guard) = open();
         assert!(store.schema_version().unwrap() >= 14);
         migration::run(&store).unwrap();
-        assert_eq!(store.schema_version().unwrap(), migration::MIGRATIONS.last().unwrap().0);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            migration::MIGRATIONS.last().unwrap().0
+        );
         store.quick_check().unwrap();
     }
 
@@ -50,19 +53,33 @@ mod tests {
         // 手工构造 v2 骨架库：app_meta.schema_version=1，无 schema_migrations。
         {
             let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
-            conn.execute_batch(include_str!("../migrations/0001_init.sql")).unwrap();
+            conn.execute_batch(include_str!("../migrations/0001_init.sql"))
+                .unwrap();
             conn.pragma_update(None, "journal_mode", "WAL").unwrap();
         }
         let store = Store::open(dir.path(), "test").unwrap();
-        assert_eq!(store.schema_version().unwrap(), migration::MIGRATIONS.last().unwrap().0);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            migration::MIGRATIONS.last().unwrap().0
+        );
     }
 
     #[test]
     fn objects_put_idempotent_and_secret_rejected() {
         let (store, _guard) = open();
-        let info = objects::put(&store, &b"evidence body"[..], objects::PutOptions::default()).unwrap();
+        let info = objects::put(
+            &store,
+            &b"evidence body"[..],
+            objects::PutOptions::default(),
+        )
+        .unwrap();
         assert_eq!(info.size, 13);
-        let again = objects::put(&store, &b"evidence body"[..], objects::PutOptions::default()).unwrap();
+        let again = objects::put(
+            &store,
+            &b"evidence body"[..],
+            objects::PutOptions::default(),
+        )
+        .unwrap();
         assert_eq!(again.sha256, info.sha256);
         let body = objects::open(&store, &info.sha256).unwrap();
         assert_eq!(body, b"evidence body");
@@ -70,7 +87,15 @@ mod tests {
         let secret = b"password: supersecretvalue123";
         let err = objects::put(&store, &secret[..], objects::PutOptions::default()).unwrap_err();
         assert!(err.to_string().contains("object_contains_secrets"));
-        let ok = objects::put(&store, &secret[..], objects::PutOptions { allow_secrets: true, ..Default::default() }).unwrap();
+        let ok = objects::put(
+            &store,
+            &secret[..],
+            objects::PutOptions {
+                allow_secrets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(!ok.sha256.is_empty());
     }
 
@@ -78,13 +103,22 @@ mod tests {
     fn objects_max_size() {
         let (store, _guard) = open();
         let big = vec![b'a'; 1025];
-        let err = objects::put(&store, &big[..], objects::PutOptions { max_bytes: 1024, ..Default::default() }).unwrap_err();
+        let err = objects::put(
+            &store,
+            &big[..],
+            objects::PutOptions {
+                max_bytes: 1024,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("max size"));
     }
 
     #[test]
     fn scan_mask_and_no_crossline() {
-        let masked = scan::mask(b"db.password = supersecretvalue123 api_key = sk-0123456789abcdef").0;
+        let masked =
+            scan::mask(b"db.password = supersecretvalue123 api_key = sk-0123456789abcdef").0;
         assert!(masked.contains("[REDACTED:password_assignment]"));
         assert!(!masked.contains("supersecretvalue123"));
 
@@ -95,8 +129,22 @@ mod tests {
     #[test]
     fn outbox_emit_replay() {
         let (store, _guard) = open();
-        let s1 = outbox::emit(&store, "workitem", "wi_1", "workitem.created", serde_json::json!({"title": "t"})).unwrap();
-        let s2 = outbox::emit(&store, "workitem", "wi_1", "stage.passed", serde_json::json!({"gate": "requirements"})).unwrap();
+        let s1 = outbox::emit(
+            &store,
+            "workitem",
+            "wi_1",
+            "workitem.created",
+            serde_json::json!({"title": "t"}),
+        )
+        .unwrap();
+        let s2 = outbox::emit(
+            &store,
+            "workitem",
+            "wi_1",
+            "stage.passed",
+            serde_json::json!({"gate": "requirements"}),
+        )
+        .unwrap();
         assert!(s2 > s1);
         let replayed = outbox::replay(&store, s1, 10).unwrap();
         assert_eq!(replayed.len(), 1);

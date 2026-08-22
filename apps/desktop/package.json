@@ -20,7 +20,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
-    "electron": "^33.0.0",
+    "electron": "33.4.11",
     "electron-builder": "^25.0.0",
     "jsdom": "^25.0.1",
     "typescript": "^5.9.0",
@@ -30,5 +30,7 @@
   "dependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
-  }
+  },
+  "description": "通关 SixGates — AI 软件交付工作台",
+  "author": "SixGates"
 }

@@ -9,10 +9,15 @@ pub fn migrate_v2(from: &str, to: &str, version: &str) -> Result<serde_json::Val
     let from_dir = Path::new(from);
     let to_dir = Path::new(to);
     if !from_dir.join("sixgates.db").exists() {
-        return Err(Error::Message(format!("v2 数据库不存在：{}/sixgates.db", from_dir.display())));
+        return Err(Error::Message(format!(
+            "v2 数据库不存在：{}/sixgates.db",
+            from_dir.display()
+        )));
     }
     if to_dir.exists() {
-        return Err(Error::Message("目标目录已存在（保持可回退原则，不覆盖）".into()));
+        return Err(Error::Message(
+            "目标目录已存在（保持可回退原则，不覆盖）".into(),
+        ));
     }
     std::fs::create_dir_all(to_dir)?;
 
@@ -46,7 +51,8 @@ pub fn migrate_v2(from: &str, to: &str, version: &str) -> Result<serde_json::Val
 fn count_rows(dir: &Path) -> Result<serde_json::Value, Error> {
     let conn = rusqlite::Connection::open(dir.join("sixgates.db"))?;
     let count = |table: &str| -> i64 {
-        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap_or(0)
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap_or(0)
     };
     Ok(json!({
         "projects": count("projects"),

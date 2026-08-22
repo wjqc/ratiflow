@@ -37,7 +37,11 @@ impl Store {
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // 单写者：连接全程持锁串行化。
-        let store = Self { conn: Mutex::new(conn), data_dir: data_dir.to_path_buf(), version: version.to_string() };
+        let store = Self {
+            conn: Mutex::new(conn),
+            data_dir: data_dir.to_path_buf(),
+            version: version.to_string(),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -46,13 +50,19 @@ impl Store {
     ///
     /// 闭包内禁止调用任何会再次进入 with_conn/with_tx 的函数：
     /// Mutex 不可重入，重入将死锁（曾导致 project::find_by_locator 挂死）。
-    pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+    pub fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let conn = self.conn.lock().expect("store connection poisoned");
         f(&conn)
     }
 
     /// 事务执行。
-    pub fn with_tx<T>(&self, f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, Error>) -> Result<T, Error> {
+    pub fn with_tx<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let conn = self.conn.lock().expect("store connection poisoned");
         let tx = conn.unchecked_transaction()?;
         let out = f(&tx)?;
@@ -67,15 +77,20 @@ impl Store {
     /// 当前 schema 版本。
     pub fn schema_version(&self) -> Result<i64, Error> {
         self.with_conn(|conn| {
-            conn.query_row("SELECT COALESCE(MAX(version),0) FROM schema_migrations", [], |r| r.get(0))
-                .map_err(Error::from)
+            conn.query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_migrations",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Error::from)
         })
     }
 
     /// 完整性检查（sidecar 重启后运行）。
     pub fn quick_check(&self) -> Result<(), Error> {
         let ok: String = self.with_conn(|conn| {
-            conn.query_row("PRAGMA quick_check", [], |r| r.get(0)).map_err(Error::from)
+            conn.query_row("PRAGMA quick_check", [], |r| r.get(0))
+                .map_err(Error::from)
         })?;
         if !ok.eq_ignore_ascii_case("ok") {
             return Err(Error::Message(format!("integrity check: {ok}")));
@@ -96,13 +111,18 @@ fn check_filesystem(dir: &Path) -> Result<(), Error> {
                 let (_dev, mnt, fstype) = (parts.next(), parts.next(), parts.next());
                 if let (Some(mnt), Some(fs)) = (mnt, fstype) {
                     let mnt_path = Path::new(&mnt.replace("\\040", " "));
-                    if abs.starts_with(mnt_path) && (best.is_none() || mnt.len() > best.as_ref().unwrap().0) {
+                    if abs.starts_with(mnt_path)
+                        && (best.is_none() || mnt.len() > best.as_ref().unwrap().0)
+                    {
                         best = Some((mnt.len(), fs.to_string()));
                     }
                 }
             }
             if let Some((_, fs)) = best {
-                if matches!(fs.as_str(), "nfs" | "nfs4" | "cifs" | "smbfs" | "9p" | "sshfs" | "webdav") {
+                if matches!(
+                    fs.as_str(),
+                    "nfs" | "nfs4" | "cifs" | "smbfs" | "9p" | "sshfs" | "webdav"
+                ) {
                     return Err(Error::UnsupportedFilesystem(format!("{dir:?} 位于 {fs}")));
                 }
             }
@@ -121,17 +141,29 @@ fn check_filesystem(dir: &Path) -> Result<(), Error> {
                     let device = rest.0;
                     if let Some(open) = rest.1.find(" (") {
                         let mnt = &rest.1[..open];
-                        let fstype = rest.1[open + 1..].split(',').next().unwrap_or("").trim_end_matches(')').to_string();
+                        let fstype = rest.1[open + 1..]
+                            .split(',')
+                            .next()
+                            .unwrap_or("")
+                            .trim_end_matches(')')
+                            .to_string();
                         let mnt_path = Path::new(mnt);
-                        if abs.starts_with(mnt_path) && (best.is_none() || mnt.len() > best.as_ref().unwrap().0) {
+                        if abs.starts_with(mnt_path)
+                            && (best.is_none() || mnt.len() > best.as_ref().unwrap().0)
+                        {
                             best = Some((mnt.len(), format!("{device}:{fstype}")));
                         }
                     }
                 }
             }
             if let Some((_, info)) = best {
-                if ["nfs", "smbfs", "afpfs", "afp", "webdav"].iter().any(|fs| info.contains(fs)) {
-                    return Err(Error::UnsupportedFilesystem(format!("{dir:?} 位于网络文件系统 {info}")));
+                if ["nfs", "smbfs", "afpfs", "afp", "webdav"]
+                    .iter()
+                    .any(|fs| info.contains(fs))
+                {
+                    return Err(Error::UnsupportedFilesystem(format!(
+                        "{dir:?} 位于网络文件系统 {info}"
+                    )));
                 }
             }
         }

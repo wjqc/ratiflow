@@ -54,7 +54,10 @@ pub struct GateResult {
 /// 纯函数：六输入全 pass 才通过。
 pub fn evaluate(inputs: &EvaluateInputs) -> GateResult {
     let checks = [
-        ("required_artifacts_frozen", inputs.required_artifacts_frozen),
+        (
+            "required_artifacts_frozen",
+            inputs.required_artifacts_frozen,
+        ),
         ("required_checks_passed", inputs.required_checks_passed),
         ("approvals_valid", inputs.approvals_valid),
         ("evidence_complete", inputs.evidence_complete),
@@ -82,7 +85,9 @@ pub fn record(store: &Store, inputs: &EvaluateInputs, result: &GateResult) -> Re
             "INSERT INTO gate_results(id, workitem_id, gate, inputs, result, computed_at)
              VALUES (?1,?2,?3,?4,?5,?6)",
             rusqlite::params![
-                id, inputs.workitem_id, inputs.gate,
+                id,
+                inputs.workitem_id,
+                inputs.gate,
                 serde_json::to_string(inputs).unwrap_or_default(),
                 serde_json::to_string(result).unwrap_or_default(),
                 result.computed_at
@@ -90,8 +95,13 @@ pub fn record(store: &Store, inputs: &EvaluateInputs, result: &GateResult) -> Re
         )?;
         Ok(())
     })?;
-    sg_store::outbox::emit(store, "workitem", &inputs.workitem_id, "gate.evaluated",
-        serde_json::json!({"gate": inputs.gate, "passed": result.passed, "failedInputs": result.failed_inputs}))?;
+    sg_store::outbox::emit(
+        store,
+        "workitem",
+        &inputs.workitem_id,
+        "gate.evaluated",
+        serde_json::json!({"gate": inputs.gate, "passed": result.passed, "failedInputs": result.failed_inputs}),
+    )?;
     Ok(())
 }
 
@@ -113,8 +123,8 @@ pub fn latest(store: &Store, workitem_id: &str, gate: &str) -> Result<Option<Gat
         })?;
         match rows.next() {
             Some(Ok((body, computed_at))) => {
-                let mut result: GateResult = serde_json::from_str(&body)
-                    .map_err(|e| Error::Message(e.to_string()))?;
+                let mut result: GateResult =
+                    serde_json::from_str(&body).map_err(|e| Error::Message(e.to_string()))?;
                 result.computed_at = computed_at;
                 Ok(Some(result))
             }

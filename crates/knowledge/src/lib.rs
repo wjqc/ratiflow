@@ -24,8 +24,17 @@ pub struct Source {
     pub updated_at: String,
 }
 
-pub fn create_source(store: &Store, project_id: &str, kind: &str, name: &str, locator: &str) -> Result<Source, Error> {
-    if !matches!(kind, "repo_path" | "document" | "openapi" | "gitlab" | "rule") {
+pub fn create_source(
+    store: &Store,
+    project_id: &str,
+    kind: &str,
+    name: &str,
+    locator: &str,
+) -> Result<Source, Error> {
+    if !matches!(
+        kind,
+        "repo_path" | "document" | "openapi" | "gitlab" | "rule"
+    ) {
         return Err(Error::Message(format!("invalid source kind {kind}")));
     }
     if project_id.is_empty() || name.is_empty() || locator.is_empty() {
@@ -93,7 +102,12 @@ pub fn list_sources(store: &Store, project_id: &str) -> Result<Vec<Source>, Erro
     })
 }
 
-pub fn update_source(store: &Store, id: &str, enabled: Option<bool>, name: Option<&str>) -> Result<(), Error> {
+pub fn update_source(
+    store: &Store,
+    id: &str,
+    enabled: Option<bool>,
+    name: Option<&str>,
+) -> Result<(), Error> {
     let changed = store.with_conn(|conn| {
         conn.execute(
             "UPDATE knowledge_sources SET enabled = COALESCE(?1, enabled), name = COALESCE(?2, name),
@@ -146,8 +160,12 @@ fn load_ignores(root: &Path) -> Vec<String> {
 fn is_ignored(rel: &Path, patterns: &[String]) -> bool {
     let rel_str = rel.to_string_lossy();
     for pattern in patterns {
-        if rel_str.starts_with(&format!("{pattern}/")) || rel_str == *pattern
-            || rel.file_name().map(|n| n.to_string_lossy() == *pattern).unwrap_or(false)
+        if rel_str.starts_with(&format!("{pattern}/"))
+            || rel_str == *pattern
+            || rel
+                .file_name()
+                .map(|n| n.to_string_lossy() == *pattern)
+                .unwrap_or(false)
             || (pattern.starts_with('*') && rel_str.ends_with(pattern.trim_start_matches('*')))
         {
             return true;
@@ -157,7 +175,13 @@ fn is_ignored(rel: &Path, patterns: &[String]) -> bool {
 }
 
 /// 扫描：受限在根目录内；秘密内容拒绝入库（fail closed）；单事务替换索引。
-pub fn scan_source(store: &Store, source_id: &str, project_root: Option<&Path>, max_files: usize, max_file_bytes: u64) -> Result<Source, Error> {
+pub fn scan_source(
+    store: &Store,
+    source_id: &str,
+    project_root: Option<&Path>,
+    max_files: usize,
+    max_file_bytes: u64,
+) -> Result<Source, Error> {
     let source = get_source(store, source_id)?;
     set_scan_state(store, source_id, "scanning", "")?;
 
@@ -166,14 +190,31 @@ pub fn scan_source(store: &Store, source_id: &str, project_root: Option<&Path>, 
         None => PathBuf::from(&source.locator),
     };
     if !root.is_absolute() || !root.exists() {
-        set_scan_state(store, source_id, "failed", &format!("根目录不可用：{}", root.display()))?;
-        return Err(Error::Message(format!("path_outside_project: {}", root.display())));
+        set_scan_state(
+            store,
+            source_id,
+            "failed",
+            &format!("根目录不可用：{}", root.display()),
+        )?;
+        return Err(Error::Message(format!(
+            "path_outside_project: {}",
+            root.display()
+        )));
     }
-    let canonical = root.canonicalize().map_err(|e| Error::Message(e.to_string()))?;
+    let canonical = root
+        .canonicalize()
+        .map_err(|e| Error::Message(e.to_string()))?;
 
     let ignores = load_ignores(&canonical);
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_files(&canonical, &canonical, &ignores, &mut files, max_files, max_file_bytes)?;
+    collect_files(
+        &canonical,
+        &canonical,
+        &ignores,
+        &mut files,
+        max_files,
+        max_file_bytes,
+    )?;
     if files.is_empty() {
         set_scan_state(store, source_id, "failed", "未发现可索引文件")?;
         return Err(Error::Message("no indexable files".into()));
@@ -206,7 +247,11 @@ pub fn scan_source(store: &Store, source_id: &str, project_root: Option<&Path>, 
             let chunk_id = ids::new_id("kc");
             root_hasher.update(chunk.as_bytes());
             chunks.push((ordinal, info.sha256.clone(), (chunk.len() / 4) as i64));
-            chunk_rows.push((chunk_id.clone(), info.sha256, format!("{}\n{}", rel.display(), chunk)));
+            chunk_rows.push((
+                chunk_id.clone(),
+                info.sha256,
+                format!("{}\n{}", rel.display(), chunk),
+            ));
         }
     }
     let content_sha = ids::hex(&root_hasher.finalize());
@@ -235,8 +280,13 @@ pub fn scan_source(store: &Store, source_id: &str, project_root: Option<&Path>, 
         )?;
         Ok(())
     })?;
-    outbox::emit(store, "knowledge", source_id, "knowledge.scanned",
-        json!({"projectId": source.project_id, "chunks": chunks.len()}))?;
+    outbox::emit(
+        store,
+        "knowledge",
+        source_id,
+        "knowledge.scanned",
+        json!({"projectId": source.project_id, "chunks": chunks.len()}),
+    )?;
     get_source(store, source_id)
 }
 
@@ -250,7 +300,14 @@ fn set_scan_state(store: &Store, source_id: &str, state: &str, error: &str) -> R
     })
 }
 
-fn collect_files(root: &Path, dir: &Path, ignores: &[String], out: &mut Vec<PathBuf>, max_files: usize, max_file_bytes: u64) -> Result<(), Error> {
+fn collect_files(
+    root: &Path,
+    dir: &Path,
+    ignores: &[String],
+    out: &mut Vec<PathBuf>,
+    max_files: usize,
+    max_file_bytes: u64,
+) -> Result<(), Error> {
     if out.len() >= max_files {
         return Ok(());
     }
@@ -301,14 +358,23 @@ fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
 
 /// FTS5 检索（项目作用域强制）。trigram 分词器：MATCH 支持中文短语（≥3 字符）；
 /// 短查询与兜底走 LIKE（同表 trigram 索引可加速）。用户输入不进 FTS 语法层。
-pub fn search(store: &Store, project_id: &str, query: &str, limit: i64) -> Result<Vec<Value>, Error> {
+pub fn search(
+    store: &Store,
+    project_id: &str,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<Value>, Error> {
     if query.trim().is_empty() {
         return Ok(vec![]);
     }
     // 逐词 AND：每个词独立 MATCH（trigram，≥3 字）或 LIKE（短词/中文词组均可用）。
     let terms: Vec<String> = query
         .split_whitespace()
-        .map(|w| w.chars().filter(|c| !matches!(c, '"' | '*' | '(' | ')' | ':' | '\'' | '%')).collect::<String>())
+        .map(|w| {
+            w.chars()
+                .filter(|c| !matches!(c, '"' | '*' | '(' | ')' | ':' | '\'' | '%'))
+                .collect::<String>()
+        })
         .filter(|w| !w.is_empty())
         .take(5)
         .collect();
@@ -345,13 +411,20 @@ pub fn search(store: &Store, project_id: &str, query: &str, limit: i64) -> Resul
 }
 
 /// 上下文预览：来源、片段、大小与排除理由（F02：不能只返回拼接大文本）。
-pub fn context_preview(store: &Store, project_id: &str, query: &str, max_bytes: i64) -> Result<Value, Error> {
+pub fn context_preview(
+    store: &Store,
+    project_id: &str,
+    query: &str,
+    max_bytes: i64,
+) -> Result<Value, Error> {
     let sources = list_sources(store, project_id)?;
     let hits = search(store, project_id, query, 20)?;
     let mut items = Vec::new();
     let mut total = 0i64;
     for hit in &hits {
-        let source = sources.iter().find(|s| s.id == hit["sourceId"].as_str().unwrap_or_default());
+        let source = sources
+            .iter()
+            .find(|s| s.id == hit["sourceId"].as_str().unwrap_or_default());
         let snippet = hit["snippet"].as_str().unwrap_or_default();
         let size = snippet.len() as i64;
         let included = total + size <= max_bytes;
@@ -381,7 +454,8 @@ pub fn create_manifest(
     let preview = context_preview(store, project_id, query, 64 << 10)?;
     let id = ids::new_id("ctx");
     let now = timefmt::now();
-    let scope = json!({"query": query, "selectedSources": selected_sources, "maxContextBytes": 262144});
+    let scope =
+        json!({"query": query, "selectedSources": selected_sources, "maxContextBytes": 262144});
     store.with_conn(|conn| {
         conn.execute(
             "INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at) VALUES (?1,?2,?3,'standard',?4)",
@@ -440,12 +514,18 @@ mod tests {
             }
         }
         pub fn make(prefix: &str) -> TempDirGuard {
-            let path = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), sg_store::ids::new_id("t")));
+            let path = std::env::temp_dir().join(format!(
+                "{prefix}-{}-{}",
+                std::process::id(),
+                sg_store::ids::new_id("t")
+            ));
             std::fs::create_dir_all(&path).unwrap();
             TempDirGuard(path)
         }
         impl TempDirGuard {
-            pub fn path(&self) -> &std::path::Path { &self.0 }
+            pub fn path(&self) -> &std::path::Path {
+                &self.0
+            }
         }
     }
 
@@ -455,13 +535,22 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join("docs")).unwrap();
         std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
-        std::fs::write(repo.join("docs").join("auth.md"), "# 认证设计\nOIDC 登录流程：授权码模式。\n").unwrap();
+        std::fs::write(
+            repo.join("docs").join("auth.md"),
+            "# 认证设计\nOIDC 登录流程：授权码模式。\n",
+        )
+        .unwrap();
         std::fs::write(repo.join("README.md"), "# Demo\n支持 sso 单点登录。\n").unwrap();
-        std::fs::write(repo.join("node_modules").join("pkg").join("x.js"), "ignored").unwrap();
+        std::fs::write(
+            repo.join("node_modules").join("pkg").join("x.js"),
+            "ignored",
+        )
+        .unwrap();
         std::fs::write(repo.join(".sixgatesignore"), "private/\n").unwrap();
         std::fs::write(repo.join("private"), b"secret area").ok(); // 文件非目录，命中前缀忽略
 
-        let source = create_source(&store, "pj", "repo_path", "主仓库", repo.to_str().unwrap()).unwrap();
+        let source =
+            create_source(&store, "pj", "repo_path", "主仓库", repo.to_str().unwrap()).unwrap();
         let scanned = scan_source(&store, &source.id, None, 100, 64 << 10).unwrap();
         assert_eq!(scanned.scan_state, "indexed");
         assert!(!scanned.content_sha256.is_empty());
@@ -473,7 +562,7 @@ mod tests {
         assert!(search(&store, "pj_other", "认证", 10).unwrap().is_empty());
 
         let preview = context_preview(&store, "pj", "登录", 4096).unwrap();
-        assert!(preview["items"].as_array().unwrap().len() > 0);
+        assert!(!preview["items"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -482,7 +571,8 @@ mod tests {
         let repo = dir.path().join("repo2");
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join("deploy.env"), "api_key = sk-0123456789abcdef\n").unwrap();
-        let source = create_source(&store, "pj", "repo_path", "秘密仓", repo.to_str().unwrap()).unwrap();
+        let source =
+            create_source(&store, "pj", "repo_path", "秘密仓", repo.to_str().unwrap()).unwrap();
         let result = scan_source(&store, &source.id, None, 100, 64 << 10);
         assert!(result.is_err(), "全秘密来源必须失败");
         let after = get_source(&store, &source.id).unwrap();

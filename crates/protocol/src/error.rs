@@ -124,13 +124,27 @@ pub struct RpcError {
 
 impl RpcError {
     pub fn new(kind: ErrorCode, safe_message: impl Into<String>) -> Self {
-        Self { code: kind.code(), message: kind.name().to_string(), retryable: kind.retryable(), data: Some(serde_json::json!({ "detail": safe_message.into() })) }
+        Self {
+            code: kind.code(),
+            message: kind.name().to_string(),
+            retryable: kind.retryable(),
+            data: Some(serde_json::json!({ "detail": safe_message.into() })),
+        }
     }
 }
 
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({}): {}", self.code, self.message, self.data.as_ref().map(|d| d.to_string()).unwrap_or_default())
+        write!(
+            f,
+            "{} ({}): {}",
+            self.code,
+            self.message,
+            self.data
+                .as_ref()
+                .map(|d| d.to_string())
+                .unwrap_or_default()
+        )
     }
 }
 

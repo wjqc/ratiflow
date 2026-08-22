@@ -70,7 +70,11 @@ impl ModelProvider for ModelHttp {
         if self.api_key.is_empty() {
             return Err("model_unavailable: api key missing".into());
         }
-        let model = if req.model.is_empty() { self.model.clone() } else { req.model.clone() };
+        let model = if req.model.is_empty() {
+            self.model.clone()
+        } else {
+            req.model.clone()
+        };
         let mut messages: Vec<serde_json::Value> = Vec::new();
         if !req.system_prompt.is_empty() {
             messages.push(serde_json::json!({"role": "system", "content": req.system_prompt}));
@@ -78,7 +82,8 @@ impl ModelProvider for ModelHttp {
         for msg in &req.messages {
             messages.push(serde_json::json!({"role": msg.role, "content": msg.content}));
         }
-        let body = serde_json::json!({"model": model, "messages": messages, "max_tokens": req.max_tokens});
+        let body =
+            serde_json::json!({"model": model, "messages": messages, "max_tokens": req.max_tokens});
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let response = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
@@ -91,8 +96,13 @@ impl ModelProvider for ModelHttp {
         if response.status() >= 400 {
             return Err(format!("model_unavailable: HTTP {}", response.status()));
         }
-        let parsed: serde_json::Value = response.into_json().map_err(|e| format!("model_invalid_json: {e}"))?;
-        let content = parsed["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string();
+        let parsed: serde_json::Value = response
+            .into_json()
+            .map_err(|e| format!("model_invalid_json: {e}"))?;
+        let content = parsed["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         if content.is_empty() {
             return Err("model_unavailable: no choices".into());
         }
@@ -100,7 +110,10 @@ impl ModelProvider for ModelHttp {
             content,
             tokens_in: parsed["usage"]["prompt_tokens"].as_i64().unwrap_or(0),
             tokens_out: parsed["usage"]["completion_tokens"].as_i64().unwrap_or(0),
-            finish_reason: parsed["choices"][0]["finish_reason"].as_str().unwrap_or_default().into(),
+            finish_reason: parsed["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
         })
     }
 }
@@ -142,6 +155,10 @@ impl ModelProvider for FakeModel {
         if let Some(err) = self.errors.lock().unwrap().pop_front() {
             return Err(err);
         }
-        self.script.lock().unwrap().pop_front().ok_or_else(|| "model_unavailable: script exhausted".into())
+        self.script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| "model_unavailable: script exhausted".into())
     }
 }

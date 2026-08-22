@@ -20,12 +20,22 @@ pub struct Attachment {
 }
 
 /// 导入附件：内容进 objects（类型嗅探 + 大小限制 + 秘密扫描）。
-pub fn import(store: &Store, workitem_id: &str, filename: &str, content: &[u8], opts: objects::PutOptions) -> Result<Attachment, Error> {
+pub fn import(
+    store: &Store,
+    workitem_id: &str,
+    filename: &str,
+    content: &[u8],
+    opts: objects::PutOptions,
+) -> Result<Attachment, Error> {
     if filename.is_empty() {
         return Err(Error::Message("filename required".into()));
     }
     let info = objects::put(store, content, opts)?;
-    let kind = if info.content_type.starts_with("image/") { "image" } else { "document" };
+    let kind = if info.content_type.starts_with("image/") {
+        "image"
+    } else {
+        "document"
+    };
     let id = ids::new_id("att");
     let now = timefmt::now();
     store.with_conn(|conn| {
@@ -36,8 +46,13 @@ pub fn import(store: &Store, workitem_id: &str, filename: &str, content: &[u8], 
         )?;
         Ok(())
     })?;
-    outbox::emit(store, "workitem", workitem_id, "attachment.imported",
-        serde_json::json!({"attachmentId": id, "kind": kind, "filename": filename}))?;
+    outbox::emit(
+        store,
+        "workitem",
+        workitem_id,
+        "attachment.imported",
+        serde_json::json!({"attachmentId": id, "kind": kind, "filename": filename}),
+    )?;
     get(store, &id)
 }
 
@@ -88,7 +103,13 @@ pub fn list(store: &Store, workitem_id: &str) -> Result<Vec<Attachment>, Error> 
 
 /// 解析状态推进：parsed（带提取文本对象）/ failed / vision_unsupported。
 /// 解析失败不删除原附件（可人工补充文字继续需求关）。
-pub fn set_parse_result(store: &Store, id: &str, state: &str, extracted_text: Option<&str>, error: &str) -> Result<(), Error> {
+pub fn set_parse_result(
+    store: &Store,
+    id: &str,
+    state: &str,
+    extracted_text: Option<&str>,
+    error: &str,
+) -> Result<(), Error> {
     if !matches!(state, "parsed" | "failed" | "vision_unsupported") {
         return Err(Error::Message(format!("invalid parse state {state}")));
     }
@@ -134,7 +155,11 @@ mod tests {
     use super::*;
 
     fn setup() -> Store {
-        let dir = std::env::temp_dir().join(format!("sg-att-{}-{}", std::process::id(), ids::new_id("t")));
+        let dir = std::env::temp_dir().join(format!(
+            "sg-att-{}-{}",
+            std::process::id(),
+            ids::new_id("t")
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir, "test").unwrap();
         store.with_conn(|c| {
@@ -148,10 +173,24 @@ mod tests {
     #[test]
     fn import_document_and_image_kind() {
         let s = setup();
-        let doc = import(&s, "wi", "需求.md", "# 需求\n正文".as_bytes(), objects::PutOptions::default()).unwrap();
+        let doc = import(
+            &s,
+            "wi",
+            "需求.md",
+            "# 需求\n正文".as_bytes(),
+            objects::PutOptions::default(),
+        )
+        .unwrap();
         assert_eq!(doc.kind, "document");
         let png_header = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
-        let img = import(&s, "wi", "截图.png", &png_header, objects::PutOptions::default()).unwrap();
+        let img = import(
+            &s,
+            "wi",
+            "截图.png",
+            &png_header,
+            objects::PutOptions::default(),
+        )
+        .unwrap();
         assert_eq!(img.kind, "image");
         assert_eq!(img.content_type, "image/png");
         assert_eq!(list(&s, "wi").unwrap().len(), 2);
@@ -160,13 +199,34 @@ mod tests {
     #[test]
     fn parse_states_keep_attachment() {
         let s = setup();
-        let att = import(&s, "wi", "原型.png", &[0x89, b'P', b'N', b'G', 1, 2, 3], objects::PutOptions::default()).unwrap();
-        set_parse_result(&s, &att.id, "vision_unsupported", None, "provider 无视觉能力").unwrap();
+        let att = import(
+            &s,
+            "wi",
+            "原型.png",
+            &[0x89, b'P', b'N', b'G', 1, 2, 3],
+            objects::PutOptions::default(),
+        )
+        .unwrap();
+        set_parse_result(
+            &s,
+            &att.id,
+            "vision_unsupported",
+            None,
+            "provider 无视觉能力",
+        )
+        .unwrap();
         let after = get(&s, &att.id).unwrap();
         assert_eq!(after.parse_state, "vision_unsupported");
         assert!(after.extracted_object_sha256.is_none());
         assert!(!open_object(&s, &att.id).unwrap().is_empty());
-        set_parse_result(&s, &att.id, "parsed", Some("登录页原型：账号密码 + SSO 按钮"), "").unwrap();
+        set_parse_result(
+            &s,
+            &att.id,
+            "parsed",
+            Some("登录页原型：账号密码 + SSO 按钮"),
+            "",
+        )
+        .unwrap();
         assert_eq!(get(&s, &att.id).unwrap().parse_state, "parsed");
     }
 }

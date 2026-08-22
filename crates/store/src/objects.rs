@@ -28,7 +28,10 @@ pub struct PutOptions {
 
 impl Default for PutOptions {
     fn default() -> Self {
-        Self { max_bytes: 32 << 20, allow_secrets: false }
+        Self {
+            max_bytes: 32 << 20,
+            allow_secrets: false,
+        }
     }
 }
 
@@ -51,7 +54,10 @@ pub fn put(store: &Store, mut reader: impl Read, opts: PutOptions) -> Result<Obj
         written += n as i64;
         if written > opts.max_bytes {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(Error::Message(format!("object exceeds max size {} bytes", opts.max_bytes)));
+            return Err(Error::Message(format!(
+                "object exceeds max size {} bytes",
+                opts.max_bytes
+            )));
         }
         std::io::Write::write_all(&mut file, &buf[..n])?;
         hasher.update(&buf[..n]);
@@ -73,7 +79,13 @@ pub fn put(store: &Store, mut reader: impl Read, opts: PutOptions) -> Result<Obj
         tx.execute(
             "INSERT INTO objects(sha256, size, content_type, secret_findings, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(sha256) DO NOTHING",
-            rusqlite::params![sum, written, content_type, serde_json::to_string(&findings).unwrap_or_else(|_| "[]".into()), now],
+            rusqlite::params![
+                sum,
+                written,
+                content_type,
+                serde_json::to_string(&findings).unwrap_or_else(|_| "[]".into()),
+                now
+            ],
         )?;
         let created: String = tx.query_row(
             "SELECT created_at FROM objects WHERE sha256 = ?1",
@@ -93,7 +105,12 @@ pub fn put(store: &Store, mut reader: impl Read, opts: PutOptions) -> Result<Obj
         let _ = std::fs::remove_file(&tmp_path);
     }
 
-    Ok(ObjectInfo { sha256: sum, size: written, content_type, created_at: created })
+    Ok(ObjectInfo {
+        sha256: sum,
+        size: written,
+        content_type,
+        created_at: created,
+    })
 }
 
 /// 打开对象内容。
@@ -127,7 +144,11 @@ pub fn object_path(store: &Store, sum: &str) -> PathBuf {
 }
 
 fn valid_sha(sum: &str) -> Result<(), Error> {
-    if sum.len() != 64 || !sum.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if sum.len() != 64
+        || !sum
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err(Error::Message("object_not_found".into()));
     }
     Ok(())

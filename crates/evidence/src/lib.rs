@@ -20,16 +20,27 @@ pub struct Evidence {
     pub created_at: String,
 }
 
-pub fn record(
-    store: &Store,
-    workitem_id: &str,
-    gate: &str,
-    kind: &str,
-    title: &str,
-    content: Option<&str>,
-    payload: &str,
-    source: &str,
-) -> Result<Evidence, Error> {
+#[derive(Debug, Clone)]
+pub struct RecordInput<'a> {
+    pub workitem_id: &'a str,
+    pub gate: &'a str,
+    pub kind: &'a str,
+    pub title: &'a str,
+    pub content: Option<&'a str>,
+    pub payload: &'a str,
+    pub source: &'a str,
+}
+
+pub fn record(store: &Store, input: &RecordInput<'_>) -> Result<Evidence, Error> {
+    let RecordInput {
+        workitem_id,
+        gate,
+        kind,
+        title,
+        content,
+        payload,
+        source,
+    } = *input;
     if workitem_id.is_empty() || gate.is_empty() || kind.is_empty() {
         return Err(Error::Message("workitem/gate/kind required".into()));
     }
@@ -53,12 +64,26 @@ pub fn record(
         let created: String = conn.query_row("SELECT created_at FROM evidences WHERE id=?1", [&id], |r| r.get(0))?;
         Ok(created)
     })?;
-    outbox::emit(store, "evidence", &id, "evidence.recorded",
-        serde_json::json!({"workitemId": workitem_id, "gate": gate, "kind": kind}))?;
+    outbox::emit(
+        store,
+        "evidence",
+        &id,
+        "evidence.recorded",
+        serde_json::json!({"workitemId": workitem_id, "gate": gate, "kind": kind}),
+    )?;
     Ok(Evidence {
-        id, workitem_id: workitem_id.into(), gate: gate.into(), kind: kind.into(),
-        title: title.into(), object_sha256: object_sha, payload: payload_body.into(),
-        source: source.into(), verified: false, verified_at: None, verified_by: None, created_at,
+        id,
+        workitem_id: workitem_id.into(),
+        gate: gate.into(),
+        kind: kind.into(),
+        title: title.into(),
+        object_sha256: object_sha,
+        payload: payload_body.into(),
+        source: source.into(),
+        verified: false,
+        verified_at: None,
+        verified_by: None,
+        created_at,
     })
 }
 
@@ -71,7 +96,9 @@ pub fn verify(store: &Store, evidence_id: &str, verified_by: &str) -> Result<(),
         Ok(conn.changes())
     })?;
     if changed == 0 {
-        return Err(Error::Message("evidence not found or already verified".into()));
+        return Err(Error::Message(
+            "evidence not found or already verified".into(),
+        ));
     }
     Ok(())
 }
@@ -132,15 +159,29 @@ pub struct Passport {
 }
 
 /// 签发通关文牒：六关必须全部 passed。
-pub fn issue_passport(store: &Store, workitem_id: &str, gates: &[GateSummary], shared_summary: &str) -> Result<Passport, Error> {
+pub fn issue_passport(
+    store: &Store,
+    workitem_id: &str,
+    gates: &[GateSummary],
+    shared_summary: &str,
+) -> Result<Passport, Error> {
     if gates.len() != 6 {
-        return Err(Error::Message(format!("passport_incomplete_gates: 需要 6 关结论，收到 {}", gates.len())));
+        return Err(Error::Message(format!(
+            "passport_incomplete_gates: 需要 6 关结论，收到 {}",
+            gates.len()
+        )));
     }
     if gates.iter().any(|g| !g.passed) {
-        return Err(Error::Message("passport_incomplete_gates: 存在未通过关卡".into()));
+        return Err(Error::Message(
+            "passport_incomplete_gates: 存在未通过关卡".into(),
+        ));
     }
     let evidences = list(store, workitem_id, None)?;
-    let hashes: Vec<&str> = evidences.iter().filter(|e| !e.object_sha256.is_empty()).map(|e| e.object_sha256.as_str()).collect();
+    let hashes: Vec<&str> = evidences
+        .iter()
+        .filter(|e| !e.object_sha256.is_empty())
+        .map(|e| e.object_sha256.as_str())
+        .collect();
     let summary = serde_json::json!({
         "workitemId": workitem_id,
         "gateResults": gates,
@@ -168,11 +209,20 @@ pub fn issue_passport(store: &Store, workitem_id: &str, gates: &[GateSummary], s
         let created: String = conn.query_row("SELECT created_at FROM passports WHERE id=?1", [&id], |r| r.get(0))?;
         Ok(created)
     })?;
-    outbox::emit(store, "passport", &id, "passport.issued",
-        serde_json::json!({"workitemId": workitem_id, "sha256": info.sha256.clone()}))?;
+    outbox::emit(
+        store,
+        "passport",
+        &id,
+        "passport.issued",
+        serde_json::json!({"workitemId": workitem_id, "sha256": info.sha256.clone()}),
+    )?;
     Ok(Passport {
-        id, workitem_id: workitem_id.into(), object_sha256: info.sha256.clone(),
-        inputs_sha256: info.sha256, created_at, gates: gates.to_vec(),
+        id,
+        workitem_id: workitem_id.into(),
+        object_sha256: info.sha256.clone(),
+        inputs_sha256: info.sha256,
+        created_at,
+        gates: gates.to_vec(),
     })
 }
 
@@ -214,8 +264,12 @@ pub fn latest_passport(store: &Store, workitem_id: &str) -> Result<Option<Passpo
                 .map_err(|_| Error::Message("passport_not_found".into()))
             })?;
             Ok(Some(Passport {
-                id: base.0, workitem_id: workitem_id.into(), object_sha256: base.1,
-                inputs_sha256: base.2, created_at: base.3, gates,
+                id: base.0,
+                workitem_id: workitem_id.into(),
+                object_sha256: base.1,
+                inputs_sha256: base.2,
+                created_at: base.3,
+                gates,
             }))
         }
         None => Ok(None),
@@ -227,7 +281,8 @@ mod tests {
     use super::*;
 
     fn setup() -> Store {
-        let dir = std::env::temp_dir().join(format!("sg-ev-{}-{}", std::process::id(), ids::new_id("t")));
+        let dir =
+            std::env::temp_dir().join(format!("sg-ev-{}-{}", std::process::id(), ids::new_id("t")));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir, "test").unwrap();
         store.with_conn(|c| {
@@ -239,16 +294,40 @@ mod tests {
     }
 
     fn all_gates_pass() -> Vec<GateSummary> {
-        ["requirements", "design", "development", "testing", "deployment", "verification"]
-            .iter()
-            .map(|g| GateSummary { gate: g.to_string(), passed: true, evidence_ids: vec![], failed_inputs: vec![] })
-            .collect()
+        [
+            "requirements",
+            "design",
+            "development",
+            "testing",
+            "deployment",
+            "verification",
+        ]
+        .iter()
+        .map(|g| GateSummary {
+            gate: g.to_string(),
+            passed: true,
+            evidence_ids: vec![],
+            failed_inputs: vec![],
+        })
+        .collect()
     }
 
     #[test]
     fn record_verify_list() {
         let s = setup();
-        let ev = record(&s, "wi", "testing", "test_report", "JUnit", Some("<tests tests='12' failures='0'/>"), "{}", "gitlab").unwrap();
+        let ev = record(
+            &s,
+            &RecordInput {
+                workitem_id: "wi",
+                gate: "testing",
+                kind: "test_report",
+                title: "JUnit",
+                content: Some("<tests tests='12' failures='0'/>"),
+                payload: "{}",
+                source: "gitlab",
+            },
+        )
+        .unwrap();
         assert!(!ev.object_sha256.is_empty());
         verify(&s, &ev.id, "qa").unwrap();
         assert!(verify(&s, &ev.id, "qa").is_err(), "重复复验拒绝");

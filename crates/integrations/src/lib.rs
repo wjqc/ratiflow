@@ -7,4 +7,4 @@ pub mod ssh;
 
 pub use gitlab::{FakeGitLab, GitLabClient, GitLabHttp, GitLabIssue, GitLabMR, GitLabPipeline};
 pub use model::{FakeModel, ModelHttp, ModelProvider};
-pub use ssh::{FakeSSH, SSHTarget, SSHAdapter};
+pub use ssh::{FakeSSH, SSHAdapter, SSHTarget};

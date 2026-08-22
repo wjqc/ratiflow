@@ -2,9 +2,9 @@
 //! 模型只能产出 ToolCallProposal；出网内容统一裁剪/脱敏/预算；completed_execution ≠ 过关。
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sg_integrations::model::{ChatMessage, CompletionRequest, ModelProvider};
+use sg_integrations::model::{ChatMessage, CompletionRequest};
 use sg_policy::{self, PolicyError, Snapshot};
-use sg_store::{ids, objects, outbox, scan, timefmt, Error, Store};
+use sg_store::{ids, outbox, timefmt, Error, Store};
 
 pub mod modelgw;
 pub use modelgw::{Budget, Gateway, Usage};
@@ -18,7 +18,11 @@ pub struct RunBudget {
 
 impl Default for RunBudget {
     fn default() -> Self {
-        Self { max_tool_calls: 40, max_duration_sec: 1800, model: Budget::default() }
+        Self {
+            max_tool_calls: 40,
+            max_duration_sec: 1800,
+            model: Budget::default(),
+        }
     }
 }
 
@@ -58,27 +62,45 @@ pub struct RunOutput {
 }
 
 /// 启动一次 Run（同步循环，受预算/迭代/取消约束）。
+#[derive(Debug, Clone)]
+pub struct RunConfig<'a> {
+    pub workitem_id: &'a str,
+    pub task_id: &'a str,
+    pub goal: &'a str,
+    pub manifest_id: &'a str,
+    pub tool_allowlist: &'a [String],
+    pub idempotency_key: &'a str,
+    pub budget: &'a RunBudget,
+    pub max_iterations: usize,
+}
+
 pub fn start(
     store: &Store,
     gateway: &Gateway,
     policy: &Snapshot,
     executor: Option<&ToolExecutor>,
-    workitem_id: &str,
-    task_id: &str,
-    goal: &str,
-    manifest_id: &str,
-    tool_allowlist: &[String],
-    idempotency_key: &str,
-    budget: &RunBudget,
-    max_iterations: usize,
+    config: &RunConfig<'_>,
 ) -> Result<RunOutput, Error> {
+    let RunConfig {
+        workitem_id,
+        task_id,
+        goal,
+        manifest_id,
+        tool_allowlist,
+        idempotency_key,
+        budget,
+        max_iterations,
+    } = *config;
     if workitem_id.is_empty() || goal.is_empty() || manifest_id.is_empty() {
         return Err(Error::Message("workitem/goal/manifest required".into()));
     }
     // 幂等。
     let existing: Option<String> = store.with_conn(|conn| {
         let result: rusqlite::Result<String> = conn.query_row(
-            "SELECT id FROM agent_runs WHERE idempotency_key=?1", [idempotency_key], |r| r.get(0));
+            "SELECT id FROM agent_runs WHERE idempotency_key=?1",
+            [idempotency_key],
+            |r| r.get(0),
+        );
         Ok(result.ok())
     })?;
     if let Some(id) = existing {
@@ -104,11 +126,14 @@ pub fn start(
     let mut run = get_run(store, &id)?;
     set_status(store, &mut run, "running")?;
 
-    let mut messages = vec![ChatMessage { role: "user".into(), content: goal.into() }];
+    let mut messages = vec![ChatMessage {
+        role: "user".into(),
+        content: goal.into(),
+    }];
     let mut tool_calls = 0i64;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(budget.max_duration_sec.max(1) as u64);
-    let mut final_output = String::new();
-
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(budget.max_duration_sec.max(1) as u64);
+    #[allow(unused_assignments)]
     for iteration in 0..max_iterations {
         if std::time::Instant::now() > deadline {
             run.result = "budget: duration exceeded".into();
@@ -142,19 +167,27 @@ pub fn start(
         let decision = match parse_decision(&response.content) {
             Some(d) => d,
             None => {
-                messages.push(ChatMessage { role: "assistant".into(), content: response.content });
-                messages.push(ChatMessage { role: "user".into(), content: "输出必须是 JSON（schema 见系统提示）；请重新输出决策对象。".into() });
+                messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: response.content,
+                });
+                messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: "输出必须是 JSON（schema 见系统提示）；请重新输出决策对象。".into(),
+                });
                 continue;
             }
         };
 
         if decision.action == "final" {
             run.result = decision.summary.clone();
-            final_output = decision.summary;
             set_status(store, &mut run, "completed_execution")?;
             checkpoint(store, &id, iteration, &messages);
             finish(store, &run)?;
-            return Ok(RunOutput { run, output: final_output });
+            return Ok(RunOutput {
+                run,
+                output: decision.summary,
+            });
         }
 
         if tool_calls >= budget.max_tool_calls {
@@ -164,12 +197,18 @@ pub fn start(
             return Err(Error::Message("budget_exhausted: tool calls".into()));
         }
 
-        let (outcome, output_text) =
+        let (_outcome, output_text) =
             propose_and_execute(store, policy, executor, &run, &decision)?;
         tool_calls += 1;
-        final_output = output_text.clone();
-        messages.push(ChatMessage { role: "assistant".into(), content: format!("tool {}({})", decision.action, decision.arguments) });
-        messages.push(ChatMessage { role: "tool".into(), content: output_text });
+        let _ = &output_text;
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: format!("tool {}({})", decision.action, decision.arguments),
+        });
+        messages.push(ChatMessage {
+            role: "tool".into(),
+            content: output_text,
+        });
         checkpoint(store, &id, iteration, &messages);
     }
 
@@ -231,8 +270,13 @@ fn propose_and_execute(
         )?;
         Ok(())
     })?;
-    outbox::emit(store, "agent_run", &run.id, "tool.proposed",
-        json!({"workitemId": run.workitem_id, "tool": proposal.tool, "digest": digest}))?;
+    outbox::emit(
+        store,
+        "agent_run",
+        &run.id,
+        "tool.proposed",
+        json!({"workitemId": run.workitem_id, "tool": proposal.tool, "digest": digest}),
+    )?;
 
     let needs_approval = match sg_policy::evaluate(policy, &decision.action, &digest) {
         Ok(_) => false,
@@ -243,13 +287,23 @@ fn propose_and_execute(
         }
     };
 
-    if needs_approval {
-        if sg_policy::validate_for(store, "tool_proposal", &proposal.id, &digest).is_err() {
-            sg_policy::request_approval(store, "tool_proposal", &proposal.id, &digest, sg_policy::Risk::High,
-                &format!("run {} tool {}", run.id, decision.action), 3600)?;
-            mark_proposal(store, &proposal, "rejected", "approval_required")?;
-            return Ok(("approval_required".into(), "该工具需要人工审批；审批通过后重新运行任务。".into()));
-        }
+    if needs_approval
+        && sg_policy::validate_for(store, "tool_proposal", &proposal.id, &digest).is_err()
+    {
+        sg_policy::request_approval(
+            store,
+            "tool_proposal",
+            &proposal.id,
+            &digest,
+            sg_policy::Risk::High,
+            &format!("run {} tool {}", run.id, decision.action),
+            3600,
+        )?;
+        mark_proposal(store, &proposal, "rejected", "approval_required")?;
+        return Ok((
+            "approval_required".into(),
+            "该工具需要人工审批；审批通过后重新运行任务。".into(),
+        ));
     }
 
     match executor {
@@ -270,7 +324,12 @@ fn propose_and_execute(
     }
 }
 
-fn mark_proposal(store: &Store, proposal: &Proposal, decision: &str, result: &str) -> Result<(), Error> {
+fn mark_proposal(
+    store: &Store,
+    proposal: &Proposal,
+    decision: &str,
+    result: &str,
+) -> Result<(), Error> {
     store.with_conn(|conn| {
         conn.execute(
             "UPDATE tool_proposals SET decision=?1, result=?2 WHERE id=?3",
@@ -283,19 +342,28 @@ fn mark_proposal(store: &Store, proposal: &Proposal, decision: &str, result: &st
 fn set_status(store: &Store, run: &mut AgentRun, to: &str) -> Result<(), Error> {
     run.status = to.into();
     store.with_conn(|conn| {
-        conn.execute("UPDATE agent_runs SET status=?1, updated_at=?2 WHERE id=?3",
-            rusqlite::params![to, timefmt::now(), run.id])?;
+        conn.execute(
+            "UPDATE agent_runs SET status=?1, updated_at=?2 WHERE id=?3",
+            rusqlite::params![to, timefmt::now(), run.id],
+        )?;
         Ok(())
     })?;
-    outbox::emit(store, "agent_run", &run.id, &format!("run.{to}"),
-        json!({"workitemId": run.workitem_id}))?;
+    outbox::emit(
+        store,
+        "agent_run",
+        &run.id,
+        &format!("run.{to}"),
+        json!({"workitemId": run.workitem_id}),
+    )?;
     Ok(())
 }
 
 fn finish(store: &Store, run: &AgentRun) -> Result<(), Error> {
     store.with_conn(|conn| {
-        conn.execute("UPDATE agent_runs SET result=?1, updated_at=?2 WHERE id=?3",
-            rusqlite::params![run.result, timefmt::now(), run.id])?;
+        conn.execute(
+            "UPDATE agent_runs SET result=?1, updated_at=?2 WHERE id=?3",
+            rusqlite::params![run.result, timefmt::now(), run.id],
+        )?;
         Ok(())
     })
 }
@@ -303,11 +371,17 @@ fn finish(store: &Store, run: &AgentRun) -> Result<(), Error> {
 fn checkpoint(store: &Store, run_id: &str, seq: usize, messages: &[ChatMessage]) {
     let body = serde_json::to_string(messages).unwrap_or_default();
     let _ = store.with_conn(|conn| {
-        conn.execute(
+        let _ = conn.execute(
             "INSERT INTO agent_checkpoints(id, agent_run_id, seq, state, created_at)
              VALUES (?1,?2,?3,?4,?5)
              ON CONFLICT(agent_run_id, seq) DO UPDATE SET state=excluded.state",
-            rusqlite::params![ids::new_id("ckpt"), run_id, seq as i64, body, timefmt::now()],
+            rusqlite::params![
+                ids::new_id("ckpt"),
+                run_id,
+                seq as i64,
+                body,
+                timefmt::now()
+            ],
         );
         Ok(())
     });
@@ -333,10 +407,13 @@ pub fn get_run(store: &Store, id: &str) -> Result<AgentRun, Error> {
 
 pub fn cancel(store: &Store, id: &str) -> Result<(), Error> {
     let mut run = get_run(store, id)?;
-    if matches!(run.status.as_str(), "completed_execution" | "failed" | "cancelled") {
+    if matches!(
+        run.status.as_str(),
+        "completed_execution" | "failed" | "cancelled"
+    ) {
         return Ok(());
     }
-    set_status(store, &mut run, "cancelled",)?;
+    set_status(store, &mut run, "cancelled")?;
     Ok(())
 }
 
@@ -366,16 +443,17 @@ pub fn validate_decision_shape(content: &str) -> bool {
     parse_decision(content).is_some()
 }
 
-#[allow(unused)]
-fn unused_objects_guard(_: &dyn Fn(&[u8], objects::PutOptions) -> Result<objects::ObjectInfo, Error>) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use sg_integrations::model::FakeModel;
 
     fn setup() -> Store {
-        let dir = std::env::temp_dir().join(format!("sg-agent-{}-{}", std::process::id(), ids::new_id("t")));
+        let dir = std::env::temp_dir().join(format!(
+            "sg-agent-{}-{}",
+            std::process::id(),
+            ids::new_id("t")
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir, "test").unwrap();
         store.with_conn(|c| {
@@ -390,8 +468,22 @@ mod tests {
     fn policy_snapshot() -> Snapshot {
         Snapshot {
             tool_rules: vec![
-                sg_policy::ToolRule { tool: "read_file".into(), risk: sg_policy::Risk::Low, requires_approval: false, data_level: "internal".into(), max_result_bytes: 65536, timeout_sec: 60 },
-                sg_policy::ToolRule { tool: "run_command".into(), risk: sg_policy::Risk::High, requires_approval: true, data_level: "internal".into(), max_result_bytes: 65536, timeout_sec: 60 },
+                sg_policy::ToolRule {
+                    tool: "read_file".into(),
+                    risk: sg_policy::Risk::Low,
+                    requires_approval: false,
+                    data_level: "internal".into(),
+                    max_result_bytes: 65536,
+                    timeout_sec: 60,
+                },
+                sg_policy::ToolRule {
+                    tool: "run_command".into(),
+                    risk: sg_policy::Risk::High,
+                    requires_approval: true,
+                    data_level: "internal".into(),
+                    max_result_bytes: 65536,
+                    timeout_sec: 60,
+                },
             ],
             approval_ttl_secs: 3600,
         }
@@ -401,8 +493,16 @@ mod tests {
     fn run_completes_with_final() {
         let store = setup();
         let fake = FakeModel::default();
-        fake.push_response(r#"{"action":"read_file","arguments":{"path":"README.md"},"summary":"读取"}"#, 10, 5);
-        fake.push_response(r#"{"action":"final","summary":"分析完成：3 个模块"}"#, 20, 8);
+        fake.push_response(
+            r#"{"action":"read_file","arguments":{"path":"README.md"},"summary":"读取"}"#,
+            10,
+            5,
+        );
+        fake.push_response(
+            r#"{"action":"final","summary":"分析完成：3 个模块"}"#,
+            20,
+            8,
+        );
         let gateway = Gateway::new(Box::new(fake));
         let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = executed.clone();
@@ -410,8 +510,23 @@ mod tests {
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(format!("content of {}", p.tool))
         };
-        let out = start(&store, &gateway, &policy_snapshot(), Some(&executor), "wi", "", "分析仓库", "ctx1",
-            &["read_file".into()], "key-1", &RunBudget::default(), 10).unwrap();
+        let out = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "分析仓库",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-1",
+                budget: &RunBudget::default(),
+                max_iterations: 10,
+            },
+        )
+        .unwrap();
         assert_eq!(out.run.status, "completed_execution");
         assert_eq!(out.output, "分析完成：3 个模块");
         assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -428,8 +543,23 @@ mod tests {
         fake.push_response(r#"{"action":"final","summary":"done"}"#, 5, 3);
         let gateway = Gateway::new(Box::new(fake));
         let executor = |_p: &Proposal| -> Result<String, String> { Ok(String::new()) };
-        let out = start(&store, &gateway, &policy_snapshot(), Some(&executor), "wi", "", "g", "ctx1",
-            &["read_file".into()], "key-2", &RunBudget::default(), 5).unwrap();
+        let out = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-2",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        )
+        .unwrap();
         assert_eq!(out.run.status, "completed_execution");
     }
 
@@ -437,7 +567,11 @@ mod tests {
     fn high_risk_requires_approval_never_executes() {
         let store = setup();
         let fake = FakeModel::default();
-        fake.push_response(r#"{"action":"run_command","arguments":{"argv":["ls"]},"summary":"执行"}"#, 5, 3);
+        fake.push_response(
+            r#"{"action":"run_command","arguments":{"argv":["ls"]},"summary":"执行"}"#,
+            5,
+            3,
+        );
         fake.push_response(r#"{"action":"final","summary":"等待审批"}"#, 5, 3);
         let gateway = Gateway::new(Box::new(fake));
         let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -446,9 +580,28 @@ mod tests {
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(String::new())
         };
-        let out = start(&store, &gateway, &policy_snapshot(), Some(&executor), "wi", "", "g", "ctx1",
-            &["read_file".into(), "run_command".into()], "key-3", &RunBudget::default(), 5).unwrap();
-        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 0, "高风险工具未获批准不得执行");
+        let out = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into(), "run_command".into()],
+                idempotency_key: "key-3",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "高风险工具未获批准不得执行"
+        );
         let pending = sg_policy::pending(&store, 10).unwrap();
         assert_eq!(pending.len(), 1);
         let _ = out;
@@ -461,10 +614,40 @@ mod tests {
         fake.push_response(r#"{"action":"final","summary":"s"}"#, 5, 3);
         let gateway = Gateway::new(Box::new(fake));
         let executor = |_p: &Proposal| -> Result<String, String> { Ok(String::new()) };
-        let first = start(&store, &gateway, &policy_snapshot(), Some(&executor), "wi", "", "g", "ctx1",
-            &["read_file".into()], "same-key", &RunBudget::default(), 5).unwrap();
-        let second = start(&store, &gateway, &policy_snapshot(), Some(&executor), "wi", "", "g", "ctx1",
-            &["read_file".into()], "same-key", &RunBudget::default(), 5).unwrap();
+        let first = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "same-key",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        )
+        .unwrap();
+        let second = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "same-key",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        )
+        .unwrap();
         assert_eq!(first.run.id, second.run.id);
     }
 }

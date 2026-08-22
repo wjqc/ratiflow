@@ -35,18 +35,27 @@ pub fn snapshot(store: &Store) -> Result<Snapshot, Error> {
         "createdAt": crate::timefmt::now(),
     });
     let manifest_path = backups.join(format!("{name}.manifest.json"));
-    let manifest_body = serde_json::to_vec_pretty(&manifest)
-        .map_err(|e| Error::Message(e.to_string()))?;
+    let manifest_body =
+        serde_json::to_vec_pretty(&manifest).map_err(|e| Error::Message(e.to_string()))?;
     std::fs::write(&manifest_path, manifest_body)?;
-    Ok(Snapshot { path: target.to_string_lossy().to_string(), manifest })
+    Ok(Snapshot {
+        path: target.to_string_lossy().to_string(),
+        manifest,
+    })
 }
 
 /// objects 表规范化根哈希（排序后逐行拼接再哈希）。
 fn objects_root_hash(store: &Store) -> Result<(String, i64), Error> {
     store.with_conn(|conn| {
-        let mut stmt = conn.prepare("SELECT sha256, size, content_type FROM objects ORDER BY sha256")?;
+        let mut stmt =
+            conn.prepare("SELECT sha256, size, content_type FROM objects ORDER BY sha256")?;
         let rows = stmt.query_map([], |r| {
-            Ok(format!("{} {} {}\n", r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+            Ok(format!(
+                "{} {} {}\n",
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?
+            ))
         })?;
         let mut hasher = Sha256::new();
         let mut count = 0i64;

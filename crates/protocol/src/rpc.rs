@@ -93,7 +93,12 @@ impl RpcMessage {
 
 /// 便捷构造：带 id 的请求。
 pub fn request(id: Value, method: &str, params: Value) -> Request {
-    Request { jsonrpc: "2.0".into(), id: Some(id), method: method.into(), params: Some(params) }
+    Request {
+        jsonrpc: "2.0".into(),
+        id: Some(id),
+        method: method.into(),
+        params: Some(params),
+    }
 }
 
 impl Response {
@@ -107,12 +112,22 @@ impl Response {
 
 /// 便捷构造：成功响应。
 pub fn ok_response(id: Option<Value>, result: Value) -> Response {
-    Response { jsonrpc: "2.0".into(), id, result: Some(result), error: None }
+    Response {
+        jsonrpc: "2.0".into(),
+        id,
+        result: Some(result),
+        error: None,
+    }
 }
 
 /// 便捷构造：失败响应。
 pub fn err_response(id: Option<Value>, error: crate::RpcError) -> Response {
-    Response { jsonrpc: "2.0".into(), id, result: None, error: Some(error) }
+    Response {
+        jsonrpc: "2.0".into(),
+        id,
+        result: None,
+        error: Some(error),
+    }
 }
 
 impl Notification {
@@ -124,5 +139,9 @@ impl Notification {
 
 /// 便捷构造：事件 notification。
 pub fn event_notification(params: Value) -> Notification {
-    Notification { jsonrpc: "2.0".into(), method: "event".into(), params: Some(params) }
+    Notification {
+        jsonrpc: "2.0".into(),
+        method: "event".into(),
+        params: Some(params),
+    }
 }

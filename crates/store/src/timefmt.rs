@@ -11,7 +11,8 @@ pub fn now() -> String {
 }
 
 pub fn format_now(t: OffsetDateTime) -> String {
-    t.format(LAYOUT).unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".to_string())
+    t.format(LAYOUT)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".to_string())
 }
 
 pub fn parse(s: &str) -> Option<OffsetDateTime> {

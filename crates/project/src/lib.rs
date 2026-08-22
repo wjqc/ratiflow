@@ -25,9 +25,13 @@ pub struct Project {
 pub fn validate_local_root(local_root: &str) -> Result<PathBuf, Error> {
     let path = Path::new(local_root);
     if !path.is_absolute() {
-        return Err(Error::Message(format!("local_root 必须是绝对路径：{local_root}")));
+        return Err(Error::Message(format!(
+            "local_root 必须是绝对路径：{local_root}"
+        )));
     }
-    let canonical = path.canonicalize().map_err(|_| Error::Message(format!("local_root 不存在：{local_root}")))?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| Error::Message(format!("local_root 不存在：{local_root}")))?;
     if !canonical.starts_with("/") {
         return Err(Error::Message("local_root 规范化失败".into()));
     }
@@ -47,7 +51,11 @@ pub fn register(
     if gitlab_instance.is_empty() || namespace.is_empty() || project.is_empty() {
         return Err(Error::Message("instance/namespace/project required".into()));
     }
-    let branch = if default_branch.is_empty() { "main" } else { default_branch };
+    let branch = if default_branch.is_empty() {
+        "main"
+    } else {
+        default_branch
+    };
     if !local_root.is_empty() {
         validate_local_root(local_root)?;
     }
@@ -65,12 +73,22 @@ pub fn register(
         )?;
         Ok(())
     })?;
-    outbox::emit(store, "project", &id, "project.created",
-        json!({"namespace": namespace, "project": project}))?;
+    outbox::emit(
+        store,
+        "project",
+        &id,
+        "project.created",
+        json!({"namespace": namespace, "project": project}),
+    )?;
     get(store, &id)
 }
 
-fn find_by_locator(store: &Store, instance: &str, namespace: &str, project: &str) -> Result<Option<Project>, Error> {
+fn find_by_locator(
+    store: &Store,
+    instance: &str,
+    namespace: &str,
+    project: &str,
+) -> Result<Option<Project>, Error> {
     // 注意不可在 with_conn 闭包内再调 get()（Mutex 不可重入，会死锁）。
     let id: Option<String> = store.with_conn(|conn| {
         conn.query_row(
@@ -192,10 +210,20 @@ pub fn archive(store: &Store, id: &str, archived: bool) -> Result<(), Error> {
 pub fn summary(store: &Store, id: &str) -> Result<Value, Error> {
     let p = get(store, id)?;
     let workitems: i64 = store.with_conn(|conn| {
-        conn.query_row("SELECT COUNT(*) FROM workitems WHERE project_id=?1", [id], |r| r.get(0)).map_err(Error::from)
+        conn.query_row(
+            "SELECT COUNT(*) FROM workitems WHERE project_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(Error::from)
     })?;
     let sources: i64 = store.with_conn(|conn| {
-        conn.query_row("SELECT COUNT(*) FROM knowledge_sources WHERE project_id=?1", [id], |r| r.get(0)).map_err(Error::from)
+        conn.query_row(
+            "SELECT COUNT(*) FROM knowledge_sources WHERE project_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(Error::from)
     })?;
     let blocked: i64 = store.with_conn(|conn| {
         conn.query_row(
@@ -236,7 +264,11 @@ mod tests {
     use super::*;
 
     fn store() -> Store {
-        let dir = std::env::temp_dir().join(format!("sg-proj-{}-{}", std::process::id(), ids::new_id("t")));
+        let dir = std::env::temp_dir().join(format!(
+            "sg-proj-{}-{}",
+            std::process::id(),
+            ids::new_id("t")
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir, "test").unwrap()
     }
@@ -245,7 +277,16 @@ mod tests {
     fn register_idempotent_and_list() {
         let s = store();
         let p1 = register(&s, "https://gitlab.test", "team", "demo", "", "演示", "").unwrap();
-        let p2 = register(&s, "https://gitlab.test", "team", "demo", "main", "改名", "").unwrap();
+        let p2 = register(
+            &s,
+            "https://gitlab.test",
+            "team",
+            "demo",
+            "main",
+            "改名",
+            "",
+        )
+        .unwrap();
         assert_eq!(p1.id, p2.id);
         assert_eq!(list(&s, false).unwrap().len(), 1);
     }

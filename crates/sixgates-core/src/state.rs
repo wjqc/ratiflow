@@ -27,36 +27,67 @@ impl AppState {
             std::env::var("SIXGATES_GITLAB_TOKEN"),
         ) {
             (Ok(url), Ok(token)) if !url.is_empty() && !token.is_empty() => (
-                Arc::new(sg_integrations::GitLabHttp { base_url: url, token }) as Arc<dyn sg_integrations::GitLabClient>,
+                Arc::new(sg_integrations::GitLabHttp {
+                    base_url: url,
+                    token,
+                }) as Arc<dyn sg_integrations::GitLabClient>,
                 false,
             ),
-            _ => (Arc::new(FakeGitLab::default()) as Arc<dyn sg_integrations::GitLabClient>, true),
+            _ => (
+                Arc::new(FakeGitLab::default()) as Arc<dyn sg_integrations::GitLabClient>,
+                true,
+            ),
         };
         let model = match (
             std::env::var("SIXGATES_MODEL_BASE_URL"),
             std::env::var("SIXGATES_MODEL_API_KEY"),
         ) {
-            (Ok(base), Ok(key)) if !base.is_empty() && !key.is_empty() => Gateway::new(Box::new(sg_integrations::ModelHttp {
-                name_value: "openai-compatible".into(),
-                base_url: base.clone(),
-                api_key: key,
-                model: std::env::var("SIXGATES_MODEL_NAME").unwrap_or_default(),
-            })),
+            (Ok(base), Ok(key)) if !base.is_empty() && !key.is_empty() => {
+                Gateway::new(Box::new(sg_integrations::ModelHttp {
+                    name_value: "openai-compatible".into(),
+                    base_url: base.clone(),
+                    api_key: key,
+                    model: std::env::var("SIXGATES_MODEL_NAME").unwrap_or_default(),
+                }))
+            }
             _ => Gateway::new(Box::new(sg_integrations::FakeModel::default())),
         };
         let ssh: Arc<dyn sg_integrations::SSHAdapter> = Arc::new(FakeSSH::default());
         let _ = gitlab_fake;
         let policy = Snapshot {
             tool_rules: vec![
-                sg_policy::ToolRule { tool: "read_file".into(), risk: sg_policy::Risk::Low, requires_approval: false, data_level: "internal".into(), max_result_bytes: 1 << 20, timeout_sec: 60 },
-                sg_policy::ToolRule { tool: "write_file".into(), risk: sg_policy::Risk::Medium, requires_approval: false, data_level: "internal".into(), max_result_bytes: 1 << 20, timeout_sec: 60 },
-                sg_policy::ToolRule { tool: "run_command".into(), risk: sg_policy::Risk::High, requires_approval: true, data_level: "internal".into(), max_result_bytes: 1 << 20, timeout_sec: 120 },
+                sg_policy::ToolRule {
+                    tool: "read_file".into(),
+                    risk: sg_policy::Risk::Low,
+                    requires_approval: false,
+                    data_level: "internal".into(),
+                    max_result_bytes: 1 << 20,
+                    timeout_sec: 60,
+                },
+                sg_policy::ToolRule {
+                    tool: "write_file".into(),
+                    risk: sg_policy::Risk::Medium,
+                    requires_approval: false,
+                    data_level: "internal".into(),
+                    max_result_bytes: 1 << 20,
+                    timeout_sec: 60,
+                },
+                sg_policy::ToolRule {
+                    tool: "run_command".into(),
+                    risk: sg_policy::Risk::High,
+                    requires_approval: true,
+                    data_level: "internal".into(),
+                    max_result_bytes: 1 << 20,
+                    timeout_sec: 120,
+                },
             ],
             approval_ttl_secs: 3600,
         };
         let executor_mode = sg_executor::detect_mode(
             sg_executor::docker_available(),
-            std::env::var("SIXGATES_UNSAFE_EXEC").map(|v| v == "1").unwrap_or(false),
+            std::env::var("SIXGATES_UNSAFE_EXEC")
+                .map(|v| v == "1")
+                .unwrap_or(false),
         );
         Self {
             store: Arc::new(store),

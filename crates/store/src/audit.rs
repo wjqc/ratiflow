@@ -3,15 +3,31 @@ use serde_json::{json, Value};
 
 use crate::{Error, Store};
 
-pub fn append(store: &Store, actor: &str, action: &str, target_type: &str, target_id: &str, detail: Value) -> Result<i64, Error> {
+pub fn append(
+    store: &Store,
+    actor: &str,
+    action: &str,
+    target_type: &str,
+    target_id: &str,
+    detail: Value,
+) -> Result<i64, Error> {
     if actor.is_empty() || action.is_empty() || target_type.is_empty() || target_id.is_empty() {
-        return Err(Error::Message("audit entry requires actor/action/target".into()));
+        return Err(Error::Message(
+            "audit entry requires actor/action/target".into(),
+        ));
     }
     store.with_conn(|conn| {
         conn.execute(
             "INSERT INTO audit_log(actor, action, target_type, target_id, detail, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![actor, action, target_type, target_id, detail.to_string(), crate::timefmt::now()],
+            rusqlite::params![
+                actor,
+                action,
+                target_type,
+                target_id,
+                detail.to_string(),
+                crate::timefmt::now()
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     })

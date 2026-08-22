@@ -47,7 +47,10 @@ pub fn run(store: &crate::Store) -> Result<(), crate::Error> {
         for (version, body) in &pending {
             tx.execute_batch(body)
                 .map_err(|e| crate::Error::Message(format!("migration {version:04}: {e}")))?;
-            tx.execute("INSERT INTO schema_migrations(version) VALUES (?1)", [version])?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?1)",
+                [version],
+            )?;
         }
         Ok(())
     })?;
@@ -67,9 +70,13 @@ fn adopt_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
             |r| r.get(0),
         )
         .ok();
-    if let Some(_) = has_meta {
+    if has_meta.is_some() {
         let legacy: Option<String> = conn
-            .query_row("SELECT value FROM app_meta WHERE key='schema_version'", [], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM app_meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
             .ok();
         if let Some(v) = legacy {
             if let Ok(n) = v.parse::<i64>() {

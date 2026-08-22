@@ -10,7 +10,9 @@ use std::io::{BufRead, Write};
 use std::sync::atomic::Ordering;
 
 use serde_json::json;
-use sg_protocol::{hello_compatible, err_response, event_notification, ok_response, Hello, Request, RpcMessage};
+use sg_protocol::{
+    err_response, event_notification, hello_compatible, ok_response, Hello, Request, RpcMessage,
+};
 use sg_store::{outbox, Store};
 
 fn main() {
@@ -20,7 +22,10 @@ fn main() {
         let to = flag_value(&args, "--to").unwrap_or_else(|| "./data-v3".into());
         match migrate::migrate_v2(&from, &to, env!("CARGO_PKG_VERSION")) {
             Ok(report) => {
-                println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
             }
             Err(e) => {
                 eprintln!("migrate-v2 failed: {e}");
@@ -30,9 +35,8 @@ fn main() {
         return;
     }
 
-    let data_dir = flag_value(&args, "--data-dir").unwrap_or_else(|| {
-        std::env::var("SIXGATES_DATA_DIR").unwrap_or_else(|_| "./data".into())
-    });
+    let data_dir = flag_value(&args, "--data-dir")
+        .unwrap_or_else(|| std::env::var("SIXGATES_DATA_DIR").unwrap_or_else(|_| "./data".into()));
     let store = match Store::open(std::path::Path::new(&data_dir), env!("CARGO_PKG_VERSION")) {
         Ok(s) => s,
         Err(e) => {
@@ -50,7 +54,12 @@ fn main() {
         protocolVersion: sg_protocol::PROTOCOL_VERSION.into(),
         coreVersion: env!("CARGO_PKG_VERSION").into(),
         schemaVersion: app.store.schema_version().unwrap_or(0),
-        capabilities: vec!["workitem".into(), "knowledge".into(), "agent".into(), "deployment".into()],
+        capabilities: vec![
+            "workitem".into(),
+            "knowledge".into(),
+            "agent".into(),
+            "deployment".into(),
+        ],
     };
     let _ = writeln!(out, "{}", serde_json::to_string(&hello).unwrap_or_default());
     let _ = out.flush();
@@ -72,16 +81,36 @@ fn main() {
             Err(_) => break,
         };
         if line.len() > sg_protocol::MAX_MESSAGE_BYTES {
-            let _ = writeln!(out, "{}", err_response(None, sg_protocol::RpcError::new(
-                sg_protocol::ErrorCode::InvalidRequest, "message exceeds 8 MiB limit")).to_line());
+            let _ = writeln!(
+                out,
+                "{}",
+                err_response(
+                    None,
+                    sg_protocol::RpcError::new(
+                        sg_protocol::ErrorCode::InvalidRequest,
+                        "message exceeds 8 MiB limit"
+                    )
+                )
+                .to_line()
+            );
             let _ = out.flush();
             continue;
         }
         let message: RpcMessage = match serde_json::from_str(&line) {
             Ok(m) => m,
             Err(e) => {
-                let _ = writeln!(out, "{}", err_response(None, sg_protocol::RpcError::new(
-                    sg_protocol::ErrorCode::ParseError, e.to_string())).to_line());
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    err_response(
+                        None,
+                        sg_protocol::RpcError::new(
+                            sg_protocol::ErrorCode::ParseError,
+                            e.to_string()
+                        )
+                    )
+                    .to_line()
+                );
                 let _ = out.flush();
                 continue;
             }
@@ -119,10 +148,16 @@ fn main() {
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
-fn handle_request(app: &state::AppState, req: &Request) -> Result<serde_json::Value, sg_protocol::RpcError> {
+fn handle_request(
+    app: &state::AppState,
+    req: &Request,
+) -> Result<serde_json::Value, sg_protocol::RpcError> {
     let params = req.params.clone().unwrap_or_else(|| json!({}));
     dispatch::dispatch(app, &req.method, &params)
 }

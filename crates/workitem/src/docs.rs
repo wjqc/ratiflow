@@ -8,7 +8,12 @@ pub fn doc_dir(store: &Store) -> std::path::PathBuf {
 }
 
 /// 保存文档：路径逃逸防护 + 临时文件原子落位。返回相对路径。
-pub fn save(store: &Store, workitem_id: &str, filename: &str, content: &str) -> Result<String, Error> {
+pub fn save(
+    store: &Store,
+    workitem_id: &str,
+    filename: &str,
+    content: &str,
+) -> Result<String, Error> {
     if workitem_id.is_empty() || filename.is_empty() {
         return Err(Error::Message("workitem id and filename required".into()));
     }
@@ -49,10 +54,18 @@ pub fn list(store: &Store, workitem_id: &str) -> Result<Vec<String>, Error> {
 
 fn sanitize(filename: &str) -> Result<String, Error> {
     let path = Path::new(filename);
-    if path.is_absolute() || filename.contains("..") || filename.contains('/') && !path.components().all(|c| c.as_os_str().to_string_lossy() != "..") {
+    if path.is_absolute()
+        || filename.contains("..")
+        || filename.contains('/')
+            && !path
+                .components()
+                .all(|c| c.as_os_str().to_string_lossy() != "..")
+    {
         return Err(Error::Message(format!("invalid filename {filename:?}")));
     }
-    let clean = path.file_name().ok_or_else(|| Error::Message("invalid filename".into()))?;
+    let clean = path
+        .file_name()
+        .ok_or_else(|| Error::Message("invalid filename".into()))?;
     Ok(clean.to_string_lossy().to_string())
 }
 
@@ -67,8 +80,14 @@ pub fn title_from_document(filename: &str, content: &str) -> String {
             break;
         }
     }
-    let base = Path::new(filename).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    base.strip_suffix(".md").or_else(|| base.strip_suffix(".txt")).unwrap_or(&base).to_string()
+    let base = Path::new(filename)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    base.strip_suffix(".md")
+        .or_else(|| base.strip_suffix(".txt"))
+        .unwrap_or(&base)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -84,7 +103,13 @@ mod tests {
 
     #[test]
     fn title_from_h1_or_filename() {
-        assert_eq!(title_from_document("a.md", "# 支持单点登录\n\n正文"), "支持单点登录");
-        assert_eq!(title_from_document("需求-支付对账.md", "没有标题的正文"), "需求-支付对账");
+        assert_eq!(
+            title_from_document("a.md", "# 支持单点登录\n\n正文"),
+            "支持单点登录"
+        );
+        assert_eq!(
+            title_from_document("需求-支付对账.md", "没有标题的正文"),
+            "需求-支付对账"
+        );
     }
 }

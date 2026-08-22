@@ -83,7 +83,10 @@ pub struct Snapshot {
 
 impl Default for Snapshot {
     fn default() -> Self {
-        Self { tool_rules: vec![], approval_ttl_secs: 3600 }
+        Self {
+            tool_rules: vec![],
+            approval_ttl_secs: 3600,
+        }
     }
 }
 
@@ -153,21 +156,48 @@ pub fn request_approval(
             "INSERT INTO approvals(id, subject_type, subject_id, action_digest, risk, status,
                 requested_by, expires_at, reason, created_at)
              VALUES (?1,?2,?3,?4,?5,'requested','local',?6,?7,?8)",
-            rusqlite::params![id, subject_type, subject_id, digest, risk.as_str(), expires, reason, now],
+            rusqlite::params![
+                id,
+                subject_type,
+                subject_id,
+                digest,
+                risk.as_str(),
+                expires,
+                reason,
+                now
+            ],
         )?;
         Ok(())
     })?;
-    sg_store::outbox::emit(store, "approval", &id, "approval.requested",
-        serde_json::json!({"subjectType": subject_type, "subjectId": subject_id, "risk": risk.as_str()}))?;
+    sg_store::outbox::emit(
+        store,
+        "approval",
+        &id,
+        "approval.requested",
+        serde_json::json!({"subjectType": subject_type, "subjectId": subject_id, "risk": risk.as_str()}),
+    )?;
     Ok(Approval {
-        id, subject_type: subject_type.into(), subject_id: subject_id.into(),
-        action_digest: digest.into(), risk: risk.as_str().into(), status: "requested".into(),
-        requested_by: "local".into(), expires_at: expires, reason: reason.into(), created_at: now,
+        id,
+        subject_type: subject_type.into(),
+        subject_id: subject_id.into(),
+        action_digest: digest.into(),
+        risk: risk.as_str().into(),
+        status: "requested".into(),
+        requested_by: "local".into(),
+        expires_at: expires,
+        reason: reason.into(),
+        created_at: now,
     })
 }
 
 /// 决定审批；只能在 requested 状态。
-pub fn decide(store: &Store, approval_id: &str, decision: &str, decided_by: &str, reason: &str) -> Result<Approval, Error> {
+pub fn decide(
+    store: &Store,
+    approval_id: &str,
+    decision: &str,
+    decided_by: &str,
+    reason: &str,
+) -> Result<Approval, Error> {
     if decision != "approved" && decision != "rejected" {
         return Err(Error::Message("decision must be approved|rejected".into()));
     }
@@ -181,10 +211,17 @@ pub fn decide(store: &Store, approval_id: &str, decision: &str, decided_by: &str
         Ok(conn.changes())
     })?;
     if updated == 0 {
-        return Err(Error::Message(format!("approval {approval_id} not in requested state")));
+        return Err(Error::Message(format!(
+            "approval {approval_id} not in requested state"
+        )));
     }
-    sg_store::outbox::emit(store, "approval", approval_id, &format!("approval.{decision}"),
-        serde_json::json!({"by": decided_by}))?;
+    sg_store::outbox::emit(
+        store,
+        "approval",
+        approval_id,
+        &format!("approval.{decision}"),
+        serde_json::json!({"by": decided_by}),
+    )?;
     get(store, approval_id)
 }
 
@@ -225,7 +262,12 @@ pub fn expire_stale(store: &Store) -> Result<(), Error> {
 }
 
 /// 校验动作当前是否有绑定同一 digest 的有效批准。
-pub fn validate_for(store: &Store, subject_type: &str, subject_id: &str, digest: &str) -> Result<(), PolicyError> {
+pub fn validate_for(
+    store: &Store,
+    subject_type: &str,
+    subject_id: &str,
+    digest: &str,
+) -> Result<(), PolicyError> {
     expire_stale(store).map_err(|e| PolicyError::ActionDenied(e.to_string()))?;
     let row: Option<(String, String)> = store
         .with_conn(|conn| {
@@ -274,7 +316,11 @@ pub fn pending(store: &Store, limit: i64) -> Result<Vec<Approval>, Error> {
     })
 }
 
-pub fn list_by_subject(store: &Store, subject_type: &str, subject_id: &str) -> Result<Vec<Approval>, Error> {
+pub fn list_by_subject(
+    store: &Store,
+    subject_type: &str,
+    subject_id: &str,
+) -> Result<Vec<Approval>, Error> {
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT id, subject_type, subject_id, action_digest, risk, status, requested_by, expires_at, reason, created_at
@@ -301,7 +347,11 @@ mod tests {
     use serde_json::json;
 
     fn store() -> sg_store::Store {
-        let dir = std::env::temp_dir().join(format!("sg-policy-{}-{}", std::process::id(), ids::new_id("t")));
+        let dir = std::env::temp_dir().join(format!(
+            "sg-policy-{}-{}",
+            std::process::id(),
+            ids::new_id("t")
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         sg_store::Store::open(&dir, "test").unwrap()
     }
@@ -309,8 +359,22 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             tool_rules: vec![
-                ToolRule { tool: "read_file".into(), risk: Risk::Low, requires_approval: false, data_level: "internal".into(), max_result_bytes: 1024, timeout_sec: 30 },
-                ToolRule { tool: "run_command".into(), risk: Risk::High, requires_approval: true, data_level: "internal".into(), max_result_bytes: 1024, timeout_sec: 30 },
+                ToolRule {
+                    tool: "read_file".into(),
+                    risk: Risk::Low,
+                    requires_approval: false,
+                    data_level: "internal".into(),
+                    max_result_bytes: 1024,
+                    timeout_sec: 30,
+                },
+                ToolRule {
+                    tool: "run_command".into(),
+                    risk: Risk::High,
+                    requires_approval: true,
+                    data_level: "internal".into(),
+                    max_result_bytes: 1024,
+                    timeout_sec: 30,
+                },
             ],
             approval_ttl_secs: 3600,
         }
@@ -321,7 +385,10 @@ mod tests {
         let snap = snapshot();
         assert!(evaluate(&snap, "rm_rf", "d").is_err());
         assert!(evaluate(&snap, "read_file", "d").is_ok());
-        assert_eq!(evaluate(&snap, "run_command", "d").unwrap_err(), PolicyError::ApprovalRequired);
+        assert_eq!(
+            evaluate(&snap, "run_command", "d").unwrap_err(),
+            PolicyError::ApprovalRequired
+        );
         assert!(evaluate(&snap, "read_file", "").is_err());
     }
 
@@ -338,12 +405,22 @@ mod tests {
     fn approval_lifecycle_digest_binding() {
         let s = store();
         let digest = action_digest(&json!({"tool": "deploy"}));
-        let appr = request_approval(&s, "deployment", "dp_1", &digest, Risk::High, "首次", 60).unwrap();
-        assert!(matches!(validate_for(&s, "deployment", "dp_1", &digest), Err(PolicyError::ApprovalRequired)));
+        let appr =
+            request_approval(&s, "deployment", "dp_1", &digest, Risk::High, "首次", 60).unwrap();
+        assert!(matches!(
+            validate_for(&s, "deployment", "dp_1", &digest),
+            Err(PolicyError::ApprovalRequired)
+        ));
         decide(&s, &appr.id, "approved", "owner", "ok").unwrap();
         validate_for(&s, "deployment", "dp_1", &digest).unwrap();
         let other = action_digest(&json!({"tool": "deploy", "x": 1}));
-        assert_eq!(validate_for(&s, "deployment", "dp_1", &other).unwrap_err(), PolicyError::ApprovalInvalid);
-        assert!(decide(&s, &appr.id, "rejected", "o", "").is_err(), "双重决定必须拒绝");
+        assert_eq!(
+            validate_for(&s, "deployment", "dp_1", &other).unwrap_err(),
+            PolicyError::ApprovalInvalid
+        );
+        assert!(
+            decide(&s, &appr.id, "rejected", "o", "").is_err(),
+            "双重决定必须拒绝"
+        );
     }
 }

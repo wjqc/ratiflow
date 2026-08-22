@@ -1,0 +1,8 @@
+{
+  "name": "@sixgates/ui",
+  "private": true,
+  "version": "3.0.0",
+  "main": "src/index.ts",
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "devDependencies": { "typescript": "^5.9.0" }
+}

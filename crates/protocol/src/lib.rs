@@ -1,3 +1,5 @@
+#![allow(non_snake_case)] // 协议字段是冻结的 camelCase 契约
+
 //! JSON-RPC 2.0 协议类型：Electron main 与 Rust sidecar 之间的唯一契约。
 //! 一行一个 UTF-8 JSON 对象（stdio 分帧）；消息上限 8 MiB。
 
@@ -27,8 +29,8 @@ pub fn hello_compatible(hello: &Hello) -> bool {
 }
 
 pub use error::{ErrorCode, RpcError};
-pub use rpc::{err_response, event_notification, ok_response};
 pub use event::{CoreEvent, TimelineEvent};
+pub use rpc::{err_response, event_notification, ok_response};
 pub use rpc::{Notification, Request, Response, RpcMessage};
 
 #[cfg(test)]

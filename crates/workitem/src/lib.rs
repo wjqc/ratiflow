@@ -100,15 +100,27 @@ impl StageState {
         use StageState::*;
         matches!(
             (from, to),
-            (NotStarted, Running) | (NotStarted, Cancelled)
-                | (Running, Blocked) | (Running, AwaitingApproval) | (Running, Passed)
-                | (Running, Failed) | (Running, Cancelled) | (Running, Stale)
-                | (Blocked, Running) | (Blocked, Cancelled) | (Blocked, Stale)
-                | (AwaitingApproval, Running) | (AwaitingApproval, Passed)
-                | (AwaitingApproval, Failed) | (AwaitingApproval, Cancelled) | (AwaitingApproval, Stale)
+            (NotStarted, Running)
+                | (NotStarted, Cancelled)
+                | (Running, Blocked)
+                | (Running, AwaitingApproval)
+                | (Running, Passed)
+                | (Running, Failed)
+                | (Running, Cancelled)
+                | (Running, Stale)
+                | (Blocked, Running)
+                | (Blocked, Cancelled)
+                | (Blocked, Stale)
+                | (AwaitingApproval, Running)
+                | (AwaitingApproval, Passed)
+                | (AwaitingApproval, Failed)
+                | (AwaitingApproval, Cancelled)
+                | (AwaitingApproval, Stale)
                 | (Passed, Stale)
-                | (Failed, Running) | (Failed, Cancelled)
-                | (Stale, Running) | (Stale, Cancelled)
+                | (Failed, Running)
+                | (Failed, Cancelled)
+                | (Stale, Running)
+                | (Stale, Cancelled)
         )
     }
 }
@@ -172,8 +184,13 @@ pub fn create(
         }
         Ok(())
     })?;
-    outbox::emit(store, "workitem", &id, "workitem.created",
-        serde_json::json!({"projectId": project_id, "title": title, "issueIid": issue_iid}))?;
+    outbox::emit(
+        store,
+        "workitem",
+        &id,
+        "workitem.created",
+        serde_json::json!({"projectId": project_id, "title": title, "issueIid": issue_iid}),
+    )?;
     get(store, &id)
 }
 
@@ -213,7 +230,12 @@ pub fn flexible_opt_string(value: &rusqlite::types::Value) -> Option<String> {
     }
 }
 
-pub fn list(store: &Store, project_id: &str, cursor: &str, limit: i64) -> Result<(Vec<WorkItem>, String), Error> {
+pub fn list(
+    store: &Store,
+    project_id: &str,
+    cursor: &str,
+    limit: i64,
+) -> Result<(Vec<WorkItem>, String), Error> {
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT id, project_id, gitlab_issue_iid, title, labels, current_gate, created_at, (created_at || id) AS ck
@@ -270,7 +292,13 @@ pub fn stages(store: &Store, workitem_id: &str) -> Result<Vec<Stage>, Error> {
 }
 
 /// 阶段状态迁移（校验合法性）；passed 时推进 current_gate。
-pub fn set_stage(store: &Store, workitem_id: &str, gate: Gate, to: StageState, baseline_sha: &str) -> Result<(), Error> {
+pub fn set_stage(
+    store: &Store,
+    workitem_id: &str,
+    gate: Gate,
+    to: StageState,
+    baseline_sha: &str,
+) -> Result<(), Error> {
     let current = stage_state(store, workitem_id, gate)?;
     let from = StageState::parse(&current).unwrap_or(StageState::NotStarted);
     if !StageState::can_transition(from, to) {
@@ -298,8 +326,13 @@ pub fn set_stage(store: &Store, workitem_id: &str, gate: Gate, to: StageState, b
         }
         Ok(())
     })?;
-    outbox::emit(store, "workitem", workitem_id, &format!("stage.{}", to.as_str()),
-        serde_json::json!({"gate": gate.as_str(), "from": from.as_str(), "baselineSha": baseline_sha}))?;
+    outbox::emit(
+        store,
+        "workitem",
+        workitem_id,
+        &format!("stage.{}", to.as_str()),
+        serde_json::json!({"gate": gate.as_str(), "from": from.as_str(), "baselineSha": baseline_sha}),
+    )?;
     Ok(())
 }
 
@@ -327,9 +360,17 @@ pub fn pass_gate(store: &Store, workitem_id: &str, gate: Gate) -> Result<(), Err
 }
 
 /// 新基线下游 stale 传播：从 from_gate 起所有可进入 stale 的关卡。
-pub fn mark_stale_from(store: &Store, workitem_id: &str, from_gate: Gate, new_baseline: &str) -> Result<(), Error> {
+pub fn mark_stale_from(
+    store: &Store,
+    workitem_id: &str,
+    from_gate: Gate,
+    new_baseline: &str,
+) -> Result<(), Error> {
     let all = Gate::ALL;
-    let start = all.iter().position(|g| *g == from_gate).ok_or_else(|| Error::Message("unknown gate".into()))?;
+    let start = all
+        .iter()
+        .position(|g| *g == from_gate)
+        .ok_or_else(|| Error::Message("unknown gate".into()))?;
     for gate in &all[start..] {
         let current = stage_state(store, workitem_id, *gate)?;
         let state = StageState::parse(&current).unwrap_or(StageState::NotStarted);
@@ -345,7 +386,8 @@ mod tests {
     use super::*;
 
     fn setup() -> Store {
-        let dir = std::env::temp_dir().join(format!("sg-wi-{}-{}", std::process::id(), ids::new_id("t")));
+        let dir =
+            std::env::temp_dir().join(format!("sg-wi-{}-{}", std::process::id(), ids::new_id("t")));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir, "test").unwrap();
         store.with_conn(|c| {
@@ -367,7 +409,10 @@ mod tests {
     fn transitions_and_gate_advance() {
         let s = setup();
         let wi = create(&s, "pj", "t", "", None, &[]).unwrap();
-        assert!(set_stage(&s, &wi.id, Gate::Requirements, StageState::Passed, "").is_err(), "not_started -> passed 非法");
+        assert!(
+            set_stage(&s, &wi.id, Gate::Requirements, StageState::Passed, "").is_err(),
+            "not_started -> passed 非法"
+        );
         set_stage(&s, &wi.id, Gate::Requirements, StageState::Running, "sha-1").unwrap();
         pass_gate(&s, &wi.id, Gate::Requirements).unwrap();
         assert_eq!(get(&s, &wi.id).unwrap().current_gate, "design");

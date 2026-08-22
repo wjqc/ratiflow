@@ -36,7 +36,10 @@ pub fn scan(data: &[u8]) -> Vec<Finding> {
     for rule in rules() {
         let n = rule.re.find_iter(&text).count();
         if n > 0 {
-            out.push(Finding { kind: rule.kind.into(), count: n });
+            out.push(Finding {
+                kind: rule.kind.into(),
+                count: n,
+            });
         }
     }
     out
@@ -44,9 +47,9 @@ pub fn scan(data: &[u8]) -> Vec<Finding> {
 
 /// 高风险秘密类别（PII 仅提示不阻断）。
 pub fn has_high_risk(findings: &[Finding]) -> bool {
-    findings.iter().any(|f| {
-        !matches!(f.kind.as_str(), "email_pii")
-    })
+    findings
+        .iter()
+        .any(|f| !matches!(f.kind.as_str(), "email_pii"))
 }
 
 /// 脱敏：命中子串替换为 [REDACTED:kind]，返回脱敏文本与次数。
@@ -54,15 +57,11 @@ pub fn mask(data: &[u8]) -> (String, usize) {
     let mut text = String::from_utf8_lossy(data).to_string();
     let mut total = 0usize;
     for rule in rules() {
-        loop {
-            if let Some(m) = rule.re.find(&text) {
-                let range = m.range();
-                let replacement = format!("[REDACTED:{}]", rule.kind);
-                text.replace_range(range, &replacement);
-                total += 1;
-            } else {
-                break;
-            }
+        while let Some(m) = rule.re.find(&text) {
+            let range = m.range();
+            let replacement = format!("[REDACTED:{}]", rule.kind);
+            text.replace_range(range, &replacement);
+            total += 1;
         }
     }
     (text, total)

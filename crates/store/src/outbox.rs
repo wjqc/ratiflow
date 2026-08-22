@@ -4,14 +4,26 @@ use serde_json::{json, Value};
 use crate::{ids, timefmt, Error, Store};
 
 /// 写入事件并返回全局 sequence。
-pub fn emit(store: &Store, aggregate_type: &str, aggregate_id: &str, event_type: &str, payload: Value) -> Result<i64, Error> {
+pub fn emit(
+    store: &Store,
+    aggregate_type: &str,
+    aggregate_id: &str,
+    event_type: &str,
+    payload: Value,
+) -> Result<i64, Error> {
     let now = timefmt::now();
     let _ = ids::new_id("ev");
     store.with_conn(|conn| {
         conn.execute(
             "INSERT INTO events_outbox(aggregate_type, aggregate_id, type, payload, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![aggregate_type, aggregate_id, event_type, payload.to_string(), now],
+            rusqlite::params![
+                aggregate_type,
+                aggregate_id,
+                event_type,
+                payload.to_string(),
+                now
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     })
@@ -45,7 +57,11 @@ pub fn replay(store: &Store, after_seq: i64, limit: i64) -> Result<Vec<Value>, E
 /// 最大 sequence。
 pub fn latest_sequence(store: &Store) -> Result<i64, Error> {
     store.with_conn(|conn| {
-        conn.query_row("SELECT COALESCE(MAX(sequence),0) FROM events_outbox", [], |r| r.get(0))
-            .map_err(Error::from)
+        conn.query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM events_outbox",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(Error::from)
     })
 }

@@ -79,9 +79,17 @@ fn allowed_transition(from: &str, to: &str) -> bool {
     )
 }
 
-fn set_state(store: &Store, deployment: &mut Deployment, to: &str, result: &str) -> Result<(), Error> {
+fn set_state(
+    store: &Store,
+    deployment: &mut Deployment,
+    to: &str,
+    result: &str,
+) -> Result<(), Error> {
     if !allowed_transition(&deployment.state, to) {
-        return Err(Error::Message(format!("invalid deployment transition {} -> {}", deployment.state, to)));
+        return Err(Error::Message(format!(
+            "invalid deployment transition {} -> {}",
+            deployment.state, to
+        )));
     }
     let now = timefmt::now();
     store.with_conn(|conn| {
@@ -93,18 +101,31 @@ fn set_state(store: &Store, deployment: &mut Deployment, to: &str, result: &str)
     })?;
     deployment.state = to.into();
     deployment.result = result.into();
-    outbox::emit(store, "deployment", &deployment.id, &format!("deployment.{to}"),
-        serde_json::json!({"workitemId": deployment.workitem_id, "target": deployment.target}))?;
+    outbox::emit(
+        store,
+        "deployment",
+        &deployment.id,
+        &format!("deployment.{to}"),
+        serde_json::json!({"workitemId": deployment.workitem_id, "target": deployment.target}),
+    )?;
     Ok(())
 }
 
 /// 创建部署计划：digest 必须是不可变 sha256 引用（FR-DEP-001）。
-pub fn create_plan(store: &Store, workitem_id: &str, plan: &DeploymentPlan) -> Result<Deployment, Error> {
+pub fn create_plan(
+    store: &Store,
+    workitem_id: &str,
+    plan: &DeploymentPlan,
+) -> Result<Deployment, Error> {
     if !plan.image_digest.starts_with("sha256:") {
-        return Err(Error::Message("digest_drift: 镜像引用必须是不可变 digest（sha256:...），不接受可漂移 tag".into()));
+        return Err(Error::Message(
+            "digest_drift: 镜像引用必须是不可变 digest（sha256:...），不接受可漂移 tag".into(),
+        ));
     }
     if plan.deploy_steps.is_empty() || plan.verify_checks.is_empty() {
-        return Err(Error::Message("deploy steps and verify checks required".into()));
+        return Err(Error::Message(
+            "deploy steps and verify checks required".into(),
+        ));
     }
     for step in plan.deploy_steps.iter().chain(plan.rollback_steps.iter()) {
         if step.argv.is_empty() {
@@ -148,8 +169,10 @@ pub fn get(store: &Store, id: &str) -> Result<Deployment, Error> {
 
 pub fn get_plan(store: &Store, id: &str) -> Result<DeploymentPlan, Error> {
     let body: String = store.with_conn(|conn| {
-        conn.query_row("SELECT plan FROM deployments WHERE id=?1", [id], |r| r.get(0))
-            .map_err(|_| Error::Message("deployment_not_found".into()))
+        conn.query_row("SELECT plan FROM deployments WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|_| Error::Message("deployment_not_found".into()))
     })?;
     serde_json::from_str(&body).map_err(|e| Error::Message(e.to_string()))
 }
@@ -158,8 +181,18 @@ pub fn get_plan(store: &Store, id: &str) -> Result<DeploymentPlan, Error> {
 pub fn submit_for_approval(store: &Store, id: &str) -> Result<sg_policy::Approval, Error> {
     let mut deployment = get(store, id)?;
     set_state(store, &mut deployment, "awaiting_approval", "")?;
-    sg_policy::request_approval(store, "deployment", id, &deployment.action_digest, Risk::High,
-        &format!("部署 {} 到 {}（digest {}）", id, deployment.target, deployment.image_digest), 3600)
+    sg_policy::request_approval(
+        store,
+        "deployment",
+        id,
+        &deployment.action_digest,
+        Risk::High,
+        &format!(
+            "部署 {} 到 {}（digest {}）",
+            id, deployment.target, deployment.image_digest
+        ),
+        3600,
+    )
 }
 
 /// 审批通过后执行：先 deploying，再 SSH 预检 + 步骤；失败即 deploy_failed（FR-DEP-006）。
@@ -170,7 +203,10 @@ pub fn approve_and_deploy(
 ) -> Result<Deployment, Error> {
     let mut deployment = get(store, id)?;
     if deployment.state != "awaiting_approval" {
-        return Err(Error::Message(format!("deployment in {}（需 awaiting_approval）", deployment.state)));
+        return Err(Error::Message(format!(
+            "deployment in {}（需 awaiting_approval）",
+            deployment.state
+        )));
     }
     // 审批必须绑定当前 digest（FR-DEP-004）。
     sg_policy::validate_for(store, "deployment", id, &deployment.action_digest)
@@ -181,66 +217,125 @@ pub fn approve_and_deploy(
     set_state(store, &mut deployment, "deploying", "")?;
 
     let preflight = ssh.preflight(&plan.target).map_err(|e| {
-        let _ = set_state(store, &mut deployment, "deploy_failed", &format!("preflight: {e}"));
+        let _ = set_state(
+            store,
+            &mut deployment,
+            "deploy_failed",
+            &format!("preflight: {e}"),
+        );
         Error::Message(format!("preflight_failed: {e}"))
     })?;
-    if preflight["dockerOk"] != serde_json::json!(true) || preflight["composeOk"] != serde_json::json!(true) {
+    if preflight["dockerOk"] != serde_json::json!(true)
+        || preflight["composeOk"] != serde_json::json!(true)
+    {
         let msg = format!("preflight report: {preflight}");
         let _ = set_state(store, &mut deployment, "deploy_failed", &msg);
         return Err(Error::Message(format!("preflight_failed: {msg}")));
     }
 
-    let results = ssh.run_command_plan(&plan.target, &steps_to_commands(&plan.deploy_steps)).map_err(|e| {
-        let _ = set_state(store, &mut deployment, "deploy_failed", &e);
-        Error::Message(format!("deploy steps: {e}"))
-    })?;
+    let results = ssh
+        .run_command_plan(&plan.target, &steps_to_commands(&plan.deploy_steps))
+        .map_err(|e| {
+            let _ = set_state(store, &mut deployment, "deploy_failed", &e);
+            Error::Message(format!("deploy steps: {e}"))
+        })?;
     // 成功只能进入 awaiting_verification（FR-DEP-007）。
-    set_state(store, &mut deployment, "awaiting_verification", &serde_json::to_string(&results).unwrap_or_default())?;
+    set_state(
+        store,
+        &mut deployment,
+        "awaiting_verification",
+        &serde_json::to_string(&results).unwrap_or_default(),
+    )?;
     Ok(deployment)
 }
 
 /// 验证检查集（FR-VER-006：失败不可被 Agent 覆盖）。
-pub fn verify(store: &Store, id: &str, ssh: &dyn crate::delivery::SSHAdapterPub) -> Result<Deployment, Error> {
+pub fn verify(
+    store: &Store,
+    id: &str,
+    ssh: &dyn crate::delivery::SSHAdapterPub,
+) -> Result<Deployment, Error> {
     let mut deployment = get(store, id)?;
     if deployment.state != "awaiting_verification" {
-        return Err(Error::Message(format!("deployment in {}（需 awaiting_verification）", deployment.state)));
+        return Err(Error::Message(format!(
+            "deployment in {}（需 awaiting_verification）",
+            deployment.state
+        )));
     }
     let plan = get_plan(store, id)?;
-    let checks: Vec<crate::delivery::SSHPubCommand> = plan.verify_checks.iter().map(|c| crate::delivery::SSHPubCommand {
-        name: c.name.clone(),
-        argv: c.argv.clone(),
-        timeout_sec: 60,
-    }).collect();
+    let checks: Vec<crate::delivery::SSHPubCommand> = plan
+        .verify_checks
+        .iter()
+        .map(|c| crate::delivery::SSHPubCommand {
+            name: c.name.clone(),
+            argv: c.argv.clone(),
+            timeout_sec: 60,
+        })
+        .collect();
     let results = ssh.run_command_plan(&plan.target, &checks).map_err(|e| {
         let _ = set_state(store, &mut deployment, "verification_failed", &e);
         Error::Message(format!("verification_failed: {e}"))
     })?;
-    set_state(store, &mut deployment, "verified", &serde_json::to_string(&results).unwrap_or_default())?;
+    set_state(
+        store,
+        &mut deployment,
+        "verified",
+        &serde_json::to_string(&results).unwrap_or_default(),
+    )?;
     Ok(deployment)
 }
 
 /// 回滚：previous digest 路径 + 同一验证语义（FR-DEP-008）。
-pub fn rollback(store: &Store, id: &str, ssh: &dyn crate::delivery::SSHAdapterPub) -> Result<Deployment, Error> {
+pub fn rollback(
+    store: &Store,
+    id: &str,
+    ssh: &dyn crate::delivery::SSHAdapterPub,
+) -> Result<Deployment, Error> {
     let mut deployment = get(store, id)?;
-    if !matches!(deployment.state.as_str(), "deploy_failed" | "verification_failed") {
-        return Err(Error::Message(format!("rollback from {} not allowed", deployment.state)));
+    if !matches!(
+        deployment.state.as_str(),
+        "deploy_failed" | "verification_failed"
+    ) {
+        return Err(Error::Message(format!(
+            "rollback from {} not allowed",
+            deployment.state
+        )));
     }
     let plan = get_plan(store, id)?;
     if plan.rollback_steps.is_empty() {
-        set_state(store, &mut deployment, "rollback_failed", "no rollback steps")?;
+        set_state(
+            store,
+            &mut deployment,
+            "rollback_failed",
+            "no rollback steps",
+        )?;
         return Err(Error::Message("rollback plan missing".into()));
     }
     set_state(store, &mut deployment, "rolling_back", "")?;
-    let results = ssh.run_command_plan(&plan.target, &steps_to_commands(&plan.rollback_steps)).map_err(|e| {
-        let _ = set_state(store, &mut deployment, "rollback_failed", &e);
-        Error::Message(e)
-    })?;
-    set_state(store, &mut deployment, "rolled_back", &serde_json::to_string(&results).unwrap_or_default())?;
+    let results = ssh
+        .run_command_plan(&plan.target, &steps_to_commands(&plan.rollback_steps))
+        .map_err(|e| {
+            let _ = set_state(store, &mut deployment, "rollback_failed", &e);
+            Error::Message(e)
+        })?;
+    set_state(
+        store,
+        &mut deployment,
+        "rolled_back",
+        &serde_json::to_string(&results).unwrap_or_default(),
+    )?;
     Ok(deployment)
 }
 
 fn steps_to_commands(steps: &[PlanStep]) -> Vec<crate::delivery::SSHPubCommand> {
-    steps.iter().map(|s| crate::delivery::SSHPubCommand { name: s.name.clone(), argv: s.argv.clone(), timeout_sec: s.timeout_sec }).collect()
+    steps
+        .iter()
+        .map(|s| crate::delivery::SSHPubCommand {
+            name: s.name.clone(),
+            argv: s.argv.clone(),
+            timeout_sec: s.timeout_sec,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -249,7 +344,8 @@ mod tests {
     use crate::delivery::{FakeSSHPub, SSHTargetPub};
 
     fn setup() -> Store {
-        let dir = std::env::temp_dir().join(format!("sg-wf-{}-{}", std::process::id(), ids::new_id("t")));
+        let dir =
+            std::env::temp_dir().join(format!("sg-wf-{}-{}", std::process::id(), ids::new_id("t")));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir, "test").unwrap();
         store.with_conn(|c| {
@@ -262,12 +358,36 @@ mod tests {
 
     pub fn valid_plan() -> DeploymentPlan {
         DeploymentPlan {
-            target: SSHTargetPub { host: "deploy.test".into(), port: 22, user: "deploy".into(), expected_fingerprint: "SHA256:x".into(), remote_dir: "/srv/app".into() },
+            target: SSHTargetPub {
+                host: "deploy.test".into(),
+                port: 22,
+                user: "deploy".into(),
+                expected_fingerprint: "SHA256:x".into(),
+                remote_dir: "/srv/app".into(),
+            },
             image_digest: "sha256:abc123".into(),
             previous_digest: String::new(),
-            deploy_steps: vec![PlanStep { seq: 0, name: "up".into(), argv: vec!["docker".into(), "compose".into(), "up".into(), "-d".into()], timeout_sec: 120 }],
-            verify_checks: vec![VerifyCheck { name: "health".into(), argv: vec!["curl".into(), "-f".into(), "http://localhost/healthz".into()], required: true }],
-            rollback_steps: vec![PlanStep { seq: 0, name: "down".into(), argv: vec!["docker".into(), "compose".into(), "down".into()], timeout_sec: 60 }],
+            deploy_steps: vec![PlanStep {
+                seq: 0,
+                name: "up".into(),
+                argv: vec!["docker".into(), "compose".into(), "up".into(), "-d".into()],
+                timeout_sec: 120,
+            }],
+            verify_checks: vec![VerifyCheck {
+                name: "health".into(),
+                argv: vec![
+                    "curl".into(),
+                    "-f".into(),
+                    "http://localhost/healthz".into(),
+                ],
+                required: true,
+            }],
+            rollback_steps: vec![PlanStep {
+                seq: 0,
+                name: "down".into(),
+                argv: vec!["docker".into(), "compose".into(), "down".into()],
+                timeout_sec: 60,
+            }],
         }
     }
 
@@ -316,13 +436,14 @@ mod tests {
         let dep = create_plan(&s, "wi", &valid_plan()).unwrap();
         let appr = submit_for_approval(&s, &dep.id).unwrap();
         sg_policy::decide(&s, &appr.id, "approved", "owner", "").unwrap();
-        let mut ssh = FakeSSHPub::default();
-        approve_and_deploy(&s, &dep.id, &ssh).unwrap();
-        ssh.plan_error = Some("curl exited 7".into());
-        assert!(verify(&s, &dep.id, &ssh).is_err());
+        approve_and_deploy(&s, &dep.id, &FakeSSHPub::default()).unwrap();
+        let failing = FakeSSHPub {
+            preflight_error: None,
+            plan_error: Some("curl exited 7".into()),
+        };
+        assert!(verify(&s, &dep.id, &failing).is_err());
         assert_eq!(get(&s, &dep.id).unwrap().state, "verification_failed");
-        ssh.plan_error = None;
-        let rolled = rollback(&s, &dep.id, &ssh).unwrap();
+        let rolled = rollback(&s, &dep.id, &FakeSSHPub::default()).unwrap();
         assert_eq!(rolled.state, "rolled_back");
     }
 
@@ -332,12 +453,17 @@ mod tests {
         let dep = create_plan(&s, "wi", &valid_plan()).unwrap();
         let appr = submit_for_approval(&s, &dep.id).unwrap();
         sg_policy::decide(&s, &appr.id, "approved", "owner", "").unwrap();
-        let mut ssh = FakeSSHPub::default();
-        ssh.plan_error = Some("deploy down".into());
+        let ssh = FakeSSHPub {
+            preflight_error: None,
+            plan_error: Some("deploy down".into()),
+        };
         approve_and_deploy(&s, &dep.id, &ssh).unwrap_err();
         assert_eq!(get(&s, &dep.id).unwrap().state, "deploy_failed");
-        ssh.plan_error = Some("rollback down too".into());
-        assert!(rollback(&s, &dep.id, &ssh).is_err());
+        let ssh2 = FakeSSHPub {
+            preflight_error: None,
+            plan_error: Some("rollback down too".into()),
+        };
+        assert!(rollback(&s, &dep.id, &ssh2).is_err());
         assert_eq!(get(&s, &dep.id).unwrap().state, "rollback_failed");
     }
 }

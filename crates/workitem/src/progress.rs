@@ -9,8 +9,12 @@ pub fn progress(store: &Store, workitem_id: &str) -> Result<Value, Error> {
     let wi = crate::get(store, workitem_id)?;
     let stages = stages(store, workitem_id)?;
     let evidence_count: i64 = store.with_conn(|conn| {
-        conn.query_row("SELECT COUNT(*) FROM evidences WHERE workitem_id=?1", [workitem_id], |r| r.get(0))
-            .map_err(Error::from)
+        conn.query_row(
+            "SELECT COUNT(*) FROM evidences WHERE workitem_id=?1",
+            [workitem_id],
+            |r| r.get(0),
+        )
+        .map_err(Error::from)
     })?;
     let pending_approvals: i64 = store.with_conn(|conn| {
         conn.query_row(
@@ -30,7 +34,9 @@ pub fn progress(store: &Store, workitem_id: &str) -> Result<Value, Error> {
         if stage.gate == wi.current_gate {
             match stage.state.as_str() {
                 "awaiting_approval" => blocked_reason = json!("等待人工审批"),
-                "blocked" | "failed" => blocked_reason = json!(format!("当前关状态：{}", stage.state)),
+                "blocked" | "failed" => {
+                    blocked_reason = json!(format!("当前关状态：{}", stage.state))
+                }
                 "stale" => blocked_reason = json!("输入基线已过期，需重新绑定"),
                 _ => {}
             }

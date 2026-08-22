@@ -76,19 +76,28 @@ pub enum ExecError {
     Io(String),
 }
 
-const SAFE_READ_ONLY: [&str; 10] = ["ls", "cat", "grep", "find", "wc", "head", "tail", "git", "rg", "stat"];
+const SAFE_READ_ONLY: [&str; 10] = [
+    "ls", "cat", "grep", "find", "wc", "head", "tail", "git", "rg", "stat",
+];
 
 pub fn validate(mode: Mode, m: &ExecutionManifest) -> Result<(), ExecError> {
     if m.argv.is_empty() {
         return Err(ExecError::Rejected("argv required".into()));
     }
     for arg in &m.argv {
-        if [';', '|', '&', '`', '$', '>', '<', '\n'].iter().any(|c| arg.contains(*c)) {
-            return Err(ExecError::Rejected(format!("shell metacharacter in argv {arg:?}")));
+        if [';', '|', '&', '`', '$', '>', '<', '\n']
+            .iter()
+            .any(|c| arg.contains(*c))
+        {
+            return Err(ExecError::Rejected(format!(
+                "shell metacharacter in argv {arg:?}"
+            )));
         }
     }
     if mode == Mode::SafeRestricted && m.writes_files {
-        return Err(ExecError::Disabled("safe restricted mode cannot write files".into()));
+        return Err(ExecError::Disabled(
+            "safe restricted mode cannot write files".into(),
+        ));
     }
     if m.timeout_sec <= 0 {
         return Err(ExecError::Rejected("timeout required".into()));
@@ -104,7 +113,10 @@ pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecErro
         )),
         Mode::SafeRestricted => {
             if !SAFE_READ_ONLY.contains(&m.argv[0].as_str()) {
-                return Err(ExecError::Disabled(format!("命令 {} 不在只读白名单", m.argv[0])));
+                return Err(ExecError::Disabled(format!(
+                    "命令 {} 不在只读白名单",
+                    m.argv[0]
+                )));
             }
             run_local(&m.argv[0], &m.argv[1..], m, "safe_restricted")
         }
@@ -113,7 +125,8 @@ pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecErro
             run_local(&bin, &m.argv[1..], m, "unsafe_explicit")
         }
         Mode::Docker => {
-            let docker = which_docker().ok_or_else(|| ExecError::Io("docker unavailable".into()))?;
+            let docker =
+                which_docker().ok_or_else(|| ExecError::Io("docker unavailable".into()))?;
             let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
             if m.network_off {
                 args.push("--network".into());
@@ -132,7 +145,12 @@ pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecErro
     }
 }
 
-fn run_local(bin: &str, args: &[String], m: &ExecutionManifest, mode: &str) -> Result<ExecResult, ExecError> {
+fn run_local(
+    bin: &str,
+    args: &[String],
+    m: &ExecutionManifest,
+    mode: &str,
+) -> Result<ExecResult, ExecError> {
     let start = Instant::now();
     let mut cmd = Command::new(bin);
     cmd.args(args);
@@ -142,9 +160,7 @@ fn run_local(bin: &str, args: &[String], m: &ExecutionManifest, mode: &str) -> R
             cmd.current_dir(dir);
         }
     }
-    let output = cmd
-        .output()
-        .map_err(|e| ExecError::Io(e.to_string()))?;
+    let output = cmd.output().map_err(|e| ExecError::Io(e.to_string()))?;
     let elapsed = start.elapsed();
     Ok(ExecResult {
         mode: mode.into(),

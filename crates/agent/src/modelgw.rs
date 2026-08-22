@@ -1,7 +1,7 @@
 //! 模型网关：出网前统一裁剪/脱敏/预算；调用审计不含正文（FR-PLT-007）。
 use serde::{Deserialize, Serialize};
 use sg_integrations::model::{CompletionRequest, CompletionResponse, ModelProvider};
-use sg_store::{ids, timefmt, Error, Store};
+use sg_store::{ids, timefmt, Store};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Budget {
@@ -12,7 +12,11 @@ pub struct Budget {
 
 impl Default for Budget {
     fn default() -> Self {
-        Self { max_calls: 50, max_tokens_in: 200_000, max_tokens_out: 20_000 }
+        Self {
+            max_calls: 50,
+            max_tokens_in: 200_000,
+            max_tokens_out: 20_000,
+        }
     }
 }
 
@@ -30,7 +34,10 @@ pub struct Gateway {
 
 impl Gateway {
     pub fn new(provider: Box<dyn ModelProvider>) -> Self {
-        Self { provider, usage: std::sync::Mutex::new(Usage::default()) }
+        Self {
+            provider,
+            usage: std::sync::Mutex::new(Usage::default()),
+        }
     }
 
     pub fn provider_name(&self) -> &str {
@@ -42,7 +49,13 @@ impl Gateway {
     }
 
     /// 调用：预算检查 → 全量消息脱敏 → provider → 审计。
-    pub fn call(&self, store: &Store, run_id: &str, budget: &Budget, req: &CompletionRequest) -> Result<CompletionResponse, String> {
+    pub fn call(
+        &self,
+        store: &Store,
+        run_id: &str,
+        budget: &Budget,
+        req: &CompletionRequest,
+    ) -> Result<CompletionResponse, String> {
         {
             let usage = self.usage.lock().unwrap();
             if budget.max_calls > 0 && usage.calls >= budget.max_calls {
@@ -62,7 +75,10 @@ impl Gateway {
         for msg in &req.messages {
             let (text, n) = sg_store::scan::mask(msg.content.as_bytes());
             redactions += n;
-            masked_messages.push(sg_integrations::model::ChatMessage { role: msg.role.clone(), content: text });
+            masked_messages.push(sg_integrations::model::ChatMessage {
+                role: msg.role.clone(),
+                content: text,
+            });
         }
         masked.messages = masked_messages;
 
@@ -76,13 +92,33 @@ impl Gateway {
                     usage.tokens_in += resp.tokens_in;
                     usage.tokens_out += resp.tokens_out;
                 }
-                record(store, run_id, self.provider.name(), "ok", resp.tokens_in, resp.tokens_out,
-                    started.elapsed().as_millis() as i64, redactions);
+                record(
+                    store,
+                    run_id,
+                    &CallStats {
+                        provider: self.provider.name(),
+                        status: "ok",
+                        tokens_in: resp.tokens_in,
+                        tokens_out: resp.tokens_out,
+                        latency_ms: started.elapsed().as_millis() as i64,
+                        redactions,
+                    },
+                );
                 Ok(resp)
             }
             Err(e) => {
-                record(store, run_id, self.provider.name(), "error", 0, 0,
-                    started.elapsed().as_millis() as i64, redactions);
+                record(
+                    store,
+                    run_id,
+                    &CallStats {
+                        provider: self.provider.name(),
+                        status: "error",
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        latency_ms: started.elapsed().as_millis() as i64,
+                        redactions,
+                    },
+                );
                 Err(e)
             }
         }
@@ -93,9 +129,26 @@ impl Gateway {
     }
 }
 
-fn record(store: &Store, run_id: &str, provider: &str, status: &str, tin: i64, tout: i64, latency_ms: i64, redactions: usize) {
+struct CallStats<'a> {
+    provider: &'a str,
+    status: &'a str,
+    tokens_in: i64,
+    tokens_out: i64,
+    latency_ms: i64,
+    redactions: usize,
+}
+
+fn record(store: &Store, run_id: &str, stats: &CallStats<'_>) {
+    let (provider, status, tin, tout, latency_ms, redactions) = (
+        stats.provider,
+        stats.status,
+        stats.tokens_in,
+        stats.tokens_out,
+        stats.latency_ms,
+        stats.redactions,
+    );
     let _ = store.with_conn(|conn| {
-        conn.execute(
+        let _ = conn.execute(
             "INSERT INTO model_calls(id, agent_run_id, provider, model, tokens_in, tokens_out, cost_micros, latency_ms, redactions, status, created_at)
              VALUES (?1,?2,?3,'default',?4,?5,0,?6,?7,?8,?9)",
             rusqlite::params![ids::new_id("mc"), run_id, provider, tin, tout, latency_ms, redactions as i64, status, timefmt::now()],
