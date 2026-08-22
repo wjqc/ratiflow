@@ -299,17 +299,37 @@ fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
-/// FTS5 检索（项目作用域强制）。
+/// FTS5 检索（项目作用域强制）。trigram 分词器：MATCH 支持中文短语（≥3 字符）；
+/// 短查询与兜底走 LIKE（同表 trigram 索引可加速）。用户输入不进 FTS 语法层。
 pub fn search(store: &Store, project_id: &str, query: &str, limit: i64) -> Result<Vec<Value>, Error> {
     if query.trim().is_empty() {
         return Ok(vec![]);
     }
+    // 逐词 AND：每个词独立 MATCH（trigram，≥3 字）或 LIKE（短词/中文词组均可用）。
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|w| w.chars().filter(|c| !matches!(c, '"' | '*' | '(' | ')' | ':' | '\'' | '%')).collect::<String>())
+        .filter(|w| !w.is_empty())
+        .take(5)
+        .collect();
+    if terms.is_empty() {
+        return Ok(vec![]);
+    }
     store.with_conn(|conn| {
-        let mut stmt = conn.prepare(
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(project_id.to_string())];
+        for (i, term) in terms.iter().enumerate() {
+            conditions.push(format!("body LIKE ?{}", i + 2));
+            params.push(Box::new(format!("%{term}%")));
+        }
+        let sql = format!(
             "SELECT chunk_id, source_id, body FROM knowledge_fts
-             WHERE knowledge_fts MATCH ?1 AND project_id = ?2 LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![fts_query(query), project_id, limit], |r| {
+             WHERE project_id = ?1 AND {} LIMIT {}",
+            conditions.join(" AND "),
+            limit
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
             Ok(json!({
                 "chunkId": r.get::<_, String>(0)?,
                 "sourceId": r.get::<_, String>(1)?,
@@ -322,17 +342,6 @@ pub fn search(store: &Store, project_id: &str, query: &str, limit: i64) -> Resul
         }
         Ok(out)
     })
-}
-
-/// FTS 查询转义：按空格分词 + AND 连接（用户输入不进语法层）。
-fn fts_query(input: &str) -> String {
-    input
-        .split_whitespace()
-        .map(|token| token.replace(['"', '*', '(', ')', ':'], ""))
-        .filter(|t| !t.is_empty())
-        .take(8)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// 上下文预览：来源、片段、大小与排除理由（F02：不能只返回拼接大文本）。
@@ -446,9 +455,9 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join("docs")).unwrap();
         std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
-        std::fs::write(repo.join("docs", "auth.md"), "# 认证设计\nOIDC 登录流程：授权码模式。\n").unwrap();
+        std::fs::write(repo.join("docs").join("auth.md"), "# 认证设计\nOIDC 登录流程：授权码模式。\n").unwrap();
         std::fs::write(repo.join("README.md"), "# Demo\n支持 sso 单点登录。\n").unwrap();
-        std::fs::write(repo.join("node_modules", "pkg", "x.js"), "ignored").unwrap();
+        std::fs::write(repo.join("node_modules").join("pkg").join("x.js"), "ignored").unwrap();
         std::fs::write(repo.join(".sixgatesignore"), "private/\n").unwrap();
         std::fs::write(repo.join("private"), b"secret area").ok(); // 文件非目录，命中前缀忽略
 

@@ -30,5 +30,6 @@ CREATE VIRTUAL TABLE knowledge_fts USING fts5(
     chunk_id UNINDEXED,
     source_id UNINDEXED,
     project_id UNINDEXED,
-    body
+    body,
+    tokenize='trigram'
 );

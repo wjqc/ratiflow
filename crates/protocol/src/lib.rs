@@ -27,6 +27,7 @@ pub fn hello_compatible(hello: &Hello) -> bool {
 }
 
 pub use error::{ErrorCode, RpcError};
+pub use rpc::{err_response, event_notification, ok_response};
 pub use event::{CoreEvent, TimelineEvent};
 pub use rpc::{Notification, Request, Response, RpcMessage};
 

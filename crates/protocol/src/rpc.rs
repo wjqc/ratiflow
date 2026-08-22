@@ -96,6 +96,15 @@ pub fn request(id: Value, method: &str, params: Value) -> Request {
     Request { jsonrpc: "2.0".into(), id: Some(id), method: method.into(), params: Some(params) }
 }
 
+impl Response {
+    /// 单行 JSON（stdio 分帧）。
+    pub fn to_line(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":\"serialize failed\"}}}}".into()
+        })
+    }
+}
+
 /// 便捷构造：成功响应。
 pub fn ok_response(id: Option<Value>, result: Value) -> Response {
     Response { jsonrpc: "2.0".into(), id, result: Some(result), error: None }
@@ -104,6 +113,13 @@ pub fn ok_response(id: Option<Value>, result: Value) -> Response {
 /// 便捷构造：失败响应。
 pub fn err_response(id: Option<Value>, error: crate::RpcError) -> Response {
     Response { jsonrpc: "2.0".into(), id, result: None, error: Some(error) }
+}
+
+impl Notification {
+    /// 单行 JSON（stdio 分帧）。
+    pub fn to_line(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
 }
 
 /// 便捷构造：事件 notification。

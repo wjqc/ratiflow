@@ -26,3 +26,4 @@ sg-evidence = { workspace = true }
 sg-executor = { workspace = true }
 sg-integrations = { workspace = true }
 sg-timeline = { workspace = true }
+rusqlite = { workspace = true }
