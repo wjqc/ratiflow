@@ -219,6 +219,17 @@ function createWindow(): void {
       event.preventDefault();
     }
   });
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    console.error(`[renderer] load failed ${code} ${desc} ${url}`);
+  });
+  mainWindow.webContents.on('console-message', (_e, level, message) => {
+    if (level >= 2) {
+      console.error(`[renderer console] ${message}`);
+    }
+  });
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error(`[renderer] process gone: ${details.reason}`);
+  });
 }
 
 function registerIpc(): void {
