@@ -254,6 +254,7 @@ function createWindow(): void {
           console.error('[sg-debug+5s]', JSON.stringify(later));
         } catch {}
       }, 5000);
+    });
   }
 }
 
