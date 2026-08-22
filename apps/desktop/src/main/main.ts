@@ -28,6 +28,7 @@ class CoreClient {
   private helloPromise: Promise<HelloInfo> | null = null;
   private restarts = 0;
   private restartWindowStart = Date.now();
+  private shutdownRequested = false;
   coreUnavailable = false;
 
   constructor(private binaryPath: string, private dataDir: string, private logPath: string) {}
@@ -105,9 +106,14 @@ class CoreClient {
       appendFileSync(this.logPath, chunk);
     });
 
-    this.proc.on('exit', (code) => {
-      appendFileSync(this.logPath, `[main] core exited code=${code}\n`);
+    this.proc.on('exit', (code, signal) => {
+      appendFileSync(this.logPath, `[main] core exited code=${code} signal=${signal}\n`);
       this.proc = null;
+      // P0：requested shutdown 不重启；只有意外退出才进入退避重启。
+      if (this.shutdownRequested) {
+        appendFileSync(this.logPath, '[main] shutdown requested; no restart\n');
+        return;
+      }
       if (!helloResolved) {
         onHelloError(new Error('core 启动后立即退出（详见日志）'));
         return;
@@ -124,13 +130,18 @@ class CoreClient {
         appendFileSync(this.logPath, '[main] core restart limit reached; diagnostic mode\n');
         return;
       }
-      appendFileSync(this.logPath, `[main] restarting core (${this.restarts}/3)\n`);
+      // 指数退避：500ms * 2^(n-1)
+      const backoff = 500 * Math.pow(2, this.restarts - 1);
+      appendFileSync(this.logPath, `[main] restarting core (${this.restarts}/3) in ${backoff}ms\n`);
       setTimeout(() => {
+        if (this.shutdownRequested) {
+          return;
+        }
         this.helloPromise = new Promise((resolve2, reject2) => {
           this.spawnCore(resolve2, reject2);
         });
         this.helloPromise.catch(() => undefined);
-      }, 500);
+      }, backoff);
     });
   }
 
@@ -165,8 +176,11 @@ class CoreClient {
   }
 
   async shutdown(): Promise<void> {
+    // P0：标记请求退出 -> 停收新调用 -> graceful -> 有界等待 -> 强杀。
+    this.shutdownRequested = true;
     this.proc?.stdin?.write(JSON.stringify({ jsonrpc: '2.0', method: 'shutdown' }) + '\n');
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    this.proc?.stdin?.end();
+    await new Promise((resolve) => setTimeout(resolve, 800));
     this.proc?.kill('SIGKILL');
   }
 }

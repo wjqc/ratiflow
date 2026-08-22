@@ -3,6 +3,15 @@
 //! 子命令：app-server（默认）| migrate-v2 --from <dir> --to <dir>
 
 mod dispatch;
+
+extern "C" {
+    fn getppid() -> i32;
+}
+
+/// safety: getppid 是 POSIX 纯查询。
+unsafe fn libc_getppid() -> i32 {
+    getppid()
+}
 mod migrate;
 mod settings_dispatch;
 mod state;
@@ -73,6 +82,16 @@ fn main() {
     if let Ok(latest) = outbox::latest_sequence(&app.store) {
         app.last_pushed.store(latest, Ordering::SeqCst);
     }
+
+    // parent-death watchdog：Electron 退出后 core 必须自动终止（P0 F 生命周期）。
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        // getppid 变为 1（init/launchd）说明父进程已死。
+        if unsafe { libc_getppid() } == 1 {
+            eprintln!("{{\"level\":\"info\",\"msg\":\"parent exited; core self-terminating\"}}");
+            std::process::exit(0);
+        }
+    });
 
     let stdin = std::io::stdin();
     let mut pending_shutdown = false;
