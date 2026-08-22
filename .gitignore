@@ -11,3 +11,4 @@ internal/web/dist/*
 *.log
 *.vsix
 *.tsbuildinfo
+.idea/
