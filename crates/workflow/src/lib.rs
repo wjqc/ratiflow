@@ -8,6 +8,7 @@ use sg_store::{ids, outbox, timefmt, Error, Store};
 pub mod delivery;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanStep {
     pub seq: i64,
     pub name: String,
@@ -21,6 +22,7 @@ fn default_step_timeout() -> i64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerifyCheck {
     pub name: String,
     pub argv: Vec<String>,
@@ -33,6 +35,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeploymentPlan {
     pub target: crate::delivery::SSHTargetPub,
     pub image_digest: String,

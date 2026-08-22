@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SSHTarget {
     pub host: String,
     #[serde(default = "default_port")]
@@ -18,6 +19,7 @@ fn default_port() -> i64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SSHCommand {
     pub name: String,
     pub argv: Vec<String>,
