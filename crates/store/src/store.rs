@@ -43,6 +43,9 @@ impl Store {
     }
 
     /// 在锁内执行数据库操作（单写者串行）。
+    ///
+    /// 闭包内禁止调用任何会再次进入 with_conn/with_tx 的函数：
+    /// Mutex 不可重入，重入将死锁（曾导致 project::find_by_locator 挂死）。
     pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
         let conn = self.conn.lock().expect("store connection poisoned");
         f(&conn)

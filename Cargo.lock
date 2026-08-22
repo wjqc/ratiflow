@@ -646,16 +646,20 @@ dependencies = [
 name = "sg-policy"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sg-store",
  "sha2",
+ "thiserror",
+ "time",
 ]
 
 [[package]]
 name = "sg-project"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sg-store",
@@ -705,9 +709,11 @@ dependencies = [
 name = "sg-workitem"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sg-store",
+ "thiserror",
 ]
 
 [[package]]
