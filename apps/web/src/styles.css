@@ -210,3 +210,12 @@ button:focus-visible { outline: 2px solid #77d69b; outline-offset: 2px; }
 .passport-gates { list-style: none; padding: 0; display: grid; gap: 6px; }
 .pg-pass { color: #69d086; }
 .pg-fail { color: #ed6a5e; }
+
+/* --- 需求文档 --- */
+.picked-file { margin: 0; font-size: 13px; opacity: .85; }
+.optional-tag { margin-left: 8px; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,.25); opacity: .8; vertical-align: middle; }
+.entry-optional { opacity: .92; }
+.reqdoc-panel { padding-bottom: 8px; }
+.reqdoc-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.reqdoc-header h2 { margin: 0; }
+.reqdoc-body { margin: 10px 0 4px; padding: 12px; border-radius: 8px; background: rgba(0,0,0,.3); white-space: pre-wrap; font-size: 13px; max-height: 320px; overflow: auto; }

@@ -192,6 +192,63 @@ paths:
         '503': { $ref: '#/components/responses/Problem' }
         '502': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
+  /workitems/import-document:
+    post:
+      tags: [workitems]
+      operationId: importDocument
+      description: 从本地文件导入需求：文档复制进工作目录（data/docs/）并创建工作项；标题取首行 H1 或文件名
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectId, filename, content]
+              properties:
+                projectId: { type: string }
+                filename: { type: string }
+                content: { type: string, description: 文档全文（前端读取本地文件后上传） }
+      responses:
+        '201':
+          description: 已导入（requirementDoc 为工作目录中的文档路径）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkItem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /workitems/{id}/documents:
+    get:
+      tags: [workitems]
+      operationId: listDocuments
+      description: 工作项在工作目录（data/docs/{id}/）中的需求文档清单
+      parameters: [{ $ref: '#/components/parameters/ID' }]
+      responses:
+        '200':
+          description: 文档文件名列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { type: string } }
+  /workitems/{id}/documents/{name}:
+    get:
+      tags: [workitems]
+      operationId: getDocumentContent
+      description: 需求文档正文
+      parameters:
+        - { $ref: '#/components/parameters/ID' }
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 正文（text/plain）
+          content:
+            text/plain:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Problem' }
   /workitems/{id}:
     get:
       tags: [workitems]

@@ -5,12 +5,14 @@ import {
   createDeployment,
   createDraft,
   deploy,
+  documentContent,
   evaluateGate,
   freezeBaseline,
   getWorkItem,
   issuePassport,
   latestPassport,
   listArtifacts,
+  listDocuments,
   listEvidence,
   listRevisions,
   recordEvidence,
@@ -47,6 +49,8 @@ export default function Workbench({ workItemId, onBack }: Props) {
   const [evidences, setEvidences] = useState<Evidence[]>([]);
   const [passport, setPassport] = useState<PassportInfo | null>(null);
   const [gateResult, setGateResult] = useState<GateResultInfo | null>(null);
+  const [requirementDoc, setRequirementDoc] = useState<{ name: string; content: string } | null>(null);
+  const [showDoc, setShowDoc] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(true);
@@ -58,19 +62,26 @@ export default function Workbench({ workItemId, onBack }: Props) {
       const detail = await getWorkItem(workItemId);
       setWorkItem(detail.workItem);
       setStages(detail.stages);
-      const [artifactPage, evidencePage] = await Promise.all([
+      const [artifactPage, evidencePage, docPage] = await Promise.all([
         listArtifacts(workItemId),
         listEvidence(workItemId),
+        listDocuments(workItemId).catch(() => ({ items: [] as string[] })),
       ]);
       setArtifacts(artifactPage.items);
       setEvidences(evidencePage.items);
+      if (docPage.items.length > 0 && !requirementDoc) {
+        const content = await documentContent(workItemId, docPage.items[0]).catch(() => '');
+        setRequirementDoc({ name: docPage.items[0], content });
+      }
       setPassport(await latestPassport(workItemId).catch(() => null));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '加载失败');
     } finally {
       setLoading(false);
     }
-  }, [workItemId]);
+    // requirementDoc 仅首次加载回读，避免覆盖展开状态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workItemId, requirementDoc === null]);
 
   useEffect(() => {
     setLoading(true);
@@ -123,6 +134,26 @@ export default function Workbench({ workItemId, onBack }: Props) {
       </div>
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       {notice ? <div className="notice-banner" role="status">{notice}</div> : null}
+
+      {requirementDoc ? (
+        <section className="panel reqdoc-panel" aria-labelledby="reqdoc-title">
+          <div className="reqdoc-header">
+            <h2 id="reqdoc-title">📄 需求原文</h2>
+            <span className="draft-meta">
+              工作目录 <code>data/docs/{workItem.id.slice(0, 10)}…/{requirementDoc.name}</code>
+            </span>
+            <button
+              className="row-action"
+              type="button"
+              aria-expanded={showDoc}
+              onClick={() => setShowDoc((v) => !v)}
+            >
+              {showDoc ? '收起' : '展开'}
+            </button>
+          </div>
+          {showDoc ? <pre className="reqdoc-body">{requirementDoc.content}</pre> : null}
+        </section>
+      ) : null}
 
       <ol className="gate-progress" aria-label="六关进度">
         {gateOrder.map((gate) => {

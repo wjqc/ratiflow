@@ -349,3 +349,21 @@ export async function startAgentRunWithManifest(
   const manifestId = await ensureManifest(workItemId);
   return startAgentRun(workItemId, goal, manifestId, toolAllowlist);
 }
+
+// --- 需求文档（工作目录 data/docs/） ---
+
+export function importDocument(input: {
+  projectId: string;
+  filename: string;
+  content: string;
+}): Promise<WorkItem> {
+  return request('/api/v1/workitems/import-document', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function listDocuments(workItemId: string): Promise<{ items: string[] }> {
+  return request(`/api/v1/workitems/${workItemId}/documents`);
+}
+
+export function documentContent(workItemId: string, name: string): Promise<string> {
+  return requestText(`/api/v1/workitems/${workItemId}/documents/${encodeURIComponent(name)}`);
+}

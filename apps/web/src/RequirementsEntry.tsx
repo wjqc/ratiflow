@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { createWorkItem, importIssue, listWorkItems, loadDiagnostics } from './api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createWorkItem, importDocument, importIssue, listWorkItems, loadDiagnostics } from './api';
 import type { DiagnosticReport, WorkItem } from './types';
 import { gateLabels } from './types';
 
@@ -8,8 +8,9 @@ interface Props {
   onOpenWorkbench: (id: string) => void;
 }
 
-// 需求入口：SixGates 的主入口页。两种进入六关的方式——
-// 1) 直接写入需求文本；2) 从 GitLab Issue 导入（需先在诊断页配置 GitLab）。
+// 需求入口：三种进入六关的方式——
+// 1) 写入需求（落盘为工作目录文档）；2) 导入本地文档（复制进工作目录，主路径）；
+// 3) GitLab Issue（可选，需先配置 GitLab）。
 export default function RequirementsEntry({ projectId, onOpenWorkbench }: Props) {
   const [items, setItems] = useState<WorkItem[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport | null>(null);
@@ -21,7 +22,10 @@ export default function RequirementsEntry({ projectId, onOpenWorkbench }: Props)
   // 模式一：写入需求
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  // 模式二：导入 Issue
+  // 模式二：导入本地文档
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [pickedFile, setPickedFile] = useState<{ name: string; content: string } | null>(null);
+  // 模式三：GitLab Issue
   const [issueIid, setIssueIid] = useState('');
   const [gitlabProjectId, setGitlabProjectId] = useState('');
 
@@ -60,10 +64,49 @@ export default function RequirementsEntry({ projectId, onOpenWorkbench }: Props)
       const wi = await createWorkItem({ projectId, title: title.trim(), description: description.trim() });
       setTitle('');
       setDescription('');
-      setNotice(`已创建「${wi.title}」，进入需求关。`);
+      setNotice(`已保存需求文档并创建「${wi.title}」。`);
       onOpenWorkbench(wi.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '创建失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setPickedFile({ name: file.name, content: String(reader.result ?? '') });
+    };
+    reader.readAsText(file);
+  };
+
+  const submitFile = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!pickedFile) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const wi = await importDocument({
+        projectId,
+        filename: pickedFile.name,
+        content: pickedFile.content,
+      });
+      setPickedFile(null);
+      if (fileRef.current) {
+        fileRef.current.value = '';
+      }
+      setNotice(`已导入「${wi.title}」，文档已复制进工作目录。`);
+      onOpenWorkbench(wi.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '导入失败');
     } finally {
       setBusy(false);
     }
@@ -98,16 +141,36 @@ export default function RequirementsEntry({ projectId, onOpenWorkbench }: Props)
       <div className="page-heading">
         <div>
           <h1>写下你的需求，开始闯关</h1>
-          <p>输入需求或从 GitLab Issue 导入，SixGates 将带你依次通过需求 → 方案 → 开发 → 测试 → 部署 → 验证六关。</p>
+          <p>需求以 Markdown 文档形式保存在本地工作目录（data/docs/），随后依次通过需求 → 方案 → 开发 → 测试 → 部署 → 验证六关。</p>
         </div>
       </div>
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       {notice ? <div className="notice-banner" role="status">{notice}</div> : null}
 
       <div className="entry-grid">
+        <form className="panel entry-card" onSubmit={submitFile} aria-labelledby="entry-file">
+          <h2 id="entry-file">📁 导入本地文档</h2>
+          <p className="entry-hint">选择磁盘上的需求文档（.md / .txt），SixGates 会把它复制进工作目录并创建工作项。</p>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".md,.markdown,.txt"
+            onChange={pickFile}
+            aria-label="选择需求文档文件"
+          />
+          {pickedFile ? (
+            <p className="picked-file">
+              已选择：<code>{pickedFile.name}</code>（{pickedFile.content.length} 字符，标题取首行 H1 或文件名）
+            </p>
+          ) : null}
+          <button className="primary-button" type="submit" disabled={busy || !pickedFile}>
+            复制到工作目录并开始闯关 →
+          </button>
+        </form>
+
         <form className="panel entry-card" onSubmit={submitText} aria-labelledby="entry-write">
           <h2 id="entry-write">✍️ 写入需求</h2>
-          <p className="entry-hint">直接描述你要做的功能、修复或改动。</p>
+          <p className="entry-hint">直接输入；保存后会生成 <code>data/docs/…/requirement.md</code> 文档。</p>
           <label className="field">
             <span>需求标题 *</span>
             <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如：支持 SSO 登录" required />
@@ -121,14 +184,14 @@ export default function RequirementsEntry({ projectId, onOpenWorkbench }: Props)
               rows={5}
             />
           </label>
-          <button className="primary-button" type="submit" disabled={busy}>创建并进入需求关 →</button>
+          <button className="primary-button" type="submit" disabled={busy}>保存为文档并进入需求关 →</button>
         </form>
 
-        <form className="panel entry-card" onSubmit={submitImport} aria-labelledby="entry-import">
-          <h2 id="entry-import">⑂ 从 GitLab Issue 导入</h2>
+        <form className="panel entry-card entry-optional" onSubmit={submitImport} aria-labelledby="entry-import">
+          <h2 id="entry-import">⑂ 从 GitLab Issue 导入<span className="optional-tag">可选</span></h2>
           <p className="entry-hint">
             {gitlabReady
-              ? 'GitLab 已连接，输入 Issue IID 即可导入标题、正文与标签。'
+              ? 'GitLab 已连接；Issue 标题、正文与标签会导入并落盘为文档。'
               : '需要先在「本地诊断」页配置 GitLab（SIXGATES_GITLAB_URL / SIXGATES_GITLAB_TOKEN）。'}
           </p>
           <label className="field">
@@ -154,13 +217,13 @@ export default function RequirementsEntry({ projectId, onOpenWorkbench }: Props)
         ) : (
           <div className="integration-list">
             <div className="integration-header" aria-hidden="true">
-              <span>需求</span><span>当前关</span><span>Issue</span><span>操作</span>
+              <span>需求</span><span>当前关</span><span>来源</span><span>操作</span>
             </div>
             {items.map((item) => (
               <div className="integration-row" key={item.id}>
                 <div className="service-name">{item.title}</div>
                 <div><span className={`stage-chip stage-${item.currentGate}`}>{gateLabels[item.currentGate]}</span></div>
-                <div className="detail">{item.gitlabIssueIid ? `#${item.gitlabIssueIid}` : '—'}</div>
+                <div className="detail">{item.gitlabIssueIid ? `GitLab #${item.gitlabIssueIid}` : '本地文档'}</div>
                 <div>
                   <button className="row-action" type="button" onClick={() => onOpenWorkbench(item.id)}>继续闯关 →</button>
                 </div>
