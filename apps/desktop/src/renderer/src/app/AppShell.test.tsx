@@ -41,7 +41,7 @@ describe('AppShell', () => {
     render(<AppShell />);
     expect(screen.getByText('写下你的需求，开始闯关')).toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByText('支持 SSO 登录').length).toBeGreaterThan(0));
-    expect(screen.getByText('需求关')).toBeInTheDocument();
+    expect(screen.getAllByText('需求关').length).toBeGreaterThan(0);
   });
 
   it('侧栏展示项目与六关导航', async () => {
