@@ -230,6 +230,23 @@ function createWindow(): void {
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.error(`[renderer] process gone: ${details.reason}`);
   });
+  // 渲染诊断：确认 DOM/模块/bridge 状态（SG_DEBUG_RENDER=1 时输出）。
+  if (process.env.SG_DEBUG_RENDER === '1') {
+    mainWindow.webContents.on('did-finish-load', async () => {
+      try {
+        const state = await mainWindow!.webContents.executeJavaScript(`(() => ({
+          readyState: document.readyState,
+          rootChildren: document.getElementById('root')?.childElementCount ?? -1,
+          hasBridge: typeof window.sixgates === 'object',
+          scripts: Array.from(document.querySelectorAll('script')).map(s => ({ type: s.type, src: s.getAttribute('src') })),
+          bodyText: document.body.innerText.slice(0, 80),
+        }))()`);
+        console.error('[sg-debug]', JSON.stringify(state, null, 2));
+      } catch (error) {
+        console.error('[sg-debug] executeJavaScript failed:', String(error));
+      }
+    });
+  }
 }
 
 function registerIpc(): void {
