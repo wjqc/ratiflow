@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/protocol",
+    "crates/settings",
     "crates/store",
     "crates/project",
     "crates/knowledge",
@@ -37,6 +38,7 @@ ureq = { version = "2", features = ["json"] }
 
 # 内部 crate
 sg-protocol = { path = "crates/protocol" }
+sg-settings = { path = "crates/settings" }
 sg-store = { path = "crates/store" }
 sg-project = { path = "crates/project" }
 sg-knowledge = { path = "crates/knowledge" }

@@ -682,6 +682,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sg-settings"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sg-store",
+ "sha2",
+ "time",
+]
+
+[[package]]
 name = "sg-store"
 version = "0.1.0"
 dependencies = [
