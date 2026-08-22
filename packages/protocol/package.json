@@ -1,0 +1,14 @@
+{
+  "name": "@sixgates/protocol",
+  "private": true,
+  "version": "3.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

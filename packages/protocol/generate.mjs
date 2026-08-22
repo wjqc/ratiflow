@@ -1,0 +1,73 @@
+#!/usr/bin/env node
+// 从 contracts/rpc/sixgates.json 生成 TypeScript 方法清单与类型（契约先行，禁止手写漂移）。
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+
+const contract = JSON.parse(readFileSync('contracts/rpc/sixgates.json', 'utf8'));
+
+function tsType(type) {
+  switch (type) {
+    case 'string': return 'string';
+    case 'number': return 'number';
+    case 'boolean': return 'boolean';
+    case 'array': return 'unknown[]';
+    default: return 'unknown';
+  }
+}
+
+let code = `// 本文件由 generate.mjs 从 contracts/rpc/sixgates.json 生成；不要手写修改。
+export const PROTOCOL_VERSION = '1';
+export const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
+
+export type RpcMethodName =
+${contract.methods.map((m) => `  | '${m.name}'`).join('\n')};
+
+export const RPC_METHODS: readonly RpcMethodName[] = [
+${contract.methods.map((m) => `  '${m.name}',`).join('\n')}
+] as const;
+
+export const EVENT_TYPES: readonly string[] = [
+${contract.events.map((e) => `  '${e}',`).join('\n')}
+] as const;
+
+export interface TimelineEvent {
+  sequence: number;
+  type: string;
+  workItemId?: string;
+  occurredAt: string;
+  summary: string;
+  detail?: unknown;
+}
+`;
+
+for (const method of contract.methods) {
+  const params = method.params.filter((p) => p.required);
+  const optional = method.params.filter((p) => !p.required);
+  if (params.length + optional.length === 0) {
+    code += `\nexport type ${ifaceName(method.name)}Params = Record<string, never>;\n`;
+    continue;
+  }
+  code += `\nexport interface ${ifaceName(method.name)}Params {\n`;
+  for (const p of params) {
+    code += `  ${p.name}: ${tsType(p.type)};\n`;
+  }
+  for (const p of optional) {
+    code += `  ${p.name}?: ${tsType(p.type)};\n`;
+  }
+  code += `}\n`;
+}
+
+function ifaceName(method) {
+  return method.split('.').map((part) => part[0].toUpperCase() + part.slice(1)).join('');
+}
+
+mkdirSync('packages/protocol/src', { recursive: true });
+writeFileSync('packages/protocol/src/generated.ts', code);
+
+// 方法 ↔ dispatch 实现对齐检查（契约测试数据）。
+const rustDispatch = readFileSync('crates/sixgates-core/src/dispatch.rs', 'utf8');
+const missing = contract.methods.filter((m) => !rustDispatch.includes(`"${m.name}"`));
+if (missing.length > 0) {
+  console.error('契约中声明但 Rust 未实现的方法：', missing.map((m) => m.name));
+  process.exit(1);
+}
+console.log(`生成 ${contract.methods.length} 个方法类型；Rust 实现对齐检查通过。`);
