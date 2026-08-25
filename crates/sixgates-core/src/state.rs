@@ -21,6 +21,10 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn version_str(&self) -> &str {
+        &self.core_version
+    }
+
     pub fn new(store: Store, core_version: &str) -> Self {
         // 适配器按环境装配：未配置时使用 fake 并在诊断中标记 not_ready。
         let (gitlab, gitlab_fake) = match (

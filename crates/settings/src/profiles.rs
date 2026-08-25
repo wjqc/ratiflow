@@ -1,6 +1,6 @@
 //! Profile 仓储：model/gitlab/ssh 的 CRUD（revision 乐观锁 + managed 只读 + 依赖检查）。
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{codes, credentials, store_err, SettingsError, SettingsResult};
 use sg_store::{ids, timefmt, Store};
@@ -698,4 +698,37 @@ pub fn gitlab_update_status(store: &Store, id: &str, status: &str) -> SettingsRe
         )?;
         Ok(())
     }).map_err(store_err)
+}
+
+/// SSH 目标绑定项目（S31）：project_id + 是否允许自动部署。
+pub fn ssh_bind_project(
+    store: &Store,
+    target_id: &str,
+    project_id: &str,
+    bind: bool,
+    allow_auto_deploy: bool,
+) -> SettingsResult<SshTarget> {
+    let current = ssh_get(store, target_id)?;
+    let new_project = if bind {
+        project_id.to_string()
+    } else {
+        String::new()
+    };
+    let commands = if allow_auto_deploy {
+        json!([
+            "docker compose up -d",
+            "docker compose down",
+            "docker compose ps"
+        ])
+    } else {
+        current.allowed_commands.clone()
+    };
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE ssh_targets SET project_id=?1, allowed_commands_json=?2, revision=revision+1, updated_at=?3 WHERE id=?4",
+            rusqlite::params![new_project, commands.to_string(), timefmt::now(), target_id],
+        )?;
+        Ok(())
+    }).map_err(store_err)?;
+    ssh_get(store, target_id)
 }

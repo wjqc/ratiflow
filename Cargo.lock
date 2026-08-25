@@ -796,6 +796,7 @@ dependencies = [
  "sg-workflow",
  "sg-workitem",
  "tokio",
+ "ureq",
 ]
 
 [[package]]

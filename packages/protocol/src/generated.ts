@@ -112,7 +112,23 @@ export type RpcMethodName =
   | 'knowledge.settings.get'
   | 'knowledge.settings.update'
   | 'knowledge.searchV2'
-  | 'project.inspectRoot';
+  | 'project.inspectRoot'
+  | 'update.check'
+  | 'update.status'
+  | 'executor.settings.get'
+  | 'executor.settings.update'
+  | 'executor.check'
+  | 'diagnostics.run'
+  | 'gitlabProfile.currentUser'
+  | 'gitlabProfile.checkProjectPermissions'
+  | 'sshTarget.bindProject'
+  | 'knowledge.projectSettings.get'
+  | 'knowledge.projectSettings.update'
+  | 'backup.revealInFolder'
+  | 'audit.settings.get'
+  | 'audit.settings.update'
+  | 'tool.list'
+  | 'tool.test';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -225,6 +241,22 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'knowledge.settings.update',
   'knowledge.searchV2',
   'project.inspectRoot',
+  'update.check',
+  'update.status',
+  'executor.settings.get',
+  'executor.settings.update',
+  'executor.check',
+  'diagnostics.run',
+  'gitlabProfile.currentUser',
+  'gitlabProfile.checkProjectPermissions',
+  'sshTarget.bindProject',
+  'knowledge.projectSettings.get',
+  'knowledge.projectSettings.update',
+  'backup.revealInFolder',
+  'audit.settings.get',
+  'audit.settings.update',
+  'tool.list',
+  'tool.test',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -846,4 +878,65 @@ export interface KnowledgeSearchV2Params {
 
 export interface ProjectInspectRootParams {
   path: string;
+}
+
+export type UpdateCheckParams = Record<string, never>;
+
+export type UpdateStatusParams = Record<string, never>;
+
+export type ExecutorSettingsGetParams = Record<string, never>;
+
+export interface ExecutorSettingsUpdateParams {
+  settings: unknown;
+  expectedRevision: number;
+}
+
+export type ExecutorCheckParams = Record<string, never>;
+
+export interface DiagnosticsRunParams {
+  checkId: string;
+}
+
+export interface GitlabProfileCurrentUserParams {
+  profileId: string;
+}
+
+export interface GitlabProfileCheckProjectPermissionsParams {
+  profileId: string;
+  namespace: string;
+  project: string;
+}
+
+export interface SshTargetBindProjectParams {
+  targetId: string;
+  projectId: string;
+  bind?: boolean;
+  allowAutoDeploy?: boolean;
+}
+
+export interface KnowledgeProjectSettingsGetParams {
+  projectId: string;
+}
+
+export interface KnowledgeProjectSettingsUpdateParams {
+  projectId: string;
+  settings: unknown;
+  expectedRevision: number;
+}
+
+export interface BackupRevealInFolderParams {
+  backupId: string;
+}
+
+export type AuditSettingsGetParams = Record<string, never>;
+
+export interface AuditSettingsUpdateParams {
+  settings: unknown;
+  expectedRevision: number;
+}
+
+export type ToolListParams = Record<string, never>;
+
+export interface ToolTestParams {
+  toolId: string;
 }

@@ -15,6 +15,7 @@ tokio = { workspace = true }
 sg-protocol = { workspace = true }
 sg-store = { workspace = true }
 sg-settings = { workspace = true }
+ureq = { workspace = true }
 sg-project = { workspace = true }
 sg-knowledge = { workspace = true }
 sg-workitem = { workspace = true }

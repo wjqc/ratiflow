@@ -7,6 +7,7 @@
 pub mod audit_ext;
 pub mod backup_ext;
 pub mod credentials;
+pub mod executor_ext;
 pub mod knowledge_defaults;
 pub mod operations;
 pub mod policy_ext;

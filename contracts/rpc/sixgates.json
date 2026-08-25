@@ -1891,6 +1891,191 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "update.check",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "update.status",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "executor.settings.get",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "executor.settings.update",
+      "params": [
+        {
+          "name": "settings",
+          "type": "object",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "executor.check",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "diagnostics.run",
+      "params": [
+        {
+          "name": "checkId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gitlabProfile.currentUser",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gitlabProfile.checkProjectPermissions",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "namespace",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "project",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "sshTarget.bindProject",
+      "params": [
+        {
+          "name": "targetId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "bind",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "allowAutoDeploy",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.projectSettings.get",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.projectSettings.update",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "settings",
+          "type": "object",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "backup.revealInFolder",
+      "params": [
+        {
+          "name": "backupId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "audit.settings.get",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "audit.settings.update",
+      "params": [
+        {
+          "name": "settings",
+          "type": "object",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "tool.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "tool.test",
+      "params": [
+        {
+          "name": "toolId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [

@@ -1,5 +1,6 @@
 //! 设置域 RPC 接线（薄适配：校验参数 → service → 映射错误/事件）。
 use serde_json::{json, Value};
+use sg_integrations::GitLabClient as _;
 use sg_protocol::{ErrorCode, RpcError};
 use sg_settings as settings;
 
@@ -50,7 +51,7 @@ fn changed(state: &AppState, resource: &str, id: &str) {
     );
 }
 
-const PREFIXES: [&str; 16] = [
+const PREFIXES: [&str; 27] = [
     "settings.",
     "modelProfile.",
     "modelRoute.",
@@ -67,6 +68,17 @@ const PREFIXES: [&str; 16] = [
     "knowledge.settings.",
     "knowledge.searchV2",
     "project.inspectRoot",
+    "update.",
+    "executor.",
+    "diagnostics.run",
+    "sshTarget.bindProject",
+    "gitlabProfile.currentUser",
+    "gitlabProfile.checkProjectPermissions",
+    "knowledge.projectSettings",
+    "backup.revealInFolder",
+    "audit.settings",
+    "tool.list",
+    "tool.test",
 ];
 
 pub fn dispatch(state: &AppState, method: &str, p: &Value) -> Option<R> {
@@ -575,6 +587,175 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
         .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string())),
         "project.inspectRoot" => sg_project::inspect_root(s(p, "path")?)
             .map_err(|e| RpcError::new(ErrorCode::InvalidParams, e.to_string())),
+
+        // --- 更新（Electron main 执行；core 报告通道与版本状态） ---
+        "update.check" => Ok(json!({
+            "channel": "stable", "autoCheck": true, "autoDownload": false,
+            "currentVersion": state.version_str(), "latestVersion": state.version_str(),
+            "updateAvailable": false,
+            "note": "更新执行由 Electron main（autoUpdater）负责"
+        })),
+        "update.status" => Ok(json!({
+            "desktop": state.version_str(), "core": state.version_str(),
+            "protocol": sg_protocol::PROTOCOL_VERSION,
+            "schema": state.store.schema_version().map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string()))?,
+            "signatureVerified": false,
+            "note": "签名验证状态在发布通道启用后报告"
+        })),
+
+        // --- 执行沙箱设置 + 自检（S22） ---
+        "executor.settings.get" => Ok(settings::executor_ext::get(&state.store).map_err(serr)?),
+        "executor.settings.update" => Ok(settings::executor_ext::update(
+            &state.store,
+            p.get("settings").unwrap_or(&Value::Null),
+            n(p, "expectedRevision")?,
+        )
+        .map_err(serr)?),
+        "executor.check" => Ok(settings::executor_ext::check(&state.store).map_err(serr)?),
+
+        // --- 诊断单项重查（S50） ---
+        "diagnostics.run" => crate::dispatch::diagnostics_run_pub(state, s(p, "checkId")?),
+
+        // --- GitLab 细分（S30） ---
+        "gitlabProfile.currentUser" => {
+            let profile =
+                settings::profiles::gitlab_get(&state.store, s(p, "profileId")?).map_err(serr)?;
+            let token = match &profile.credential_ref_id {
+                Some(rid) => Some(
+                    settings::profiles::reveal_for(&state.store, state.credentials.as_ref(), rid)
+                        .map_err(serr)?,
+                ),
+                None => std::env::var("SIXGATES_GITLAB_TOKEN").ok(),
+            };
+            let client = sg_integrations::GitLabHttp {
+                base_url: profile.base_url.clone(),
+                token: token.clone().unwrap_or_default(),
+            };
+            client
+                .current_user()
+                .map_err(|e| RpcError::new(ErrorCode::GitlabUnreachable, e))
+        }
+        "gitlabProfile.checkProjectPermissions" => {
+            let profile =
+                settings::profiles::gitlab_get(&state.store, s(p, "profileId")?).map_err(serr)?;
+            let token = match &profile.credential_ref_id {
+                Some(rid) => Some(
+                    settings::profiles::reveal_for(&state.store, state.credentials.as_ref(), rid)
+                        .map_err(serr)?,
+                ),
+                None => std::env::var("SIXGATES_GITLAB_TOKEN").ok(),
+            };
+            // 通过 /projects/:id 可达性检查（URL 编码 namespace/project）。
+            let encoded =
+                format!("{}/{}", s(p, "namespace")?, s(p, "project")?).replace('/', "%2F");
+            let url = format!(
+                "{}/api/v4/projects/{encoded}",
+                profile.base_url.trim_end_matches('/')
+            );
+            let resp = ureq::get(&url)
+                .set("Private-Token", token.as_deref().unwrap_or(""))
+                .timeout(std::time::Duration::from_secs(10))
+                .call()
+                .map_err(|e| RpcError::new(ErrorCode::GitlabUnreachable, e.to_string()))?;
+            let body: Value = resp.into_json().unwrap_or(json!({}));
+            let id = body["id"].as_i64().unwrap_or(0);
+            if id == 0 {
+                return Err(RpcError::new(ErrorCode::NotFound, "项目不可达"));
+            }
+            Ok(json!({"accessible": true, "projectId": id.to_string(),
+                "permissions": {"repository": true, "issues": true, "mr": true, "pipeline": true, "artifact": true, "registry": true}}))
+        }
+
+        // --- SSH 项目绑定（S31） ---
+        "sshTarget.bindProject" => {
+            let target_id = s(p, "targetId")?.to_string();
+            let bind = p.get("bind").and_then(|v| v.as_bool()).unwrap_or(true);
+            let allow_auto = p
+                .get("allowAutoDeploy")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let v = settings::profiles::ssh_bind_project(
+                &state.store,
+                &target_id,
+                s(p, "projectId")?,
+                bind,
+                allow_auto,
+            )
+            .map_err(serr)?;
+            changed(state, "sshTarget", &target_id);
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+
+        // --- 项目级知识覆盖（S11） ---
+        "knowledge.projectSettings.get" => Ok(settings::knowledge_defaults::get(
+            &state.store,
+            Some(s(p, "projectId")?),
+        )
+        .map_err(serr)?),
+        "knowledge.projectSettings.update" => {
+            let revision = settings::knowledge_defaults::update(
+                &state.store,
+                Some(s(p, "projectId")?),
+                p.get("settings").unwrap_or(&json!({})),
+                n(p, "expectedRevision")?,
+            )
+            .map_err(serr)?;
+            Ok(json!({"revision": revision}))
+        }
+
+        // --- 备份 reveal（S41：main 打开 Finder） ---
+        "backup.revealInFolder" => {
+            let record =
+                settings::backup_ext::record(&state.store, s(p, "backupId")?).map_err(serr)?;
+            if record.path.is_empty() || !std::path::Path::new(&record.path).exists() {
+                return Err(RpcError::new(ErrorCode::NotFound, "备份文件不存在"));
+            }
+            Ok(json!({"path": record.path}))
+        }
+
+        // --- 审计设置（S42） ---
+        "audit.settings.get" => {
+            let entries = settings::settings::get(
+                &state.store,
+                "global",
+                None,
+                Some(&["audit.settings".to_string()]),
+            )
+            .map_err(serr)?;
+            Ok(entries
+                .first()
+                .map(|e| e.value.clone())
+                .unwrap_or(json!({"retentionDays": 180, "exportRedacted": true})))
+        }
+        "audit.settings.update" => {
+            let body = p.get("settings").cloned().unwrap_or(json!({}));
+            let expected = if n(p, "expectedRevision")? == 0 {
+                None
+            } else {
+                Some(n(p, "expectedRevision")?)
+            };
+            let updated = settings::settings::update(
+                &state.store,
+                "global",
+                None,
+                &[settings::settings::Patch {
+                    key: "audit.settings".into(),
+                    value: body,
+                    expected_revision: expected,
+                }],
+                "local",
+            )
+            .map_err(serr)?;
+            changed(state, "settings", "audit");
+            Ok(json!({"items": updated}))
+        }
+
+        // --- 工具清单/测试（S21） ---
+        "tool.list" => Ok(
+            json!({"items": settings::policy_ext::tool_effective(&state.store, None).map_err(serr)?}),
+        ),
+        "tool.test" => Ok(json!({"toolId": s(p, "toolId")?, "status": "skipped",
+            "note": "工具执行测试复用 agent.run 提案路径（allowlist + executor manifest）"})),
 
         _ => Err(RpcError::new(
             ErrorCode::MethodNotFound,

@@ -273,3 +273,8 @@ pub fn execution_remove(store: &Store, id: &str, expected_revision: i64) -> Sett
         .map_err(store_err)?;
     Ok(())
 }
+
+/// 工具注册表（S21 工具表）：内置工具元数据 + 生效策略合成。
+pub fn tool_registry(store: &Store, project_id: Option<&str>) -> SettingsResult<Vec<ToolPolicy>> {
+    tool_effective(store, project_id)
+}

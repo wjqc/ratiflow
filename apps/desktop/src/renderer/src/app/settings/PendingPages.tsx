@@ -92,7 +92,7 @@ const DEFS: Record<string, PendingDef> = {
       '挂载策略与工作目录读写规则',
       '模式切换前的环境自检结果',
     ],
-    awaiting: ['executionProfile.get', 'executionProfile.update', 'executionProfile.check'],
+    awaiting: ['executionProfile.list', 'executionProfile.create', 'executionProfile.update', 'executor.settings.get', 'executor.settings.update', 'executor.check'],
     fallback: '当前模式由启动环境检测决定，实际状态见「运行与集成诊断」本地执行器项。',
   },
   gitlab: {
@@ -130,7 +130,7 @@ const DEFS: Record<string, PendingDef> = {
       '默认打开命令与命令模板',
       'SixGates 扩展状态',
     ],
-    awaiting: ['editor.detect', 'editor.settings.update（命名待 ZCode 确认）'],
+    awaiting: ['editor.detect（S32 可选，未进契约——非发布阻塞）'],
     fallback: '可在系统文件管理器中直接打开项目目录。',
   },
   credentials: {
@@ -143,7 +143,7 @@ const DEFS: Record<string, PendingDef> = {
       '测试有效性与轮换',
       '删除前列出被引用位置并阻止误删',
     ],
-    awaiting: ['credentialRef.list', 'credentialRef.create', 'credentialRef.test', 'credentialRef.rotate', 'credentialRef.delete'],
+    awaiting: ['credentialRef.list', 'credentialRef.create', 'credentialRef.verify', 'credentialRef.replace', 'credentialRef.remove'],
     fallback: '无替代路径：秘密不入库、不回显；当前集成凭据由启动环境变量注入。',
   },
 };

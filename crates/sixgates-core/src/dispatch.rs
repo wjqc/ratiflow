@@ -825,35 +825,169 @@ fn list_deployments_for(store: &Store, workitem_id: &str) -> Result<Vec<String>,
 }
 
 fn diagnostics(state: &AppState) -> RpcResult {
-    let store_ok = state.store.quick_check().is_ok();
-    let schema = state.store.schema_version().unwrap_or(0);
-    let gitlab_configured = std::env::var("SIXGATES_GITLAB_URL")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    let model_configured = std::env::var("SIXGATES_MODEL_API_KEY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    let ssh_configured = std::env::var("SIXGATES_SSH_HOST")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    let integrations = json!([
-        {"id": "gitlab", "label": "GitLab", "status": if gitlab_configured { "ready" } else { "needs_configuration" },
-         "detail": if gitlab_configured { "已配置" } else { "SIXGATES_GITLAB_URL / SIXGATES_GITLAB_TOKEN 未配置" }, "required": true},
-        {"id": "model", "label": "公有模型", "status": if model_configured { "ready" } else { "needs_configuration" },
-         "detail": if model_configured { "已配置" } else { "SIXGATES_MODEL_BASE_URL / SIXGATES_MODEL_API_KEY 未配置" }, "required": true},
-        {"id": "ssh", "label": "SSH 目标机", "status": if ssh_configured { "ready" } else { "needs_configuration" },
-         "detail": if ssh_configured { "已配置" } else { "SIXGATES_SSH_HOST / SIXGATES_SSH_USER 未配置" }, "required": true},
-    ]);
+    let checks = diagnostics_checks(state);
+    let ready = checks
+        .iter()
+        .all(|c| c["status"] != json!("error") && c["status"] != json!("needs_configuration"));
     Ok(json!({
         "generatedAt": sg_store::now(),
-        "ready": gitlab_configured && model_configured && ssh_configured,
-        "integrations": integrations,
-        "local": [
-            {"id": "core", "label": "Rust Core", "status": if store_ok { "ready" } else { "error" }, "detail": format!("schema v{schema}")},
-            {"id": "executor", "label": "执行模式", "status": "ready", "detail": format!("{:?}", state.executor_mode)},
-            {"id": "sqlite", "label": "SQLite WAL", "status": if store_ok { "ready" } else { "error" }, "detail": state.store.data_dir.display().to_string()},
-        ],
+        "ready": ready,
+        "checks": checks,
+        // 兼容字段（旧 UI 消费）：由 checks 派生。
+        "integrations": diagnostics_checks(state).iter().filter(|c| c["scope"] == json!("integration")).cloned().collect::<Vec<_>>(),
+        "local": diagnostics_checks(state).iter().filter(|c| c["scope"] == json!("local")).cloned().collect::<Vec<_>>(),
     }))
+}
+
+/// S50：每个检查项含 checkId/scope/severity/status/durationMs/fixTarget（一键跳转配置页）。
+fn diagnostics_checks(state: &AppState) -> Vec<Value> {
+    let start = std::time::Instant::now();
+    let store_ok = state.store.quick_check().is_ok();
+    let schema = state.store.schema_version().unwrap_or(0);
+    let dur = |s: std::time::Instant| s.elapsed().as_millis() as i64;
+
+    let gl_profiles: i64 = state
+        .store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row("SELECT COUNT(*) FROM gitlab_profiles", [], |r| r.get(0))
+                .unwrap_or(0))
+        })
+        .unwrap_or(0);
+    let gl_env = std::env::var("SIXGATES_GITLAB_URL")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let mp_profiles: i64 = state
+        .store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row("SELECT COUNT(*) FROM model_profiles", [], |r| r.get(0))
+                .unwrap_or(0))
+        })
+        .unwrap_or(0);
+    let mp_env = std::env::var("SIXGATES_MODEL_API_KEY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let ssh_targets: i64 = state
+        .store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row("SELECT COUNT(*) FROM ssh_targets", [], |r| r.get(0))
+                .unwrap_or(0))
+        })
+        .unwrap_or(0);
+
+    let mk = |check_id: &str,
+              label: &str,
+              scope: &str,
+              status: &str,
+              severity: &str,
+              detail: String,
+              fix: &str| {
+        json!({
+            "checkId": check_id, "label": label, "scope": scope, "status": status, "severity": severity,
+            "detail": detail, "durationMs": dur(start), "fixTarget": fix, "required": true,
+        })
+    };
+
+    vec![
+        mk(
+            "gitlab",
+            "GitLab",
+            "integration",
+            if gl_profiles > 0 || gl_env {
+                "ready"
+            } else {
+                "needs_configuration"
+            },
+            "blocking",
+            if gl_profiles > 0 {
+                format!("{gl_profiles} 个 Profile")
+            } else if gl_env {
+                "env 托管".into()
+            } else {
+                "未配置".into()
+            },
+            "/settings/gitlab",
+        ),
+        mk(
+            "model",
+            "公有模型",
+            "integration",
+            if mp_profiles > 0 || mp_env {
+                "ready"
+            } else {
+                "needs_configuration"
+            },
+            "blocking",
+            if mp_profiles > 0 {
+                format!("{mp_profiles} 个 Profile")
+            } else if mp_env {
+                "env 托管".into()
+            } else {
+                "未配置".into()
+            },
+            "/settings/models",
+        ),
+        mk(
+            "ssh",
+            "SSH 目标机",
+            "integration",
+            if ssh_targets > 0 {
+                "ready"
+            } else {
+                "needs_configuration"
+            },
+            "degraded",
+            if ssh_targets > 0 {
+                format!("{ssh_targets} 个目标")
+            } else {
+                "未配置".into()
+            },
+            "/settings/ssh",
+        ),
+        mk(
+            "core",
+            "Rust Core",
+            "local",
+            if store_ok { "ready" } else { "error" },
+            "blocking",
+            format!("schema v{schema}"),
+            "",
+        ),
+        mk(
+            "executor",
+            "执行模式",
+            "local",
+            "ready",
+            "info",
+            format!("{:?}", state.executor_mode),
+            "/settings/execution",
+        ),
+        mk(
+            "sqlite",
+            "SQLite WAL",
+            "local",
+            if store_ok { "ready" } else { "error" },
+            "blocking",
+            state.store.data_dir.display().to_string(),
+            "/settings/backup",
+        ),
+    ]
+}
+
+pub fn diagnostics_run_pub(state: &AppState, check_id: &str) -> RpcResult {
+    diagnostics_run(state, check_id)
+}
+
+/// diagnostics.run(checkId)：单项重查（S50）。
+fn diagnostics_run(state: &AppState, check_id: &str) -> RpcResult {
+    let checks = diagnostics_checks(state);
+    let found = checks
+        .into_iter()
+        .find(|c| c["checkId"] == json!(check_id))
+        .ok_or_else(|| err(ErrorCode::InvalidParams, format!("未知检查项 {check_id}")))?;
+    Ok(found)
 }
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
