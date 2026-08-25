@@ -17,6 +17,15 @@ import { DiagnosticsPage } from './DiagnosticsPage';
 import { UpdatesPage } from './UpdatesPage';
 import { LogsPage } from './LogsPage';
 import { PendingSettingsPage } from './PendingPages';
+import { GeneralPage } from './pages/GeneralPage';
+import { AppearancePage } from './pages/AppearancePage';
+import { KnowledgeDefaultsPage } from './pages/KnowledgeDefaultsPage';
+import { ModelsPage } from './pages/ModelsPage';
+import { ToolsPage } from './pages/ToolsPage';
+import { ExecutionPage } from './pages/ExecutionPage';
+import { GitlabPage } from './pages/GitlabPage';
+import { SshPage } from './pages/SshPage';
+import { CredentialsPage } from './pages/CredentialsPage';
 
 type DotTone = 'error' | 'warn';
 
@@ -62,6 +71,24 @@ export default function SettingsShell({ section }: { section?: string }) {
         return <UpdatesPage />;
       case 'logs':
         return <LogsPage />;
+      case 'app-general':
+        return <GeneralPage />;
+      case 'appearance':
+        return <AppearancePage />;
+      case 'knowledge-defaults':
+        return <KnowledgeDefaultsPage />;
+      case 'models':
+        return <ModelsPage />;
+      case 'tools':
+        return <ToolsPage />;
+      case 'execution':
+        return <ExecutionPage />;
+      case 'gitlab':
+        return <GitlabPage />;
+      case 'ssh':
+        return <SshPage />;
+      case 'credentials':
+        return <CredentialsPage />;
       default:
         return <PendingSettingsPage id={route} />;
     }
