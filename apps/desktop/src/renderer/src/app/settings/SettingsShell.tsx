@@ -102,7 +102,6 @@ export default function SettingsShell({ section }: { section?: string }) {
     <>
       <div className="sg-page-head">
         <span className="sg-page-head-title">设置与诊断 / {meta.name}</span>
-        <span className="sg-page-head-badge">{meta.code}</span>
       </div>
       <div className="sg-settings">
         <nav className="sg-settings-nav" aria-label="设置导航">

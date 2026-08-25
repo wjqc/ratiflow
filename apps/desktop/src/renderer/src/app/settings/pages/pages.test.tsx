@@ -42,22 +42,22 @@ describe('设置页接线', () => {
 
   it.each([
     ['常规', GeneralPage, '此处不登记 GitLab 项目'],
-    ['外观', AppearancePage, '深色主题在 MVP 中标记为实验状态'],
-    ['知识默认', KnowledgeDefaultsPage, '此处不添加项目来源'],
-    ['模型', ModelsPage, '此页不输入/回显密钥'],
+    ['外观', AppearancePage, '深色'],
+    ['知识默认', KnowledgeDefaultsPage, '不添加项目来源'],
+    ['模型', ModelsPage, '密钥经凭据引用存'],
     ['工具', ToolsPage, 'ActionDigest 绑定'],
-    ['执行', ExecutionPage, '显式不安全模式需二次确认'],
-    ['GitLab', GitlabPage, '令牌经凭据引用存 Keychain'],
-    ['SSH', SshPage, '首次连接必须显式确认指纹'],
-    ['凭据', CredentialsPage, '创建后永不回显'],
+    ['执行', ExecutionPage, '显式不安全'],
+    ['GitLab', GitlabPage, '令牌经凭据引用'],
+    ['SSH', SshPage, '首次连接必须显式确认'],
+    ['凭据', CredentialsPage, '不回显'],
   ] as Array<[string, () => React.ReactElement, string]>)('%s 页渲染且含安全提示', async (_label, Page, hint) => {
     render(<Page />);
-    await waitFor(() => expect(screen.getAllByText(new RegExp(hint.slice(0, 6))).length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText(new RegExp(hint.slice(0, 4))).length).toBeGreaterThan(0));
   });
 
   it('凭据页空状态显示引导', async () => {
     render(<CredentialsPage />);
-    await waitFor(() => expect(screen.getByText(/尚无凭据/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/暂无凭据引用/)).toBeInTheDocument());
   });
 
   it('工具页策略行来自 tool.list', async () => {

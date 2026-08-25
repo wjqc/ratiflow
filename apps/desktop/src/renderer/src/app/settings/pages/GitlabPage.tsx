@@ -1,151 +1,175 @@
-// S30 GitLab：实例 Profile CRUD + 分步测试 + currentUser。
-import { useCallback, useEffect, useState } from 'react';
+// GitLab：实例列表（sg-table）+ 新增/删除 + 分步测试 + currentUser。
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
-import { useConnectionTest } from '../hooks/useSettingsForm';
-import { rpc, rpcErrorMessage } from '../../../rpc/client';
+import { IconPlus, IconRefresh, IconUser, IconZap } from '../../../components/Icons';
 
 interface GitlabProfile {
   id: string; revision: number; name: string; base_url: string;
   credential_ref_id?: string | null; managed_source?: string | null;
   status: string; last_tested_at?: string | null;
 }
+interface TestStep { name: string; status: string; error_code: string | null }
+
+const EMPTY = { name: '', baseUrl: '', credentialRefId: '' };
 
 export function GitlabPage() {
-  const [profiles, setProfiles] = useState<GitlabProfile[]>([]);
-  const [selected, setSelected] = useState('');
+  const [items, setItems] = useState<GitlabProfile[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ name: '', baseUrl: '', credentialRefId: '' });
-  const test = useConnectionTest();
-  const [user, setUser] = useState<string>('');
+  const [form, setForm] = useState(EMPTY);
+  const [testing, setTesting] = useState('');
+  const [testResult, setTestResult] = useState<{ status: string; steps: TestStep[] } | null>(null);
+  const [currentUser, setCurrentUser] = useState('');
 
   const load = useCallback(async () => {
-    setLoading(true); setError('');
+    setLoading(true); setError(null);
     try {
-      const result = await rpc<{ items: GitlabProfile[] }>('gitlabProfile.list', {});
-      setProfiles(result.items);
-      if (!selected && result.items[0]) setSelected(result.items[0].id);
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
+      const res = await rpc<{ items: GitlabProfile[] }>('gitlabProfile.list', {});
+      setItems(res.items ?? []);
+    } catch (e) { setError(e instanceof Error ? e.message : '实例列表加载失败'); }
     finally { setLoading(false); }
-  }, [selected]);
+  }, []);
   useEffect(() => { void load(); }, [load]);
 
-  const current = profiles.find((p) => p.id === selected) ?? null;
-  const readOnly = current?.managed_source != null;
-
-  const create = async () => {
-    setError('');
+  const create = async (e: FormEvent) => {
+    e.preventDefault(); setError(null); setNotice(null);
     try {
       await rpc('gitlabProfile.create', {
-        name: form.name || 'GitLab', baseUrl: form.baseUrl,
-        credentialRefId: form.credentialRefId || undefined,
+        name: form.name.trim(), base_url: form.baseUrl.trim(),
+        credential_ref_id: form.credentialRefId.trim() || undefined,
       });
-      setCreating(false); setForm({ name: '', baseUrl: '', credentialRefId: '' });
+      setNotice(`实例「${form.name.trim()}」已创建`);
+      setForm(EMPTY); setCreating(false);
       await load();
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
+    } catch (err) { setError(err instanceof Error ? err.message : '创建失败'); }
   };
 
-  const update = async (patch: Record<string, unknown>) => {
-    if (!current) return;
-    setError('');
+  const remove = async (p: GitlabProfile) => {
+    if (!window.confirm(`删除实例「${p.name}」？不可撤销。`)) return;
+    setError(null);
     try {
-      await rpc('gitlabProfile.update', { profileId: current.id, expectedRevision: current.revision, ...patch });
+      await rpc('gitlabProfile.remove', { profile_id: p.id, expected_revision: p.revision });
       await load();
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
+    } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
   };
 
-  const remove = async () => {
-    if (!current || !window.confirm(`删除「${current.name}」？`)) return;
-    try {
-      await rpc('gitlabProfile.remove', { profileId: current.id, expectedRevision: current.revision });
-      setSelected(''); await load();
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
+  const test = async (p: GitlabProfile) => {
+    setTesting(p.id); setTestResult(null); setError(null);
+    try { setTestResult(await rpc<{ status: string; steps: TestStep[] }>('gitlabProfile.test', { profile_id: p.id })); }
+    catch (e) { setError(e instanceof Error ? e.message : '测试失败'); }
+    finally { setTesting(''); }
   };
 
-  const fetchUser = async () => {
-    if (!current) return;
-    setUser('');
-    setError('');
+  const fetchUser = async (p: GitlabProfile) => {
+    setCurrentUser(''); setError(null);
     try {
-      const u = await rpc<{ username?: string }>('gitlabProfile.currentUser', { profileId: current.id });
-      setUser(u.username ?? '未知用户');
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
+      const u = await rpc<{ username?: string }>('gitlabProfile.currentUser', { profile_id: p.id });
+      setCurrentUser(u.username ?? '未知用户');
+      setNotice(`当前用户：${u.username ?? '未知'}`);
+    } catch (e) { setError(e instanceof Error ? e.message : '读取用户失败'); }
   };
 
   return (
     <div className="sg-set-page">
       <SettingsPageHeader
-        title="GitLab" scope="全局"
-        status={profiles.length === 0 ? <StatusPill kind="pending" label="未配置" /> : <StatusPill kind="ready" />}
+        title="GitLab"
+        scope="全局"
+        status={loading ? <StatusPill kind="checking" /> : items.length === 0 ? <StatusPill kind="pending" label="未配置" /> : <StatusPill kind="ready" />}
         description="GitLab 实例与凭据绑定。令牌经凭据引用存 Keychain，此页不显示。"
-        actions={!creating ? <button className="sg-btn sg-btn--primary" onClick={() => setCreating(true)}>新增实例</button> : null}
+        actions={<button className="sg-btn" onClick={() => void load()} disabled={loading}><IconRefresh size={14} />刷新</button>}
       />
-      {error ? <div className="sg-banner sg-banner--error" role="alert">{error}</div> : null}
+
+      {error ? <div className="sg-banner sg-banner--error" role="alert">操作失败：{error}</div> : null}
       {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
 
-      {creating ? (
-        <SettingsSection title="新增实例" description="凭据先在「凭据引用」页创建 GitLab Token 引用">
-          <div className="sg-set-grid">
-            <label className="sg-set-field"><span className="sg-set-label">名称 *</span>
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
-            <label className="sg-set-field"><span className="sg-set-label">Base URL *</span>
-              <input value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://gitlab.com" /></label>
-            <label className="sg-set-field"><span className="sg-set-label">凭据引用 ID</span>
-              <input value={form.credentialRefId} onChange={(e) => setForm({ ...form, credentialRefId: e.target.value })} placeholder="cr_…" /></label>
-          </div>
-          <div className="sg-set-row">
-            <button className="sg-btn sg-btn--primary" onClick={() => void create()}>创建</button>
-            <button className="sg-btn" onClick={() => setCreating(false)}>取消</button>
-          </div>
-        </SettingsSection>
-      ) : null}
-
-      {profiles.length > 0 && current ? (
-        <div className="sg-set-cols">
-          <div className="sg-set-list" role="list">
-            {profiles.map((p) => (
-              <button key={p.id} role="listitem"
-                className={`sg-set-item2 ${p.id === selected ? 'sg-set-item2--active' : ''}`}
-                onClick={() => setSelected(p.id)}>
-                <span>{p.name}</span>
-                <StatusPill kind={p.managed_source ? 'readonly' : p.status === 'ready' ? 'ready' : 'pending'} label={p.managed_source ? `托管(${p.managed_source})` : undefined} />
-              </button>
-            ))}
-          </div>
-          <SettingsSection title={current.name} description={`revision ${current.revision}${readOnly ? ' · 环境托管只读' : ''}`}>
-            {readOnly ? <p className="sg-hint">此实例由环境变量导入，只读。</p> : null}
-            <div className="sg-set-grid">
-              <label className="sg-set-field"><span className="sg-set-label">Base URL</span>
-                <input defaultValue={current.base_url} disabled={readOnly} onBlur={(e) => { if (e.target.value !== current.base_url) void update({ baseUrl: e.target.value }); }} /></label>
-              <label className="sg-set-field"><span className="sg-set-label">凭据引用 ID</span>
-                <input defaultValue={current.credential_ref_id ?? ''} disabled={readOnly} placeholder="未绑定" onBlur={(e) => { if (e.target.value !== (current.credential_ref_id ?? '')) void update({ credentialRefId: e.target.value }); }} /></label>
+      {!creating ? (
+        <SettingsSection title="实例列表" actions={
+          <button className="sg-btn" onClick={() => setCreating(true)}><IconPlus size={14} />新增实例</button>
+        }>
+          {loading ? (
+            <div className="sg-skeleton-rows" aria-busy="true"><div className="sg-skeleton-row" /></div>
+          ) : items.length === 0 ? (
+            <div className="sg-empty">
+              <span>暂无 GitLab 实例</span>
+              <span className="sg-hint">Issue 导入、MR 创建依赖 GitLab 配置。</span>
             </div>
-            <div className="sg-set-row" aria-live="polite">
-              <button className="sg-btn" disabled={test.testing} onClick={() => void test.run('gitlabProfile.test', { profileId: current.id })}>
-                {test.testing ? '测试中…' : '测试连接'}
-              </button>
-              <button className="sg-btn" onClick={() => void fetchUser()}>读取当前用户</button>
-              {!readOnly ? <button className="sg-btn sg-btn--danger" onClick={() => void remove()}>删除</button> : null}
-              {user ? <code>{user}</code> : null}
-              {test.overall !== 'idle' ? <StatusPill kind={test.overall === 'ready' ? 'ready' : 'error'} label={test.overall} /> : null}
-            </div>
-            {test.steps.length > 0 ? (
-              <ul className="sg-set-steps">
-                {test.steps.map((s) => (
-                  <li key={s.name}>
-                    <span aria-hidden>{s.status === 'passed' ? '✓' : '✕'}</span>
-                    {s.name}{s.errorCode ? <code>{s.errorCode}</code> : null}
-                  </li>
+          ) : (
+            <table className="sg-table" aria-label="GitLab 实例列表">
+              <thead><tr><th>名称</th><th>端点</th><th>状态</th><th style={{ width: 260 }}>操作</th></tr></thead>
+              <tbody>
+                {items.map((p) => (
+                  <tr key={p.id}>
+                    <td><div style={{ fontWeight: 500 }}>{p.name}</div>
+                      <div className="sg-hint">{p.credential_ref_id ? `凭据 ${p.credential_ref_id.slice(0, 10)}…` : '未绑定凭据'}</div>
+                    </td>
+                    <td><span className="sg-code">{p.base_url}</span></td>
+                    <td><StatusPill kind={p.managed_source ? 'readonly' : p.status === 'ready' ? 'ready' : 'pending'}
+                      label={p.managed_source ? `托管(${p.managed_source})` : undefined} /></td>
+                    <td>
+                      <div className="sg-row" style={{ gap: 6 }}>
+                        <button className="sg-btn sg-btn--sm" disabled={testing === p.id} onClick={() => void test(p)}>
+                          <IconZap size={12} />{testing === p.id ? '测试中…' : '测试'}
+                        </button>
+                        <button className="sg-btn sg-btn--sm" onClick={() => void fetchUser(p)}>
+                          <IconUser size={12} />用户
+                        </button>
+                        {!p.managed_source ? (
+                          <button className="sg-btn sg-btn--sm sg-btn--danger" onClick={() => void remove(p)}>删除</button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
                 ))}
-              </ul>
-            ) : null}
-          </SettingsSection>
-        </div>
-      ) : null}
+              </tbody>
+            </table>
+          )}
+          {currentUser ? <p className="sg-hint">当前用户：<code className="sg-code">{currentUser}</code></p> : null}
+          {testResult ? (
+            <table className="sg-table" style={{ marginTop: 10 }} aria-label="测试步骤" aria-live="polite">
+              <thead><tr><th>步骤</th><th>状态</th><th>错误码</th></tr></thead>
+              <tbody>
+                {testResult.steps.map((s) => (
+                  <tr key={s.name}>
+                    <td>{s.name}</td>
+                    <td><StatusPill kind={s.status === 'passed' ? 'ready' : 'error'} label={s.status} /></td>
+                    <td className="sg-muted">{s.error_code ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : null}
+        </SettingsSection>
+      ) : (
+        <SettingsSection title="新增实例" description="凭据先在「凭据引用」页创建 GitLab Token 引用">
+          <form className="sg-card sg-set-form" onSubmit={create}>
+            <div className="sg-form-grid--2">
+              <div className="sg-field">
+                <label htmlFor="gl-name">名称 *</label>
+                <input id="gl-name" className="sg-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              </div>
+              <div className="sg-field">
+                <label htmlFor="gl-url">Base URL *</label>
+                <input id="gl-url" className="sg-input" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://gitlab.com" />
+              </div>
+              <div className="sg-field">
+                <label htmlFor="gl-cred">凭据引用 ID</label>
+                <input id="gl-cred" className="sg-input" value={form.credentialRefId} onChange={(e) => setForm({ ...form, credentialRefId: e.target.value })} placeholder="cr_…" />
+              </div>
+            </div>
+            <div className="sg-row">
+              <button type="submit" className="sg-btn sg-btn--primary" disabled={!form.name.trim() || !form.baseUrl.trim()}>
+                <IconPlus size={14} />创建
+              </button>
+              <button type="button" className="sg-btn" onClick={() => setCreating(false)}>取消</button>
+            </div>
+          </form>
+        </SettingsSection>
+      )}
     </div>
   );
 }

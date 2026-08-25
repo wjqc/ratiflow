@@ -1,155 +1,176 @@
-// S20 模型与路由：Provider 列表 + 详情编辑 + 分步测试 + 路由规则。
-import { useCallback, useEffect, useState } from 'react';
+// 模型与路由：Provider 列表（sg-table 与项目页一致）+ 编辑 + 分步测试。
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
-import { useConnectionTest } from '../hooks/useSettingsForm';
-import { rpc, rpcErrorMessage } from '../../../rpc/client';
+import { IconPlus, IconRefresh, IconZap } from '../../../components/Icons';
 
 interface ModelProfile {
-  id: string; revision: number; name: string; providerKind: string; baseUrl: string;
-  credentialRefId?: string | null; defaultModel: string;
-  capabilities?: Record<string, boolean>; limits?: Record<string, number>;
-  managedSource?: string | null; status: string; lastTestedAt?: string | null;
+  id: string; revision: number; name: string; provider_kind: string; base_url: string;
+  credential_ref_id?: string | null; default_model: string;
+  managed_source?: string | null; status: string; last_tested_at?: string | null;
 }
+interface TestStep { name: string; status: string; error_code: string | null }
+
+const EMPTY = { name: '', baseUrl: '', credentialRefId: '', defaultModel: '' };
 
 export function ModelsPage() {
-  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
-  const [selected, setSelected] = useState<string>('');
+  const [items, setItems] = useState<ModelProfile[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ name: '', baseUrl: '', credentialRefId: '', defaultModel: '' });
-  const test = useConnectionTest();
+  const [form, setForm] = useState(EMPTY);
+  const [testing, setTesting] = useState('');
+  const [testResult, setTestResult] = useState<{ status: string; steps: TestStep[] } | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true); setError('');
+    setLoading(true); setError(null);
     try {
-      const result = await rpc<{ items: ModelProfile[] }>('modelProfile.list', {});
-      setProfiles(result.items);
-      if (!selected && result.items[0]) setSelected(result.items[0].id);
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
-    finally { setLoading(false); }
-  }, [selected]);
-
+      const res = await rpc<{ items: ModelProfile[] }>('modelProfile.list', {});
+      setItems(res.items ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '模型列表加载失败');
+    } finally { setLoading(false); }
+  }, []);
   useEffect(() => { void load(); }, [load]);
 
-  const current = profiles.find((p) => p.id === selected) ?? null;
-  const readOnly = current?.managedSource != null;
-
-  const create = async () => {
-    setNotice(''); setError('');
+  const create = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null); setNotice(null);
     try {
       await rpc('modelProfile.create', {
-        name: form.name || '新 Provider', providerKind: 'openai_compatible',
-        baseUrl: form.baseUrl, credentialRefId: form.credentialRefId || undefined,
-        defaultModel: form.defaultModel,
+        name: form.name.trim(), provider_kind: 'openai_compatible',
+        base_url: form.baseUrl.trim(), credential_ref_id: form.credentialRefId.trim() || undefined,
+        default_model: form.defaultModel.trim(),
       });
-      setCreating(false); setForm({ name: '', baseUrl: '', credentialRefId: '', defaultModel: '' });
+      setNotice(`Provider「${form.name.trim()}」已创建`);
+      setForm(EMPTY); setCreating(false);
       await load();
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
+    } catch (err) { setError(err instanceof Error ? err.message : '创建失败'); }
   };
 
-  const update = async (patch: Record<string, unknown>) => {
-    if (!current) return;
-    setNotice(''); setError('');
+  const remove = async (p: ModelProfile) => {
+    if (!window.confirm(`删除 Provider「${p.name}」？不可撤销。`)) return;
+    setError(null);
     try {
-      await rpc('modelProfile.update', { profileId: current.id, expectedRevision: current.revision, ...patch });
+      await rpc('modelProfile.remove', { profile_id: p.id, expected_revision: p.revision });
       await load();
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
+    } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
   };
 
-  const remove = async () => {
-    if (!current) return;
-    if (!window.confirm(`删除 Provider「${current.name}」？此操作不可撤销。`)) return;
+  const test = async (p: ModelProfile) => {
+    setTesting(p.id); setTestResult(null); setError(null);
     try {
-      await rpc('modelProfile.remove', { profileId: current.id, expectedRevision: current.revision });
-      setSelected(''); await load();
-    } catch (reason) { setError(rpcErrorMessage(reason)); }
+      setTestResult(await rpc<{ status: string; steps: TestStep[] }>('modelProfile.test', { profile_id: p.id }));
+    } catch (e) { setError(e instanceof Error ? e.message : '测试失败'); }
+    finally { setTesting(''); }
   };
 
   return (
     <div className="sg-set-page">
       <SettingsPageHeader
-        title="模型与路由" scope="全局"
-        status={profiles.length === 0 ? <StatusPill kind="pending" label="未配置" /> : <StatusPill kind="ready" />}
-        description="公有模型 Provider 与任务路由。密钥经凭据引用绑定，此页不输入/回显密钥。"
-        actions={!creating ? <button className="sg-btn sg-btn--primary" onClick={() => setCreating(true)}>新增 Provider</button> : null}
+        title="模型与路由"
+        scope="全局"
+        status={loading ? <StatusPill kind="checking" /> : items.length === 0 ? <StatusPill kind="pending" label="未配置" /> : <StatusPill kind="ready" />}
+        description="公有模型 Provider。密钥经凭据引用存 Keychain，此页不输入也不回显。"
+        actions={
+          <button className="sg-btn" onClick={() => void load()} disabled={loading}><IconRefresh size={14} />刷新</button>
+        }
       />
-      {error ? <div className="sg-banner sg-banner--error" role="alert">{error}</div> : null}
+
+      {error ? <div className="sg-banner sg-banner--error" role="alert">操作失败：{error}</div> : null}
       {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
 
-      {profiles.length === 0 && !creating && !loading ? (
-        <SettingsSection title="尚无 Provider">
-          <p className="sg-hint">未配置模型时 Agent Run 被阻塞。新增 Provider 后即可在应用内测试与路由。</p>
-        </SettingsSection>
-      ) : null}
-
-      {creating ? (
-        <SettingsSection title="新增 Provider" description="OpenAI 兼容端点；凭据先在「凭据引用」页创建">
-          <div className="sg-set-grid">
-            <label className="sg-set-field"><span className="sg-set-label">名称 *</span>
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="主力模型" /></label>
-            <label className="sg-set-field"><span className="sg-set-label">Base URL</span>
-              <input value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://api.example.com/v1" /></label>
-            <label className="sg-set-field"><span className="sg-set-label">凭据引用 ID</span>
-              <input value={form.credentialRefId} onChange={(e) => setForm({ ...form, credentialRefId: e.target.value })} placeholder="cr_…" /></label>
-            <label className="sg-set-field"><span className="sg-set-label">默认模型</span>
-              <input value={form.defaultModel} onChange={(e) => setForm({ ...form, defaultModel: e.target.value })} /></label>
-          </div>
-          <div className="sg-set-row">
-            <button className="sg-btn sg-btn--primary" onClick={() => void create()}>创建</button>
-            <button className="sg-btn" onClick={() => setCreating(false)}>取消</button>
-          </div>
-        </SettingsSection>
-      ) : null}
-
-      {profiles.length > 0 ? (
-        <div className="sg-set-cols">
-          <div className="sg-set-list" role="list" aria-label="Provider 列表">
-            {profiles.map((p) => (
-              <button key={p.id} role="listitem"
-                className={`sg-set-item2 ${p.id === selected ? 'sg-set-item2--active' : ''}`}
-                onClick={() => setSelected(p.id)}>
-                <span>{p.name}</span>
-                <StatusPill kind={p.managedSource ? 'readonly' : p.status === 'ready' ? 'ready' : 'pending'} label={p.managedSource ? `托管(${p.managedSource})` : undefined} />
-              </button>
-            ))}
-          </div>
-          {current ? (
-            <SettingsSection title={current.name} description={`revision ${current.revision} · ${current.providerKind}${readOnly ? ' · 环境托管只读；替代路径：创建新 Provider' : ''}`}>
-              {readOnly ? <p className="sg-hint">此 Profile 由环境变量导入，只读。要修改：创建新 Provider 并更新路由。</p> : null}
-              <div className="sg-set-grid">
-                <label className="sg-set-field"><span className="sg-set-label">Base URL</span>
-                  <input defaultValue={current.baseUrl} disabled={readOnly} onBlur={(e) => { if (e.target.value !== current.baseUrl) void update({ baseUrl: e.target.value }); }} /></label>
-                <label className="sg-set-field"><span className="sg-set-label">默认模型</span>
-                  <input defaultValue={current.defaultModel} disabled={readOnly} onBlur={(e) => { if (e.target.value !== current.defaultModel) void update({ defaultModel: e.target.value }); }} /></label>
-                <label className="sg-set-field"><span className="sg-set-label">凭据引用 ID</span>
-                  <input defaultValue={current.credentialRefId ?? ''} disabled={readOnly} placeholder="未绑定" onBlur={(e) => { if (e.target.value !== (current.credentialRefId ?? '')) void update({ credentialRefId: e.target.value }); }} /></label>
-              </div>
-              <div className="sg-set-row" aria-live="polite">
-                <button className="sg-btn" disabled={test.testing} onClick={() => void test.run('modelProfile.test', { profileId: current.id })}>
-                  {test.testing ? '测试中…' : '测试连接'}
-                </button>
-                {!readOnly ? <button className="sg-btn sg-btn--danger" onClick={() => void remove()}>删除</button> : null}
-                {test.overall !== 'idle' ? <StatusPill kind={test.overall === 'ready' ? 'ready' : test.overall === 'degraded' ? 'partial' : test.overall === 'action_required' ? 'pending' : 'error'} label={test.overall} /> : null}
-              </div>
-              {test.steps.length > 0 ? (
-                <ul className="sg-set-steps">
-                  {test.steps.map((s) => (
-                    <li key={s.name}>
-                      <span aria-hidden>{s.status === 'passed' ? '✓' : s.status === 'skipped' ? '—' : '✕'}</span>
-                      {s.name}
-                      {s.errorCode && s.status !== 'skipped' ? <code>{s.errorCode}</code> : null}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </SettingsSection>
+      {!creating ? (
+        <SettingsSection title="Provider 列表" actions={
+          <button className="sg-btn" onClick={() => setCreating(true)}><IconPlus size={14} />新增</button>
+        }>
+          {loading ? (
+            <div className="sg-skeleton-rows" aria-busy="true"><div className="sg-skeleton-row" /></div>
+          ) : items.length === 0 ? (
+            <div className="sg-empty">
+              <span>暂无模型 Provider</span>
+              <span className="sg-hint">未配置模型时 Agent Run 被阻塞（概览有对应提示）。</span>
+            </div>
+          ) : (
+            <table className="sg-table" aria-label="Provider 列表">
+              <thead><tr><th>名称</th><th>端点</th><th>状态</th><th style={{ width: 220 }}>操作</th></tr></thead>
+              <tbody>
+                {items.map((p) => (
+                  <tr key={p.id}>
+                    <td>
+                      <div style={{ fontWeight: 500 }}>{p.name}</div>
+                      <div className="sg-path">{p.default_model || '未设默认模型'}</div>
+                    </td>
+                    <td><span className="sg-code">{p.base_url || '—'}</span>
+                      <div className="sg-hint">{p.credential_ref_id ? `凭据 ${p.credential_ref_id.slice(0, 10)}…` : '未绑定凭据'}</div>
+                    </td>
+                    <td>
+                      <StatusPill kind={p.managed_source ? 'readonly' : p.status === 'ready' ? 'ready' : 'pending'}
+                        label={p.managed_source ? `托管(${p.managed_source})` : undefined} />
+                    </td>
+                    <td>
+                      <div className="sg-row" style={{ gap: 6 }}>
+                        <button className="sg-btn sg-btn--sm" disabled={testing === p.id} onClick={() => void test(p)}>
+                          <IconZap size={12} />{testing === p.id ? '测试中…' : '测试'}
+                        </button>
+                        {!p.managed_source ? (
+                          <button className="sg-btn sg-btn--sm sg-btn--danger" onClick={() => void remove(p)}>删除</button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {testResult ? (
+            <table className="sg-table" style={{ marginTop: 10 }} aria-label="测试步骤" aria-live="polite">
+              <thead><tr><th>步骤</th><th>状态</th><th>错误码</th></tr></thead>
+              <tbody>
+                {testResult.steps.map((s) => (
+                  <tr key={s.name}>
+                    <td>{s.name}</td>
+                    <td><StatusPill kind={s.status === 'passed' ? 'ready' : s.status === 'skipped' ? 'readonly' : 'error'} label={s.status} /></td>
+                    <td className="sg-muted">{s.error_code ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           ) : null}
-        </div>
-      ) : null}
+        </SettingsSection>
+      ) : (
+        <SettingsSection title="新增 Provider" description="凭据先在「凭据引用」页创建">
+          <form className="sg-card sg-set-form" onSubmit={create}>
+            <div className="sg-form-grid--2">
+              <div className="sg-field">
+                <label htmlFor="mp-name">名称 *</label>
+                <input id="mp-name" className="sg-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="主力模型" />
+              </div>
+              <div className="sg-field">
+                <label htmlFor="mp-url">Base URL</label>
+                <input id="mp-url" className="sg-input" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://api.example.com/v1" />
+              </div>
+              <div className="sg-field">
+                <label htmlFor="mp-cred">凭据引用 ID</label>
+                <input id="mp-cred" className="sg-input" value={form.credentialRefId} onChange={(e) => setForm({ ...form, credentialRefId: e.target.value })} placeholder="cr_…" />
+              </div>
+              <div className="sg-field">
+                <label htmlFor="mp-model">默认模型</label>
+                <input id="mp-model" className="sg-input" value={form.defaultModel} onChange={(e) => setForm({ ...form, defaultModel: e.target.value })} />
+              </div>
+            </div>
+            <div className="sg-row">
+              <button type="submit" className="sg-btn sg-btn--primary" disabled={!form.name.trim()}>
+                <IconPlus size={14} />创建
+              </button>
+              <button type="button" className="sg-btn" onClick={() => setCreating(false)}>取消</button>
+            </div>
+          </form>
+        </SettingsSection>
+      )}
     </div>
   );
 }
