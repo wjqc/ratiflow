@@ -158,7 +158,11 @@ pub fn check(store: &Store) -> SettingsResult<Value> {
                     "受限模式探测失败".into()
                 },
             ));
-            if ok { "ready" } else { "error" }
+            if ok {
+                "ready"
+            } else {
+                "error"
+            }
         }
     };
     Ok(

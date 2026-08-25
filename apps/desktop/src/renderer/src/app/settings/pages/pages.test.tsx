@@ -2,6 +2,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
+import type React from 'react';
 import { GeneralPage } from './GeneralPage';
 import { AppearancePage } from './AppearancePage';
 import { KnowledgeDefaultsPage } from './KnowledgeDefaultsPage';
@@ -49,7 +50,7 @@ describe('设置页接线', () => {
     ['GitLab', GitlabPage, '令牌经凭据引用存 Keychain'],
     ['SSH', SshPage, '首次连接必须显式确认指纹'],
     ['凭据', CredentialsPage, '创建后永不回显'],
-  ] as Array<[string, () => JSX.Element, string]>)('%s 页渲染且含安全提示', async (_label, Page, hint) => {
+  ] as Array<[string, () => React.ReactElement, string]>)('%s 页渲染且含安全提示', async (_label, Page, hint) => {
     render(<Page />);
     await waitFor(() => expect(screen.getAllByText(new RegExp(hint.slice(0, 6))).length).toBeGreaterThan(0));
   });

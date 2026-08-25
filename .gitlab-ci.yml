@@ -68,6 +68,20 @@ protocol-e2e:
   script:
     - node tests/e2e-protocol/e2e.mjs
 
+electron-e2e:
+  stage: e2e
+  image: node:26
+  needs: [build]
+  variables:
+    ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+    PLAYWRIGHT_DOWNLOAD_HOST: https://npmmirror.com/mirrors/playwright
+  script:
+    - npm ci
+    - apt-get update && apt-get install -y xvfb libgtk-3-0 libasound2
+    - npm --workspace @sixgates/desktop run build
+    - cd apps/desktop && xvfb-run npx playwright test
+  tags: [docker]
+
 package:
   stage: package
   image: node:26

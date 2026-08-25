@@ -28,6 +28,10 @@ test-web: ## Renderer component tests
 
 test: test-rust test-web ## All unit tests
 
+test-electron: ## Electron E2E scenarios A/D/E/F (Playwright)
+	npm --workspace @sixgates/desktop run build
+	cd apps/desktop && npx playwright test
+
 e2e: ## Protocol E2E golden flow (requires release core build)
 	cargo build --release -p sixgates-core
 	node tests/e2e-protocol/e2e.mjs
@@ -46,7 +50,7 @@ run: build ## Launch desktop app
 package: build ## Package desktop app (dir, unsigned)
 	npm --workspace @sixgates/desktop run package
 
-ci: fmt clippy codegen typecheck test e2e ## Local CI sequence
+ci: fmt clippy codegen typecheck test e2e test-electron ## Local CI sequence
 
 clean: ## Clean build outputs
 	cargo clean

@@ -380,7 +380,8 @@ function buildMenu(): void {
 
 app.whenReady().then(async () => {
   buildMenu();
-  const userData = app.getPath('userData');
+  // E2E 隔离：显式数据目录覆盖（发布构建不设此变量，不影响生产）。
+  const userData = process.env.SIXGATES_E2E_DATA_DIR || app.getPath('userData');
   const logPath = join(userData, 'logs', 'core.log');
   mkdirSync(join(userData, 'logs'), { recursive: true });
   client = new CoreClient(resolveCoreBinary(), join(userData, 'data'), logPath);

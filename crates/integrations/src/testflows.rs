@@ -85,11 +85,7 @@ pub fn gitlab_test(base_url: &str, token: Option<&str>) -> TestReport {
     steps.push(step("resolve", || {
         let host = url_host(base_url)
             .ok_or_else(|| "INVALID_PARAMS | {\"url\": true} | URL 不合法".to_string())?;
-        use std::net::ToSocketAddrs;
-        host.to_socket_addrs()
-            .map_err(|_| "TLS_ERROR | {\"dns\": true} | DNS 解析失败".to_string())?
-            .next()
-            .ok_or_else(|| "TLS_ERROR | {\"dns\": true} | 无地址".to_string())?;
+        resolve_host(&host)?;
         Ok(json!({"resolved": host}))
     }));
     steps.push(step("auth", || {
@@ -99,11 +95,19 @@ pub fn gitlab_test(base_url: &str, token: Option<&str>) -> TestReport {
         let resp = ureq::get(&url)
             .set("Private-Token", token)
             .timeout(std::time::Duration::from_secs(10))
-            .call()
-            .map_err(|e| map_ureq(&e.to_string()))?;
-        if resp.status() == 401 || resp.status() == 403 {
-            return Err("CREDENTIAL_AUTH_FAILED | {\"status\": 401} | 令牌无效或权限不足".into());
-        }
+            .call();
+        let resp = match resp {
+            Ok(r) => r,
+            Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+                return Err(
+                    "CREDENTIAL_AUTH_FAILED | {\"status\": 401} | 令牌无效或权限不足".into(),
+                );
+            }
+            Err(ureq::Error::Status(code, _)) => {
+                return Err(format!("INTERNAL | {{\"status\": {code}}} | HTTP {code}"));
+            }
+            Err(e) => return Err(map_ureq(&e.to_string())),
+        };
         let body: Value = resp
             .into_json()
             .map_err(|_| "INTERNAL | {\"parse\": true} | 响应解析失败".to_string())?;
@@ -139,11 +143,7 @@ pub fn model_test(
     steps.push(step("resolve", || {
         let host = url_host(base_url)
             .ok_or_else(|| "INVALID_PARAMS | {\"url\": true} | URL 不合法".to_string())?;
-        use std::net::ToSocketAddrs;
-        host.to_socket_addrs()
-            .map_err(|_| "TLS_ERROR | {\"dns\": true} | DNS 解析失败".to_string())?
-            .next()
-            .ok_or_else(|| "TLS_ERROR | {\"dns\": true} | 无地址".to_string())?;
+        resolve_host(&host)?;
         Ok(Value::Null)
     }));
     steps.push(step("auth", || {
@@ -210,6 +210,17 @@ fn map_ureq(e: &str) -> String {
     } else {
         format!("INTERNAL | {{\"transport\": true}} | {e}")
     }
+}
+
+/// resolve：IP 字面量直接解析；域名走 DNS。
+fn resolve_host(host: &str) -> Result<(), String> {
+    use std::net::ToSocketAddrs;
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    host.to_socket_addrs()
+        .map(|_| ())
+        .map_err(|_| "TLS_ERROR | DNS 解析失败".to_string())
 }
 
 fn url_host(url: &str) -> Option<String> {
@@ -284,13 +295,8 @@ pub fn ssh_target_test(
 ) -> TestReport {
     let mut steps = Vec::new();
     steps.push(step("network", || {
-        use std::net::ToSocketAddrs;
-        (host, port as u16)
-            .to_socket_addrs()
-            .map_err(|_| "TLS_ERROR | {\"dns\": true} | 解析失败".to_string())?
-            .next()
-            .ok_or_else(|| "TLS_ERROR | {\"dns\": true} | 无地址".to_string())?;
-        Ok(Value::Null)
+        resolve_host(host)?;
+        Ok(json!({"host": host, "port": port}))
     }));
     let mut requires_accept = false;
     let key = ssh_host_key(host, port);
