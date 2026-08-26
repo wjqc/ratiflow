@@ -189,6 +189,42 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 .unwrap_or(64 << 10),
         )
         .map_err(store_err),
+        "context.instructions" => {
+            // F07/M2：分层指令文件预览（全局→项目根→docs/，含装配字节占比）。
+            let project_id = str_param(params, "projectId")?;
+            let local_root: Option<String> = store
+                .with_conn(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT COALESCE(local_root,'') FROM projects WHERE id=?1",
+                            [&project_id],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .ok())
+                })
+                .map_err(store_err)?;
+            let root = local_root
+                .filter(|p| !p.is_empty())
+                .map(std::path::PathBuf::from);
+            let knowledge_settings = sg_settings::knowledge_defaults::get(store, Some(&project_id))
+                .unwrap_or_else(|_| json!({}));
+            let instr = sg_agent::instructions::settings_from_json(&knowledge_settings);
+            let (text, layers, warnings) =
+                sg_agent::instructions::aggregate(&store.data_dir, root.as_deref(), &instr);
+            let knowledge = sg_agent::prompt::knowledge_text(&text, "");
+            let env = sg_agent::prompt::PromptEnv {
+                mode: Some(state.executor_mode),
+                work_dir_label: root.as_ref().map(|p| p.to_string_lossy().to_string()),
+            };
+            let initial =
+                sg_agent::prompt::assemble(&env, &["read_file".to_string()], &knowledge, "");
+            Ok(json!({
+                "layers": sg_agent::instructions::layers_json(&layers),
+                "totalBytes": text.len(),
+                "warnings": warnings,
+                "promptBytes": sg_agent::prompt::segment_bytes(&initial),
+            }))
+        }
         "context.create" => {
             let selected: Vec<String> = params
                 .get("selectedSources")
@@ -507,7 +543,10 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             };
             let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
             if created {
-                spawn_run_task(state, store, &run.id)?;
+                let instructions = spawn_run_task(state, store, &run.id)?;
+                return Ok(
+                    json!({"runId": run.id, "status": run.status, "instructions": instructions}),
+                );
             }
             Ok(json!({"runId": run.id, "status": run.status}))
         }
@@ -1058,7 +1097,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 
 /// 派发 Run 任务（agent.start 与审批恢复共用，M1/F03）：
 /// 行配置重建 → ToolCtx/executor → rollout → tokio 任务（spawn_blocking 驱动循环，run_store 专属连接）。
-fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<(), RpcError> {
+fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value, RpcError> {
     let run = sg_agent::get_run(store, run_id).map_err(store_err)?;
     let (workitem_id, goal, manifest_id, allowlist, budget) =
         sg_agent::row_config(store, run_id).map_err(store_err)?;
@@ -1075,16 +1114,60 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<(), R
             .map_err(|_| sg_store::Error::Message("workitem_not_found".into()))
         })
         .map_err(store_err)?;
+    let work_dir = if local_root.is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(&local_root))
+    };
     let ctx = sg_agent::tools::ToolCtx {
         mode: state.executor_mode,
-        work_dir: if local_root.is_empty() {
-            None
-        } else {
-            Some(std::path::PathBuf::from(&local_root))
-        },
+        work_dir: work_dir.clone(),
         artifacts_dir: store.data_dir.join("artifacts").join(run_id),
     };
-    let executor = crate::tool_exec::make_executor(ctx, state.run_store.clone(), project_id);
+    let executor =
+        crate::tool_exec::make_executor(ctx, state.run_store.clone(), project_id.clone());
+
+    // F06/F07/F08 上下文装配：分层指令文件（全局→项目根→docs/）+ manifest 内容块 → 知识层。
+    let knowledge_settings = sg_settings::knowledge_defaults::get(store, Some(&project_id))
+        .unwrap_or_else(|_| json!({}));
+    let instr_settings = sg_agent::instructions::settings_from_json(&knowledge_settings);
+    let (instr_text, layers, instr_warnings) =
+        sg_agent::instructions::aggregate(&store.data_dir, work_dir.as_deref(), &instr_settings);
+    let blocks = sg_knowledge::manifest_blocks(store, &manifest_id, 64 << 10)
+        .unwrap_or_else(|_| json!({"blocks": [], "totalBytes": 0, "includedCount": 0, "excludedCount": 0, "truncated": false}));
+    let blocks_text = blocks["blocks"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|b| {
+                    format!(
+                        "### {}\n{}",
+                        b["name"].as_str().unwrap_or(""),
+                        sg_agent::tools::truncate_output(
+                            b["text"].as_str().unwrap_or(""),
+                            16 << 10
+                        )
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default();
+    let knowledge = sg_agent::prompt::knowledge_text(&instr_text, &blocks_text);
+    let env = sg_agent::prompt::PromptEnv {
+        mode: Some(state.executor_mode),
+        work_dir_label: work_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+    };
+    let initial = sg_agent::prompt::assemble(&env, &allowlist, &knowledge, &goal);
+    let summary = json!({
+        "instructionLayers": sg_agent::instructions::layers_json(&layers),
+        "instructionBytes": instr_text.len(),
+        "warnings": instr_warnings,
+        "knowledgeItems": blocks["includedCount"].clone(),
+        "knowledgeBytes": blocks["totalBytes"].clone(),
+        "knowledgeExcluded": blocks["excludedCount"].clone(),
+        "promptBytes": sg_agent::prompt::segment_bytes(&initial),
+    });
     // rollout（F04）：打开失败不阻断 Run（观测数据可用性优先），记 stderr 继续。
     let mut rollout = sg_agent::rollout::Rollout::open(&store.data_dir, run_id).ok();
     if rollout.is_none() {
@@ -1104,10 +1187,16 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<(), R
     let t_manifest = manifest_id;
     let t_allow = allowlist;
     let t_budget = budget;
+    let initial = std::sync::Arc::new(initial);
+    let initial_for_task = initial.clone();
+    let summary = std::sync::Arc::new(summary);
+    let summary_for_task = summary.clone();
     state.handle.spawn(async move {
         let run_id_inner = run_id_owned.clone();
         let joined = tokio::task::spawn_blocking(move || {
             let mut rollout = rollout.take();
+            let initial = initial_for_task;
+            let summary = summary_for_task;
             let config = sg_agent::RunConfig {
                 workitem_id: &t_workitem,
                 task_id: "",
@@ -1118,6 +1207,10 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<(), R
                 budget: &t_budget,
                 max_iterations: 20,
             };
+            if let Some(ro) = rollout.as_mut() {
+                // F06/F07/F08：装配摘要（层数/知识项/告警）入 rollout。
+                let _ = ro.append("instructions_summary", summary.as_ref().clone());
+            }
             let out = sg_agent::execute_run(
                 &run_store,
                 &gateway,
@@ -1127,6 +1220,7 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<(), R
                 &run_id_inner,
                 Some(&flag),
                 rollout.take(),
+                &initial,
             );
             (out, rollout)
         })
@@ -1154,5 +1248,5 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<(), R
         let _ = result;
         registry.unregister(&run_id_owned);
     });
-    Ok(())
+    Ok(summary.as_ref().clone())
 }

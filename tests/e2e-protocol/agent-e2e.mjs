@@ -167,18 +167,30 @@ try {
     SIXGATES_EXEC_MODE: 'safe_restricted',     // 确定性执行模式（无 Docker 依赖）
     SIXGATES_FAKE_MODEL_SCRIPT: scriptPath,    // 脚本模型（未配置真实模型时生效）
   });
+  // F07：全局指令层（数据目录根）。
+  writeFileSync(join(dataDir2, 'SixGates.md'), '全局约定：交付遵循 M2-GLOBAL-MARK 规范。');
   try {
     const project = await toolClient.rpc('project.create', {
       gitlabInstance: 'x', namespace: 'n', project: 'p', name: '工具链', localRoot: projDir,
     });
     const wi = await toolClient.rpc('workitem.create', { projectId: project.id, title: '工具链验证', description: '' });
-    const manifest = await toolClient.rpc('context.create', {
-      projectId: project.id, workItemId: wi.id, query: 'e2e', selectedSources: [],
-    });
+    // F08：先扫描知识源，再建 manifest（included 项来自检索命中）。
     const source = await toolClient.rpc('knowledge.create', {
       projectId: project.id, kind: 'repo_path', name: 'proj', locator: projDir,
     });
     await toolClient.rpc('knowledge.scan', { sourceId: source.id, projectRoot: projDir });
+    const manifest = await toolClient.rpc('context.create', {
+      projectId: project.id, workItemId: wi.id, query: 'hello', selectedSources: [source.id],
+    });
+    // F07：项目指令层（扫描后写入——指令文件实时读盘，不入知识索引）。
+    writeFileSync(join(projDir, 'AGENTS.md'), '项目约定：注释使用中文（M2-PROJECT-MARK）。');
+
+    // F07：context.instructions 分层预览（全局→项目根）。
+    const instrPreview = await toolClient.rpc('context.instructions', { projectId: project.id });
+    const instrLabels = (instrPreview.layers ?? []).map((l) => l.label);
+    assert(instrLabels.includes('global:SixGates.md'), `context.instructions 含全局层（${instrLabels}）`);
+    assert(instrLabels.includes('project:AGENTS.md'), `context.instructions 含项目层（${instrLabels}）`);
+    assert((instrPreview.promptBytes?.system ?? 0) > 0, 'context.instructions 带装配字节占比');
 
     // tool.list 由运行时注册表驱动（含 search_knowledge 与限制字段）。
     const tools = await toolClient.rpc('tool.list');
@@ -192,6 +204,11 @@ try {
       toolAllowlist: ['read_file', 'search_knowledge', 'run_command', 'write_file'],
       idempotencyKey: 'agent-e2e-tools-1',
     });
+    // F06/F07/F08：装配摘要——指令层≥2（全局+项目）、manifest 知识项≥1、段落字节占比。
+    const instr = started.instructions ?? {};
+    assert((instr.instructionLayers ?? []).length >= 2, `指令层≥2（${JSON.stringify((instr.instructionLayers ?? []).map((l) => l.label))}）`);
+    assert((instr.knowledgeItems ?? 0) >= 1, `manifest 知识项注入（${instr.knowledgeItems}）`);
+    assert((instr.promptBytes?.knowledge ?? 0) > 0, '知识层字节占比存在');
     let run = await waitStatus(toolClient, started.runId, (st) =>
       ['paused', 'completed_execution', 'failed', 'cancelled'].includes(st));
     assert(run.status === 'paused', `run_command 触发暂停（实际 ${run.status}：${run.result}）`);

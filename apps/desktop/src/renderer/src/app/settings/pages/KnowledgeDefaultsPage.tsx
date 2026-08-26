@@ -14,6 +14,8 @@ interface KnowledgeSettings {
   defaultResultLimit?: number;
   includeTestsByDefault?: boolean;
   contextBudgetBytes?: number;
+  instructionFileNames?: string[];
+  maxInstructionBytes?: number;
   revision?: number;
 }
 
@@ -25,6 +27,8 @@ const EMPTY: Required<Omit<KnowledgeSettings, 'revision'>> = {
   defaultResultLimit: 20,
   includeTestsByDefault: false,
   contextBudgetBytes: 65536,
+  instructionFileNames: ['SixGates.md', 'AGENTS.md'],
+  maxInstructionBytes: 32768,
 };
 
 export function KnowledgeDefaultsPage() {
@@ -112,6 +116,25 @@ export function KnowledgeDefaultsPage() {
                     onChange={(e) => set('secretScanFailClosed', e.target.checked)} />
                   <span className="sg-hint" style={{ margin: 0 }}>fail closed（命中不返回原文）</span>
                 </label>
+              </div>
+            </div>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection title="项目指令文件（F07）" description="Agent 启动时按 全局→项目根→docs/ 聚合注入；层内容过秘密扫描，超限截断。生效预览可在任意项目上调用 context.instructions。">
+          <div className="sg-card sg-set-form">
+            <div className="sg-form-grid--2">
+              <div className="sg-field">
+                <label htmlFor="kb-instrfiles">指令文件名（逗号分隔，按序探测）</label>
+                <input id="kb-instrfiles" className="sg-input" type="text"
+                  value={(draft.instructionFileNames ?? EMPTY.instructionFileNames).join(', ')}
+                  onChange={(e) => set('instructionFileNames', e.target.value.split(',').map((x) => x.trim()).filter(Boolean))} />
+              </div>
+              <div className="sg-field">
+                <label htmlFor="kb-instrbytes">指令总上限（KB）</label>
+                <input id="kb-instrbytes" className="sg-input" type="number" min={1} max={256}
+                  value={Math.floor((draft.maxInstructionBytes ?? EMPTY.maxInstructionBytes) / 1024)}
+                  onChange={(e) => set('maxInstructionBytes', Number(e.target.value) * 1024)} />
               </div>
             </div>
           </div>

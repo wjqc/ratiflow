@@ -233,6 +233,19 @@
       "result": "value"
     },
     {
+      "name": "context.instructions",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true,
+          "description": "项目 ID"
+        }
+      ],
+      "result": "value",
+      "description": "分层指令文件预览（F07/M2：全局→项目根→docs/，含告警与装配字节占比）"
+    },
+    {
       "name": "context.preview",
       "params": [
         {

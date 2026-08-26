@@ -17,6 +17,7 @@ export type RpcMethodName =
   | 'knowledge.remove'
   | 'knowledge.scan'
   | 'knowledge.search'
+  | 'context.instructions'
   | 'context.preview'
   | 'context.create'
   | 'attachment.import'
@@ -145,6 +146,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'knowledge.remove',
   'knowledge.scan',
   'knowledge.search',
+  'context.instructions',
   'context.preview',
   'context.create',
   'attachment.import',
@@ -388,6 +390,10 @@ export interface KnowledgeSearchParams {
   projectId: string;
   query: string;
   limit?: number;
+}
+
+export interface ContextInstructionsParams {
+  projectId: string;
 }
 
 export interface ContextPreviewParams {
