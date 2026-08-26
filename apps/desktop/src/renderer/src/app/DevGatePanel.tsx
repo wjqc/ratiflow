@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { rpc, rpcErrorMessage } from '../rpc/client';
+import { rpc, rpcErrorMessage, waitForRunTerminal } from '../rpc/client';
 import { EvaluateButton } from './DocGatePanel';
 
 interface Props {
@@ -58,16 +58,17 @@ export default function DevGatePanel({ workItemId, onDone }: Props) {
               const manifest = await rpc<{ id: string }>('context.create', {
                 projectId: '', workItemId, query: goal.slice(0, 100), selectedSources: [],
               });
-              const result = await rpc<{ run: RunInfo; output: string }>('agent.run', {
+              const started = await rpc<{ runId: string }>('agent.start', {
                 workItemId, goal, contextManifestId: manifest.id,
                 toolAllowlist: ['read_file', 'write_file'],
                 idempotencyKey: `dev-${Date.now()}`,
               });
-              setLastRun(result.run);
-              if (result.run.status !== 'completed_execution') {
-                throw new Error(`Agent 状态 ${result.run.status}：${result.run.result}`);
+              const run = await waitForRunTerminal(started.runId);
+              setLastRun(run);
+              if (run.status !== 'completed_execution') {
+                throw new Error(`Agent 状态 ${run.status}：${run.result}`);
               }
-              return `Agent 完成：${result.output}`;
+              return `Agent 完成：${run.result}`;
             });
           }}
         >

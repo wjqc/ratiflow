@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { rpc, rpcErrorMessage } from '../rpc/client';
+import { rpc, rpcErrorMessage, waitForRunTerminal } from '../rpc/client';
 import { gateLabel } from './AppShell';
 
 interface Props {
@@ -111,7 +111,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
                   const manifest = await rpc<{ id: string }>('context.create', {
                     projectId: '', workItemId, query: draft.slice(0, 100) || workItemId, selectedSources: [],
                   }).catch(() => null);
-                  const result = await rpc<{ output: string }>('agent.run', {
+                  const started = await rpc<{ runId: string }>('agent.start', {
                     workItemId,
                     goal: `${draftGoal(gate, draft)}`,
                     contextManifestId: manifest?.id ?? 'ctx-any',
@@ -120,7 +120,11 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
                   }).catch((reason) => {
                     throw new Error(rpcErrorMessage(reason));
                   });
-                  setDraft((prev) => (prev ? `${prev}\n\n---\n${result.output}` : result.output));
+                  const run = await waitForRunTerminal(started.runId);
+                  if (run.status !== 'completed_execution') {
+                    throw new Error(`Agent 状态 ${run.status}：${run.result}`);
+                  }
+                  setDraft((prev) => (prev ? `${prev}\n\n---\n${run.result}` : run.result));
                   return 'Agent 已起草（见编辑框，确认后保存草稿）。';
                 });
               }}

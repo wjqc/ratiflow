@@ -54,17 +54,24 @@ test('A3 未配模型时 Agent Run 被阻断（无假 Agent 回复）', async ()
   });
   expect(manifest.id).toBeTruthy();
 
-  // Agent Run：模型 Profile 不存在 → 稳定失败（不是假回复）
-  // 未配模型 Profile → fake 脚本耗尽 → RPC 稳定失败（model_unavailable）。
-  // 关键验收：绝不返回 completed_execution 带伪造内容。
-  const result = await e2e.rpc<{ run?: { status: string } }>('agent.run', {
+  // M0-②（ADR-028）：agent.start 是唯一入口，立即返回 runId，Run 在后台任务执行。
+  const started = await e2e.rpc<{ runId: string }>('agent.start', {
     workItemId: wi.id, goal: '测试', contextManifestId: manifest.id,
     toolAllowlist: ['read_file'], idempotencyKey: 'e2e-a3',
-  }).catch((e: Error) => {
-    expect(e.message).toContain('model_unavailable');
-    return null;
   });
-  if (result?.run?.status === 'completed_execution') {
-    throw new Error('未配模型时不得返回 completed_execution');
+  expect(started.runId).toBeTruthy();
+
+  // 非阻塞证据：Run 进行中，其余 RPC 立即返回（读循环与 DB actor 不被占用）。
+  const t0 = Date.now();
+  await e2e.rpc('project.list');
+  expect(Date.now() - t0).toBeLessThan(1000);
+
+  // 未配模型 Profile → fake 脚本耗尽 → 终态 failed（model_unavailable），绝不伪造 completed_execution。
+  let run = await e2e.rpc<{ status: string; result: string }>('agent.get', { runId: started.runId });
+  for (let i = 0; i < 50 && !['completed_execution', 'failed', 'cancelled'].includes(run.status); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    run = await e2e.rpc<{ status: string; result: string }>('agent.get', { runId: started.runId });
   }
+  expect(run.status).toBe('failed');
+  expect(run.result).toContain('model_unavailable');
 });

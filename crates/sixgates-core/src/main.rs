@@ -67,10 +67,18 @@ fn main() {
             std::process::exit(1);
         }
     };
-    runtime.block_on(run_server(store, env!("CARGO_PKG_VERSION")));
+    // Run 任务专属连接（M0-②）：WAL 多连接；RPC 走 DB actor 连接，Run 循环走本连接。
+    let run_store = match Store::open(std::path::Path::new(&data_dir), env!("CARGO_PKG_VERSION")) {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            eprintln!("{{\"level\":\"fatal\",\"msg\":\"run store open failed: {e}\"}}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(run_server(store, run_store, env!("CARGO_PKG_VERSION")));
 }
 
-async fn run_server(store: Store, core_version: &'static str) {
+async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static str) {
     // sidecar 崩溃恢复语义：启动即 quick_check。
     // hello 的 schemaVersion 与初始事件水位必须在 Store 移入 DB actor 前读取。
     if let Err(e) = store.quick_check() {
@@ -80,7 +88,12 @@ async fn run_server(store: Store, core_version: &'static str) {
     let initial_seq = outbox::latest_sequence(&store).unwrap_or(0);
 
     let db = db::Db::spawn(store);
-    let app = Arc::new(state::AppState::new(db, initial_seq, core_version));
+    let app = Arc::new(state::AppState::new(
+        db,
+        run_store,
+        initial_seq,
+        core_version,
+    ));
 
     // stdout 单写者任务：hello、响应、事件通知统一经 mpsc 排队写出，无并发交错。
     let (wtx, mut wrx) = tokio::sync::mpsc::channel::<String>(256);

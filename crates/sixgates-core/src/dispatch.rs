@@ -1,4 +1,6 @@
 //! RPC 方法分发：~45 个方法覆盖项目/知识库/附件/工作项/工件/Agent/门禁/审批/证据/部署/时间线。
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 use sg_protocol::{ErrorCode, RpcError};
 use sg_store::{objects, outbox, Error, Store};
@@ -467,7 +469,8 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
 
         // --- Agent ---
-        "agent.run" => {
+        // 唯一入口（ADR-028）：建行（幂等）→ 立即返回 runId，循环在独立任务/连接上执行。
+        "agent.start" => {
             let workitem_id = str_param(params, "workItemId")?;
             let goal = str_param(params, "goal")?;
             let manifest_id = str_param(params, "contextManifestId")?;
@@ -491,52 +494,108 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 .unwrap_or_default();
             let idem = opt_str_param(params, "idempotencyKey")
                 .unwrap_or_else(|| format!("rpc-{}", sg_store::ids::new_id("idem")));
-            // executor：映射到受约束执行（提案 → ExecutionManifest）。
-            let mode = state.executor_mode;
-            let executor = move |p: &sg_agent::Proposal| -> Result<String, String> {
-                let manifest = sg_executor::ExecutionManifest {
-                    argv: vec![p.tool.clone()],
-                    work_dir: String::new(),
-                    image: "alpine:3".into(),
-                    network_off: true,
-                    memory_mb: 256,
-                    cpus: 0.5,
-                    timeout_sec: 120,
-                    writes_files: false,
-                };
-                match sg_executor::execute(mode, &manifest) {
-                    Ok(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                }
-            };
             let task_id = opt_str_param(params, "taskId").unwrap_or_default();
-            let out = sg_agent::start(
-                store,
-                &state.model,
-                &state.policy,
-                Some(&executor),
-                &sg_agent::RunConfig {
-                    workitem_id: &workitem_id,
-                    task_id: &task_id,
-                    goal: &goal,
-                    manifest_id: &manifest_id,
-                    tool_allowlist: &allowlist,
-                    idempotency_key: &idem,
-                    budget: &budget,
-                    max_iterations: 20,
-                },
-            )
-            .map_err(store_err)?;
-            let proposals = sg_agent::proposals(store, &out.run.id).unwrap_or_default();
-            Ok(json!({"run": out.run, "output": out.output, "proposals": proposals}))
+            let config = sg_agent::RunConfig {
+                workitem_id: &workitem_id,
+                task_id: &task_id,
+                goal: &goal,
+                manifest_id: &manifest_id,
+                tool_allowlist: &allowlist,
+                idempotency_key: &idem,
+                budget: &budget,
+                max_iterations: 20,
+            };
+            let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
+            if created {
+                let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                state.runs.register(&run.id, flag.clone());
+                let run_store = state.run_store.clone();
+                let gateway = state.model.clone();
+                let policy = state.policy.clone();
+                let registry = state.runs.clone();
+                let mode = state.executor_mode;
+                let run_id = run.id.clone();
+                // RunConfig 借用局部变量，任务需要 'static：克隆任务侧配置副本。
+                let t_workitem = workitem_id.clone();
+                let t_task = task_id.clone();
+                let t_goal = goal.clone();
+                let t_manifest = manifest_id.clone();
+                let t_allow = allowlist.clone();
+                let t_budget = budget.clone();
+                state.handle.spawn(async move {
+                    let run_id_inner = run_id.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        let config = sg_agent::RunConfig {
+                            workitem_id: &t_workitem,
+                            task_id: &t_task,
+                            goal: &t_goal,
+                            manifest_id: &t_manifest,
+                            tool_allowlist: &t_allow,
+                            idempotency_key: "",
+                            budget: &t_budget,
+                            max_iterations: 20,
+                        };
+                        // executor：映射到受约束执行（提案 → ExecutionManifest）。
+                        let executor = move |p: &sg_agent::Proposal| -> Result<String, String> {
+                            let manifest = sg_executor::ExecutionManifest {
+                                argv: vec![p.tool.clone()],
+                                work_dir: String::new(),
+                                image: "alpine:3".into(),
+                                network_off: true,
+                                memory_mb: 256,
+                                cpus: 0.5,
+                                timeout_sec: 120,
+                                writes_files: false,
+                            };
+                            match sg_executor::execute(mode, &manifest) {
+                                Ok(result) => {
+                                    serde_json::to_string(&result).map_err(|e| e.to_string())
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        };
+                        sg_agent::execute_run(
+                            &run_store,
+                            &gateway,
+                            &policy,
+                            Some(&executor),
+                            &config,
+                            &run_id_inner,
+                            Some(&flag),
+                        )
+                    })
+                    .await;
+                    // 终态/事件已由 execute_run 写库（失败也含在 result 中）；此处只做注册表清理。
+                    let _ = result;
+                    registry.unregister(&run_id);
+                });
+            }
+            Ok(json!({"runId": run.id, "status": run.status}))
         }
         "agent.get" => {
             let run = sg_agent::get_run(store, &str_param(params, "runId")?).map_err(store_err)?;
             Ok(serde_json::to_value(run).unwrap_or_default())
         }
         "agent.cancel" => {
-            sg_agent::cancel(store, &str_param(params, "runId")?).map_err(store_err)?;
-            Ok(json!({"status": "cancelled"}))
+            let run_id = str_param(params, "runId")?;
+            let run = sg_agent::get_run(store, &run_id).map_err(store_err)?;
+            let terminal = matches!(
+                run.status.as_str(),
+                "completed_execution" | "failed" | "cancelled"
+            );
+            if terminal {
+                return Ok(json!({"runId": run_id, "status": run.status}));
+            }
+            if let Some(flag) = state.runs.get(&run_id) {
+                // 活跃任务：置位取消旗标；循环在下一检查点收尾并发 run.cancelled。
+                // 阻塞中的模型调用不可中断（诚实语义），终态经事件/agent.get 可见。
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({"runId": run_id, "status": "cancelling"}))
+            } else {
+                // 无活跃任务（遗留 running/paused 行，如进程崩溃后）：直接置库收尾。
+                sg_agent::cancel(store, &run_id).map_err(store_err)?;
+                Ok(json!({"runId": run_id, "status": "cancelled"}))
+            }
         }
         "agent.proposals" => {
             let items =

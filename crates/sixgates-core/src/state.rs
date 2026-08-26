@@ -1,15 +1,41 @@
-//! 应用状态：DB actor 句柄 + 适配器装配。Rust core 是业务唯一写入者。
-use std::sync::atomic::AtomicI64;
-use std::sync::Arc;
+//! 应用状态：DB actor 句柄 + Run 运行时 + 适配器装配。Rust core 是业务唯一写入者。
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::{Arc, Mutex};
 
 use sg_agent::Gateway;
 use sg_integrations::{FakeGitLab, FakeSSH};
 use sg_policy::Snapshot;
+use sg_store::Store;
 
 use crate::db::Db;
 
+/// 活跃 Run 的取消句柄注册表：cancel 置位旗标，Run 任务在迭代边界观察并自清理（M0-②）。
+#[derive(Default)]
+pub struct RunRegistry {
+    inner: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl RunRegistry {
+    pub fn register(&self, run_id: &str, flag: Arc<AtomicBool>) {
+        self.inner.lock().unwrap().insert(run_id.into(), flag);
+    }
+    pub fn unregister(&self, run_id: &str) {
+        self.inner.lock().unwrap().remove(run_id);
+    }
+    pub fn get(&self, run_id: &str) -> Option<Arc<AtomicBool>> {
+        self.inner.lock().unwrap().get(run_id).cloned()
+    }
+}
+
 pub struct AppState {
     pub db: Db,
+    /// Run 任务专属连接：WAL 多连接，与 DB actor 的连接经 busy_timeout 串行写。
+    pub run_store: Arc<Store>,
+    /// 活跃 Run 取消注册表。
+    pub runs: Arc<RunRegistry>,
+    /// tokio 运行时句柄（Run 任务派发）。
+    pub handle: tokio::runtime::Handle,
     pub gitlab: Arc<dyn sg_integrations::GitLabClient>,
     pub model: Arc<Gateway>,
     pub ssh: Arc<dyn sg_integrations::SSHAdapter>,
@@ -26,7 +52,7 @@ impl AppState {
         &self.core_version
     }
 
-    pub fn new(db: Db, initial_watermark: i64, core_version: &str) -> Self {
+    pub fn new(db: Db, run_store: Arc<Store>, initial_watermark: i64, core_version: &str) -> Self {
         // 适配器按环境装配：未配置时使用 fake 并在诊断中标记 not_ready。
         let (gitlab, gitlab_fake) = match (
             std::env::var("SIXGATES_GITLAB_URL"),
@@ -103,6 +129,9 @@ impl AppState {
         );
         Self {
             db,
+            run_store,
+            runs: Arc::new(RunRegistry::default()),
+            handle: tokio::runtime::Handle::current(),
             gitlab,
             model: Arc::new(model),
             ssh,

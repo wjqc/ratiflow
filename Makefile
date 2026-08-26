@@ -32,9 +32,10 @@ test-electron: ## Electron E2E scenarios A/D/E/F (Playwright)
 	npm --workspace @sixgates/desktop run build
 	cd apps/desktop && npx playwright test
 
-e2e: ## Protocol E2E golden flow (requires release core build)
+e2e: ## Protocol E2E golden flow + agent lifecycle (requires release core build)
 	cargo build --release -p sixgates-core
 	node tests/e2e-protocol/e2e.mjs
+	node tests/e2e-protocol/agent-e2e.mjs
 
 build-core: ## Release build of Rust core
 	cargo build --release -p sixgates-core
