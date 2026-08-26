@@ -62,6 +62,7 @@ pub struct RunOutput {
 }
 
 /// 启动一次 Run（同步循环，受预算/迭代/取消约束）。
+/// 取消旗标：迭代边界与工具执行前检查；置位后以 cancelled 终态收尾。
 #[derive(Debug, Clone)]
 pub struct RunConfig<'a> {
     pub workitem_id: &'a str,
@@ -81,6 +82,17 @@ pub fn start(
     executor: Option<&ToolExecutor>,
     config: &RunConfig<'_>,
 ) -> Result<RunOutput, Error> {
+    let (run, created) = create_run(store, config)?;
+    if !created {
+        let output = run.result.clone();
+        return Ok(RunOutput { run, output });
+    }
+    execute_run(store, gateway, policy, executor, config, &run.id, None)
+}
+
+/// 建行（幂等）：重复 idempotency_key 返回既有 Run，created=false。
+/// status→running 时发 run.started 事件（M0-② 契约事件）。
+pub fn create_run(store: &Store, config: &RunConfig<'_>) -> Result<(AgentRun, bool), Error> {
     let RunConfig {
         workitem_id,
         task_id,
@@ -89,7 +101,7 @@ pub fn start(
         tool_allowlist,
         idempotency_key,
         budget,
-        max_iterations,
+        ..
     } = *config;
     if workitem_id.is_empty() || goal.is_empty() || manifest_id.is_empty() {
         return Err(Error::Message("workitem/goal/manifest required".into()));
@@ -105,8 +117,7 @@ pub fn start(
     })?;
     if let Some(id) = existing {
         let run = get_run(store, &id)?;
-        let output = run.result.clone();
-        return Ok(RunOutput { run, output });
+        return Ok((run, false));
     }
 
     let id = ids::new_id("run");
@@ -125,6 +136,32 @@ pub fn start(
     })?;
     let mut run = get_run(store, &id)?;
     set_status(store, &mut run, "running")?;
+    Ok((run, true))
+}
+
+/// 执行既有 Run 的循环（M0-② 起 Run 由装配层在独立任务/连接上驱动）。
+pub fn execute_run(
+    store: &Store,
+    gateway: &Gateway,
+    policy: &Snapshot,
+    executor: Option<&ToolExecutor>,
+    config: &RunConfig<'_>,
+    run_id: &str,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<RunOutput, Error> {
+    let RunConfig {
+        goal,
+        tool_allowlist,
+        budget,
+        max_iterations,
+        ..
+    } = *config;
+    let mut run = get_run(store, run_id)?;
+    let cancelled = |cancel: Option<&std::sync::atomic::AtomicBool>| {
+        cancel
+            .map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    };
 
     let mut messages = vec![ChatMessage {
         role: "user".into(),
@@ -135,6 +172,15 @@ pub fn start(
         + std::time::Duration::from_secs(budget.max_duration_sec.max(1) as u64);
     #[allow(unused_assignments)]
     for iteration in 0..max_iterations {
+        if cancelled(cancel) {
+            run.result = "已取消（用户请求）".into();
+            set_status(store, &mut run, "cancelled")?;
+            finish(store, &run)?;
+            return Ok(RunOutput {
+                run,
+                output: String::new(),
+            });
+        }
         if std::time::Instant::now() > deadline {
             run.result = "budget: duration exceeded".into();
             set_status(store, &mut run, "failed")?;
@@ -148,7 +194,7 @@ pub fn start(
             max_tokens: 4096,
             response_schema: None,
         };
-        let response = match gateway.call(store, &id, &budget.model, &request) {
+        let response = match gateway.call(store, run_id, &budget.model, &request) {
             Ok(resp) => resp,
             Err(e) => {
                 if e.contains("budget_exceeded") {
@@ -182,7 +228,7 @@ pub fn start(
         if decision.action == "final" {
             run.result = decision.summary.clone();
             set_status(store, &mut run, "completed_execution")?;
-            checkpoint(store, &id, iteration, &messages);
+            checkpoint(store, run_id, iteration, &messages);
             finish(store, &run)?;
             return Ok(RunOutput {
                 run,
@@ -197,6 +243,16 @@ pub fn start(
             return Err(Error::Message("budget_exhausted: tool calls".into()));
         }
 
+        if cancelled(cancel) {
+            run.result = "已取消（用户请求）".into();
+            set_status(store, &mut run, "cancelled")?;
+            finish(store, &run)?;
+            return Ok(RunOutput {
+                run,
+                output: String::new(),
+            });
+        }
+
         let (_outcome, output_text) =
             propose_and_execute(store, policy, executor, &run, &decision)?;
         tool_calls += 1;
@@ -209,7 +265,7 @@ pub fn start(
             role: "tool".into(),
             content: output_text,
         });
-        checkpoint(store, &id, iteration, &messages);
+        checkpoint(store, run_id, iteration, &messages);
     }
 
     run.result = "max iterations reached without final answer".into();
@@ -348,11 +404,17 @@ fn set_status(store: &Store, run: &mut AgentRun, to: &str) -> Result<(), Error> 
         )?;
         Ok(())
     })?;
+    // running 的对外事件名是 run.started（M0-② 契约）；其余沿用 run.<status>。
+    let event_type = if to == "running" {
+        "run.started".to_string()
+    } else {
+        format!("run.{to}")
+    };
     outbox::emit(
         store,
         "agent_run",
         &run.id,
-        &format!("run.{to}"),
+        &event_type,
         json!({"workitemId": run.workitem_id}),
     )?;
     Ok(())
@@ -649,5 +711,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first.run.id, second.run.id);
+    }
+
+    #[test]
+    fn cancel_flag_stops_loop_with_single_event() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let store = setup();
+        let fake = FakeModel::default();
+        for _ in 0..5 {
+            fake.push_response(
+                r#"{"action":"read_file","arguments":{"path":"a"},"summary":"r"}"#,
+                5,
+                3,
+            );
+        }
+        let gateway = Gateway::new(Box::new(fake));
+        let flag = Arc::new(AtomicBool::new(false));
+        let f2 = flag.clone();
+        let executed = Arc::new(AtomicUsize::new(0));
+        let counter = executed.clone();
+        let executor = move |_p: &Proposal| -> Result<String, String> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            // 首个工具执行后请求取消：下一迭代边界应观察到并收尾。
+            f2.store(true, Ordering::SeqCst);
+            Ok("ok".into())
+        };
+        let config = RunConfig {
+            workitem_id: "wi",
+            task_id: "",
+            goal: "g",
+            manifest_id: "ctx1",
+            tool_allowlist: &["read_file".into()],
+            idempotency_key: "key-cancel",
+            budget: &RunBudget::default(),
+            max_iterations: 10,
+        };
+        let (run, created) = create_run(&store, &config).unwrap();
+        assert!(created);
+        assert_eq!(run.status, "running");
+        let out = execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &config,
+            &run.id,
+            Some(&flag),
+        )
+        .unwrap();
+        assert_eq!(out.run.status, "cancelled");
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
+
+        let count = |ty: &str| -> i64 {
+            store
+                .with_conn(|c| {
+                    let n: i64 = c.query_row(
+                        "SELECT COUNT(*) FROM events_outbox WHERE type=?1 AND aggregate_id=?2",
+                        rusqlite::params![ty, run.id],
+                        |r| r.get(0),
+                    )?;
+                    Ok(n)
+                })
+                .unwrap()
+        };
+        assert_eq!(count("run.started"), 1, "run.started 恰好一条");
+        assert_eq!(count("run.cancelled"), 1, "run.cancelled 恰好一条");
     }
 }

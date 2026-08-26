@@ -128,6 +128,10 @@ pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecErro
             let docker =
                 which_docker().ok_or_else(|| ExecError::Io("docker unavailable".into()))?;
             let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
+            // 超时可追踪的容器名：kill 客户端进程不等于停容器，需 docker rm -f 兜底。
+            let container = format!("sg-exec-{}-{}", std::process::id(), start_nanos());
+            args.push("--name".into());
+            args.push(container.clone());
             if m.network_off {
                 args.push("--network".into());
                 args.push("none".into());
@@ -140,11 +144,27 @@ pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecErro
                 args.push(m.image.clone());
             }
             args.extend(m.argv.iter().cloned());
-            run_local(&docker, &args, m, "docker")
+            let result = run_local(&docker, &args, m, "docker")?;
+            if result.timed_out {
+                let _ = Command::new(&docker)
+                    .args(["rm", "-f", &container])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            Ok(result)
         }
     }
 }
 
+fn start_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// 受限进程执行：真实超时 kill（非事后标记）；读管道走独立线程，避免子进程填满管道缓冲死锁。
 fn run_local(
     bin: &str,
     args: &[String],
@@ -153,23 +173,62 @@ fn run_local(
 ) -> Result<ExecResult, ExecError> {
     let start = Instant::now();
     let mut cmd = Command::new(bin);
-    cmd.args(args);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     if !m.work_dir.is_empty() {
         let dir = std::path::Path::new(&m.work_dir);
         if dir.is_dir() {
             cmd.current_dir(dir);
         }
     }
-    let output = cmd.output().map_err(|e| ExecError::Io(e.to_string()))?;
-    let elapsed = start.elapsed();
+    let mut child = cmd.spawn().map_err(|e| ExecError::Io(e.to_string()))?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let t_out = std::thread::spawn(move || read_all(stdout_pipe));
+    let t_err = std::thread::spawn(move || read_all(stderr_pipe));
+
+    let deadline = Instant::now() + Duration::from_secs(m.timeout_sec.max(1) as u64);
+    let mut timed_out = false;
+    let mut status = None;
+    loop {
+        match child.try_wait().map_err(|e| ExecError::Io(e.to_string()))? {
+            Some(s) => {
+                status = Some(s);
+                break;
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    timed_out = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    if timed_out {
+        let _ = child.wait(); // 回收僵尸进程
+    }
+    let stdout = String::from_utf8_lossy(&t_out.join().unwrap_or_default()).to_string();
+    let stderr = String::from_utf8_lossy(&t_err.join().unwrap_or_default()).to_string();
     Ok(ExecResult {
         mode: mode.into(),
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        duration_ms: elapsed.as_millis() as u64,
-        timed_out: elapsed > Duration::from_secs(m.timeout_sec as u64),
+        exit_code: status.and_then(|s| s.code()).unwrap_or(-1),
+        stdout,
+        stderr,
+        duration_ms: start.elapsed().as_millis() as u64,
+        timed_out,
     })
+}
+
+fn read_all(mut pipe: Option<impl std::io::Read>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Some(r) = pipe.as_mut() {
+        let _ = std::io::Read::read_to_end(r, &mut buf);
+    }
+    buf
 }
 
 #[cfg(test)]
@@ -226,5 +285,28 @@ mod tests {
         let result = execute(Mode::UnsafeExplicit, &manifest(&["echo", "unsafe-ok"])).unwrap();
         assert!(result.stdout.contains("unsafe-ok"));
         assert_eq!(result.mode, "unsafe_explicit");
+    }
+
+    #[test]
+    fn timeout_kills_process() {
+        let mut m = manifest(&["sleep", "5"]);
+        m.timeout_sec = 1;
+        let result = execute(Mode::UnsafeExplicit, &m).unwrap();
+        assert!(result.timed_out, "超时必须标记 timed_out");
+        assert!(
+            result.duration_ms < 3_000,
+            "进程必须被真实 kill（耗时 {}ms）",
+            result.duration_ms
+        );
+        assert_eq!(result.exit_code, -1);
+    }
+
+    #[test]
+    fn large_output_no_pipe_deadlock() {
+        // 2MB 输出远超管道缓冲（64KB）：读线程缺失会死锁到超时。
+        let m = manifest(&["head", "-c", "2000000", "/dev/zero"]);
+        let result = execute(Mode::SafeRestricted, &m).unwrap();
+        assert!(!result.timed_out);
+        assert_eq!(result.stdout.len(), 2_000_000);
     }
 }
