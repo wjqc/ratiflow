@@ -7,6 +7,7 @@ use sg_policy::{self, PolicyError, Snapshot};
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
 pub mod modelgw;
+pub mod tools;
 pub use modelgw::{Budget, Gateway, Usage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
