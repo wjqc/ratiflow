@@ -519,6 +519,94 @@ pub fn get_manifest(store: &Store, id: &str) -> Result<Value, Error> {
     }))
 }
 
+/// F08/M2：装载 manifest 的 included 内容块（按 ordinal 顺序，来源名 + chunk 文本，
+/// 全程受 max_bytes 预算约束；chunk 正文从 objects 内容寻址读取）。
+pub fn manifest_blocks(store: &Store, manifest_id: &str, max_bytes: i64) -> Result<Value, Error> {
+    struct Item {
+        source_id: String,
+    }
+    let items: Vec<Item> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT source_id FROM context_manifest_items
+             WHERE manifest_id=?1 AND included=1 ORDER BY ordinal",
+        )?;
+        let rows = stmt.query_map([manifest_id], |r| {
+            Ok(Item {
+                source_id: r.get(0)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    })?;
+    let mut blocks = Vec::new();
+    let mut total = 0i64;
+    let mut truncated = false;
+    for item in &items {
+        if total >= max_bytes {
+            truncated = true;
+            break;
+        }
+        let name: String = store.with_conn(|conn| {
+            conn.query_row(
+                "SELECT name FROM knowledge_sources WHERE id=?1",
+                [&item.source_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| Error::Message("source_not_found".into()))
+        })?;
+        let chunk_shas: Vec<String> = store.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT object_sha256 FROM knowledge_chunks WHERE source_id=?1 ORDER BY ordinal",
+            )?;
+            let rows = stmt.query_map([&item.source_id], |r| r.get(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })?;
+        let mut text = String::new();
+        for sha in chunk_shas {
+            if total + text.len() as i64 >= max_bytes {
+                truncated = true;
+                break;
+            }
+            if let Ok(body) = objects::open(store, &sha) {
+                let part = String::from_utf8_lossy(&body);
+                text.push_str(&part);
+                text.push('\n');
+            }
+        }
+        if text.is_empty() {
+            continue;
+        }
+        total += text.len() as i64;
+        blocks.push(json!({
+            "sourceId": item.source_id,
+            "name": name,
+            "bytes": text.len(),
+            "text": text,
+        }));
+    }
+    let excluded: i64 = store.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM context_manifest_items WHERE manifest_id=?1 AND included=0",
+            [manifest_id],
+            |r| r.get(0),
+        )?)
+    })?;
+    Ok(json!({
+        "blocks": blocks,
+        "totalBytes": total,
+        "includedCount": blocks.len(),
+        "excludedCount": excluded,
+        "truncated": truncated,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

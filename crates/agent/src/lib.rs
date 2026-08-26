@@ -6,7 +6,9 @@ use sg_integrations::model::{ChatMessage, CompletionRequest};
 use sg_policy::{self, PolicyError, Snapshot};
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
+pub mod instructions;
 pub mod modelgw;
+pub mod prompt;
 pub mod rollout;
 pub mod tools;
 pub use modelgw::{Budget, Gateway, Usage};
@@ -89,8 +91,15 @@ pub fn start(
         let output = run.result.clone();
         return Ok(RunOutput { run, output });
     }
+    // 默认装配（无边界/知识——测试与旧调用方语义；装配层用 prompt::assemble 注入完整段）。
+    let initial = prompt::assemble(
+        &prompt::PromptEnv::default(),
+        config.tool_allowlist,
+        &prompt::knowledge_text("", ""),
+        config.goal,
+    );
     execute_run(
-        store, gateway, policy, executor, config, &run.id, None, None,
+        store, gateway, policy, executor, config, &run.id, None, None, &initial,
     )
 }
 
@@ -164,14 +173,16 @@ pub fn execute_run(
     run_id: &str,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     mut rollout: Option<crate::rollout::Rollout>,
+    initial: &prompt::InitialTurn,
 ) -> Result<RunOutput, Error> {
     let RunConfig {
         goal,
-        tool_allowlist,
+        tool_allowlist: _tool_allowlist,
         budget,
         max_iterations,
         ..
     } = *config;
+    let system_prompt = initial.system_prompt.clone();
     let mut run = get_run(store, run_id)?;
     let cancelled = |cancel: Option<&std::sync::atomic::AtomicBool>| {
         cancel
@@ -255,7 +266,7 @@ pub fn execute_run(
         }
         let request = CompletionRequest {
             model: String::new(),
-            system_prompt: system_prompt_for(tool_allowlist),
+            system_prompt: system_prompt.clone(),
             messages: messages.clone(),
             max_tokens: 4096,
             response_schema: None,
@@ -417,12 +428,6 @@ fn parse_decision(content: &str) -> Option<Decision> {
         arguments: value["arguments"].to_string(),
         summary: value["summary"].as_str().unwrap_or_default().into(),
     })
-}
-
-fn system_prompt_for(allowlist: &[String]) -> String {
-    format!(
-        "你是 SixGates 交付 Agent。每轮输出一个 JSON 对象：{{\"action\":\"<tool|final>\",\"arguments\":{{...}},\"summary\":\"...\"}}。可用工具：{allowlist:?}。完成任务时 action=final 并在 summary 给出结果。你不能直接执行工具；系统会校验并执行提案。"
-    )
 }
 
 fn propose_and_execute(
@@ -988,6 +993,12 @@ mod tests {
             budget: &RunBudget::default(),
             max_iterations: 5,
         };
+        let initial = crate::prompt::assemble(
+            &crate::prompt::PromptEnv::default(),
+            &["read_file".to_string(), "run_command".to_string()],
+            &crate::prompt::knowledge_text("", ""),
+            "g",
+        );
         let resumed = execute_run(
             &store,
             &gateway,
@@ -997,6 +1008,7 @@ mod tests {
             &out.run.id,
             None,
             None,
+            &initial,
         )
         .unwrap();
         assert_eq!(resumed.run.status, "completed_execution");
@@ -1134,6 +1146,12 @@ mod tests {
         let (run, created) = create_run(&store, &config).unwrap();
         assert!(created);
         assert_eq!(run.status, "running");
+        let initial = crate::prompt::assemble(
+            &crate::prompt::PromptEnv::default(),
+            &["read_file".to_string()],
+            &crate::prompt::knowledge_text("", ""),
+            "g",
+        );
         let out = execute_run(
             &store,
             &gateway,
@@ -1143,6 +1161,7 @@ mod tests {
             &run.id,
             Some(&flag),
             None,
+            &initial,
         )
         .unwrap();
         assert_eq!(out.run.status, "cancelled");
