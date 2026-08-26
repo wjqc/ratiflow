@@ -88,6 +88,11 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
     let schema_version = store.schema_version().unwrap_or(0);
     let initial_seq = outbox::latest_sequence(&store).unwrap_or(0);
 
+    // F11/M4：工具注册表过 tool-definition 契约校验（违例 fail-fast，不带着非法注册表服务）。
+    if let Err(e) = sg_agent::schema::validate_registry(&sg_agent::tools::registry()) {
+        eprintln!("{{\"level\":\"fatal\",\"msg\":\"tool registry schema violation: {e}\"}}");
+        std::process::exit(1);
+    }
     let db = db::Db::spawn(store);
     let app = Arc::new(state::AppState::new(
         db,

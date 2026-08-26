@@ -10,6 +10,7 @@ pub mod instructions;
 pub mod modelgw;
 pub mod prompt;
 pub mod rollout;
+pub mod schema;
 pub mod tools;
 pub use modelgw::{Budget, Gateway, Usage};
 
@@ -218,6 +219,11 @@ pub fn execute_run(
 
     let (mut messages, start_iteration, mut pending_proposal) =
         load_checkpoint(store, run_id).unwrap_or_else(|| (initial.prefix.clone(), 0, None));
+    log_rollout(
+        &mut rollout,
+        "instructions_assembled",
+        json!({"segments": prompt::segment_bytes(initial), "messages": messages.len()}),
+    );
     if run.status == "paused" {
         log_rollout(
             &mut rollout,
@@ -439,6 +445,11 @@ pub fn execute_run(
                 checkpoint(store, run_id, iteration, &messages, None);
                 log_rollout(
                     &mut rollout,
+                    "checkpoint_saved",
+                    json!({"iteration": iteration, "phase": "running"}),
+                );
+                log_rollout(
+                    &mut rollout,
                     "turn_completed",
                     json!({"iteration": iteration, "toolCalls": tool_calls}),
                 );
@@ -542,10 +553,15 @@ fn parse_decision(content: &str) -> Option<Decision> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
     let value: Value = serde_json::from_str(&content[start..=end]).ok()?;
+    let action = value["action"].as_str()?;
+    let arguments = value.get("arguments").cloned().unwrap_or(Value::Null);
+    let summary = value["summary"].as_str().unwrap_or_default();
+    // F11/M4：契约 schema 运行时校验（违例视同解析失败 → retry-nudge）。
+    schema::validate_decision(action, &arguments, summary).ok()?;
     Some(Decision {
-        action: value["action"].as_str()?.into(),
-        arguments: value["arguments"].to_string(),
-        summary: value["summary"].as_str().unwrap_or_default().into(),
+        action: action.into(),
+        arguments: arguments.to_string(),
+        summary: summary.into(),
     })
 }
 

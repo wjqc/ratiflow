@@ -46,6 +46,15 @@ web-test:
     - npm ci
     - npm run test
 
+contract-test:
+  stage: test
+  image: node:26
+  variables:
+    ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+  script:
+    - npm ci
+    - node tests/contract/run.mjs
+
 build:
   stage: build
   image: node:26
@@ -67,6 +76,8 @@ protocol-e2e:
   needs: [build]
   script:
     - node tests/e2e-protocol/e2e.mjs
+    - node tests/e2e-protocol/agent-e2e.mjs
+    - node tests/e2e-protocol/settings-e2e.mjs
 
 electron-e2e:
   stage: e2e
