@@ -507,78 +507,26 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             };
             let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
             if created {
-                // 工具上下文（F05/M0-③）：项目根来自工作项所属项目的 local_root；
-                // 工件草稿区 <dataDir>/artifacts/<runId>/。
-                let (project_id, local_root): (String, String) = store
-                    .with_conn(|conn| {
-                        conn.query_row(
-                            "SELECT p.id, COALESCE(p.local_root,'') FROM projects p
-                             JOIN workitems w ON w.project_id = p.id WHERE w.id=?1",
-                            [&workitem_id],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
-                        )
-                        .map_err(|_| sg_store::Error::Message("workitem_not_found".into()))
-                    })
-                    .map_err(store_err)?;
-                let ctx = sg_agent::tools::ToolCtx {
-                    mode: state.executor_mode,
-                    work_dir: if local_root.is_empty() {
-                        None
-                    } else {
-                        Some(std::path::PathBuf::from(&local_root))
-                    },
-                    artifacts_dir: store.data_dir.join("artifacts").join(&run.id),
-                };
-                let executor =
-                    crate::tool_exec::make_executor(ctx, state.run_store.clone(), project_id);
-                let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                state.runs.register(&run.id, flag.clone());
-                let run_store = state.run_store.clone();
-                let gateway = state.model.clone();
-                let policy = state.policy.clone();
-                let registry = state.runs.clone();
-                let run_id = run.id.clone();
-                // RunConfig 借用局部变量，任务需要 'static：克隆任务侧配置副本。
-                let t_workitem = workitem_id.clone();
-                let t_task = task_id.clone();
-                let t_goal = goal.clone();
-                let t_manifest = manifest_id.clone();
-                let t_allow = allowlist.clone();
-                let t_budget = budget.clone();
-                state.handle.spawn(async move {
-                    let run_id_inner = run_id.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        let config = sg_agent::RunConfig {
-                            workitem_id: &t_workitem,
-                            task_id: &t_task,
-                            goal: &t_goal,
-                            manifest_id: &t_manifest,
-                            tool_allowlist: &t_allow,
-                            idempotency_key: "",
-                            budget: &t_budget,
-                            max_iterations: 20,
-                        };
-                        sg_agent::execute_run(
-                            &run_store,
-                            &gateway,
-                            &policy,
-                            Some(executor.as_ref()),
-                            &config,
-                            &run_id_inner,
-                            Some(&flag),
-                        )
-                    })
-                    .await;
-                    // 终态/事件已由 execute_run 写库（失败也含在 result 中）；此处只做注册表清理。
-                    let _ = result;
-                    registry.unregister(&run_id);
-                });
+                spawn_run_task(state, store, &run.id)?;
             }
             Ok(json!({"runId": run.id, "status": run.status}))
         }
         "agent.get" => {
-            let run = sg_agent::get_run(store, &str_param(params, "runId")?).map_err(store_err)?;
-            Ok(serde_json::to_value(run).unwrap_or_default())
+            let run_id = str_param(params, "runId")?;
+            let run = sg_agent::get_run(store, &run_id).map_err(store_err)?;
+            let mut v = serde_json::to_value(&run).unwrap_or_default();
+            v["modelCalls"] = json!(sg_agent::count_model_calls(store, &run_id).unwrap_or(0));
+            // rollout 摘要（F04）：行数/字节/路径；全文查看走 logs.* 既有域。
+            let path = sg_agent::rollout::Rollout::path_for(&store.data_dir, &run_id);
+            v["rollout"] = match std::fs::read_to_string(&path) {
+                Ok(body) => json!({
+                    "lines": body.lines().count(),
+                    "bytes": body.len(),
+                    "path": path.to_string_lossy(),
+                }),
+                Err(_) => Value::Null,
+            };
+            Ok(v)
         }
         "agent.cancel" => {
             let run_id = str_param(params, "runId")?;
@@ -680,16 +628,49 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 &opt_str_param(params, "reason").unwrap_or_default(),
             )
             .map_err(store_err)?;
+            let decided_by = str_param(params, "decidedBy")?;
+            let reason = opt_str_param(params, "reason").unwrap_or_default();
             sg_store::audit::append(
                 store,
-                &str_param(params, "decidedBy")?,
+                &decided_by,
                 &format!("approval.{decision}"),
                 "approval",
                 &approval_id,
                 json!({"subjectId": appr.subject_id}),
             )
             .map_err(store_err)?;
-            Ok(serde_json::to_value(appr).unwrap_or_default())
+            // M1/F03 联动：审批主体是工具提案且其 Run 挂起 → 批准拉起恢复任务/拒绝收尾 failed。
+            let mut run_link = Value::Null;
+            if appr.subject_type == "tool_proposal" {
+                let proposal =
+                    sg_agent::get_proposal(store, &appr.subject_id).map_err(store_err)?;
+                if let Ok(linked) = sg_agent::get_run(store, &proposal.run_id) {
+                    if linked.status == "paused" {
+                        match decision.as_str() {
+                            "approved" => {
+                                spawn_run_task(state, store, &linked.id)?;
+                                run_link = json!({"runId": linked.id, "status": "resuming"});
+                            }
+                            _ => {
+                                let message = format!(
+                                    "审批拒绝：{}（{decided_by}）",
+                                    if reason.is_empty() {
+                                        "未提供理由"
+                                    } else {
+                                        reason.as_str()
+                                    }
+                                );
+                                sg_agent::fail_paused_run(store, &linked.id, &message)
+                                    .map_err(store_err)?;
+                                run_link = json!({"runId": linked.id, "status": "failed"});
+                            }
+                        }
+                    }
+                }
+            }
+            let mut out = serde_json::to_value(appr).unwrap_or_default();
+            out["run"] = run_link;
+            Ok(out)
         }
         "approval.listByWorkItem" => {
             let workitem_id = str_param(params, "workItemId")?;
@@ -1073,4 +1054,105 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+/// 派发 Run 任务（agent.start 与审批恢复共用，M1/F03）：
+/// 行配置重建 → ToolCtx/executor → rollout → tokio 任务（spawn_blocking 驱动循环，run_store 专属连接）。
+fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<(), RpcError> {
+    let run = sg_agent::get_run(store, run_id).map_err(store_err)?;
+    let (workitem_id, goal, manifest_id, allowlist, budget) =
+        sg_agent::row_config(store, run_id).map_err(store_err)?;
+    // 工具上下文（F05/M0-③）：项目根来自工作项所属项目的 local_root；
+    // 工件草稿区 <dataDir>/artifacts/<runId>/。
+    let (project_id, local_root): (String, String) = store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT p.id, COALESCE(p.local_root,'') FROM projects p
+                 JOIN workitems w ON w.project_id = p.id WHERE w.id=?1",
+                [&workitem_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| sg_store::Error::Message("workitem_not_found".into()))
+        })
+        .map_err(store_err)?;
+    let ctx = sg_agent::tools::ToolCtx {
+        mode: state.executor_mode,
+        work_dir: if local_root.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&local_root))
+        },
+        artifacts_dir: store.data_dir.join("artifacts").join(run_id),
+    };
+    let executor = crate::tool_exec::make_executor(ctx, state.run_store.clone(), project_id);
+    // rollout（F04）：打开失败不阻断 Run（观测数据可用性优先），记 stderr 继续。
+    let mut rollout = sg_agent::rollout::Rollout::open(&store.data_dir, run_id).ok();
+    if rollout.is_none() {
+        eprintln!("{{\"level\":\"warn\",\"msg\":\"rollout open failed for {run_id}\"}}");
+    }
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state.runs.register(run_id, flag.clone());
+    let run_store = state.run_store.clone();
+    let audit_store = state.run_store.clone();
+    let gateway = state.model.clone();
+    let policy = state.policy.clone();
+    let registry = state.runs.clone();
+    let run_id_owned = run_id.to_string();
+    let _ = run;
+    let t_workitem = workitem_id;
+    let t_goal = goal;
+    let t_manifest = manifest_id;
+    let t_allow = allowlist;
+    let t_budget = budget;
+    state.handle.spawn(async move {
+        let run_id_inner = run_id_owned.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            let mut rollout = rollout.take();
+            let config = sg_agent::RunConfig {
+                workitem_id: &t_workitem,
+                task_id: "",
+                goal: &t_goal,
+                manifest_id: &t_manifest,
+                tool_allowlist: &t_allow,
+                idempotency_key: "",
+                budget: &t_budget,
+                max_iterations: 20,
+            };
+            let out = sg_agent::execute_run(
+                &run_store,
+                &gateway,
+                &policy,
+                Some(executor.as_ref()),
+                &config,
+                &run_id_inner,
+                Some(&flag),
+                rollout.take(),
+            );
+            (out, rollout)
+        })
+        .await;
+        let (result, rollout) = joined.unwrap_or_else(|_| {
+            (
+                Err(sg_store::Error::Message("run task panicked".into())),
+                None,
+            )
+        });
+        // rollout 收尾：fsync + sha256 → 审计行（路径/行数/哈希；合规证据链仍是 audit+evidence）。
+        if let Some(ro) = rollout.and_then(|r| r.finish().ok()) {
+            let (lines, sha256) = ro;
+            let path = sg_agent::rollout::Rollout::path_for(&audit_store.data_dir, &run_id_owned);
+            let _ = sg_store::audit::append(
+                &audit_store,
+                "system",
+                "agent.rollout",
+                "agent_run",
+                &run_id_owned,
+                json!({"path": path.to_string_lossy(), "lines": lines, "sha256": sha256}),
+            );
+        }
+        // 终态/事件已由 execute_run 写库（失败也含在 result 中）；此处只做注册表清理。
+        let _ = result;
+        registry.unregister(&run_id_owned);
+    });
+    Ok(())
 }

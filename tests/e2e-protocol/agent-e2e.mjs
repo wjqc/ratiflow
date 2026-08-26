@@ -1,7 +1,7 @@
 // M0-② 协议级 Agent 生命周期 E2E：agent.start 唯一入口、非阻塞、事件推送、终态与幂等。
 // 前置：cargo build --release -p sixgates-core；无模型环境变量（FakeModel 脚本耗尽 → model_unavailable）。
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import readline from 'node:readline';
@@ -59,6 +59,25 @@ function assert(condition, label) {
     throw new Error(`agent-e2e 断言失败：${label}`);
   }
   console.log(`  ✓ ${label}`);
+}
+
+async function waitStatus(client, runId, predicate, capMs = 30000) {
+  const deadline = Date.now() + capMs;
+  for (;;) {
+    const run = await client.rpc('agent.get', { runId });
+    if (predicate(run.status)) return run;
+    if (Date.now() > deadline) throw new Error(`等待状态超时：${runId}（当前 ${run.status}）`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+async function waitEvent(client, type, capMs = 5000) {
+  const deadline = Date.now() + capMs;
+  while (Date.now() < deadline) {
+    if (client.events.some((e) => e.type === type)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
 }
 
 async function waitTerminal(client, runId, capMs = 15000) {
@@ -137,6 +156,9 @@ try {
     { content: '{"action":"run_command","arguments":{"argv":["wc","-c","NOTES.md"]},"summary":"统计"}', tokensIn: 10, tokensOut: 5 },
     { content: '{"action":"write_file","arguments":{"path":"drafts/out.md","content":"# M0-3 草稿"},"summary":"写草稿"}', tokensIn: 10, tokensOut: 5 },
     { content: '{"action":"final","summary":"工具链验证完成"}', tokensIn: 10, tokensOut: 5 },
+    // 拒绝场景（第二个 Run）：run_command → 暂停 → 拒绝（final 不应被消费）
+    { content: '{"action":"run_command","arguments":{"argv":["wc","-c","NOTES.md"]},"summary":"统计"}', tokensIn: 10, tokensOut: 5 },
+    { content: '{"action":"final","summary":"不应到达"}', tokensIn: 10, tokensOut: 5 },
   ];
   const scriptPath = join(tmpdir(), `sg-agent-e2e-script-${Date.now()}.json`);
   writeFileSync(scriptPath, JSON.stringify(script));
@@ -164,28 +186,92 @@ try {
     assert(names.includes('search_knowledge'), 'tool.list 含注册表新工具 search_knowledge');
     assert(tools.items.find((t) => (t.tool_id ?? t.name) === 'run_command').max_result_bytes > 0, 'tool.list 带限制字段 max_result_bytes');
 
+    // ===== M1/F03：run_command 高风险 → Run 暂停（而非作废/继续）=====
     const started = await toolClient.rpc('agent.start', {
       workItemId: wi.id, goal: '读文件→检索→命令→写草稿', contextManifestId: manifest.id,
       toolAllowlist: ['read_file', 'search_knowledge', 'run_command', 'write_file'],
       idempotencyKey: 'agent-e2e-tools-1',
     });
-    const run = await waitTerminal(toolClient, started.runId, 30000);
-    assert(run.status === 'completed_execution', `工具链 Run 终态 completed_execution（实际 ${run.status}：${run.result}）`);
+    let run = await waitStatus(toolClient, started.runId, (st) =>
+      ['paused', 'completed_execution', 'failed', 'cancelled'].includes(st));
+    assert(run.status === 'paused', `run_command 触发暂停（实际 ${run.status}：${run.result}）`);
+    assert(await waitEvent(toolClient, 'run.waiting_approval'), '收到 run.waiting_approval 通知');
 
-    const props = (await toolClient.rpc('agent.proposals', { runId: started.runId })).items;
-    const byTool = Object.fromEntries(props.map((p) => [p.tool, p]));
-    assert(props.length === 4, `4 个提案（实际 ${props.length}）`);
+    let props = (await toolClient.rpc('agent.proposals', { runId: started.runId })).items;
+    let byTool = Object.fromEntries(props.map((p) => [p.tool, p]));
+    assert(props.length === 3, `暂停时 3 个提案（实际 ${props.length}）`);
     assert(byTool.read_file.decision === 'executed' && byTool.read_file.result.includes('hello-m03'),
       'read_file 带真实参数读到真实内容');
     assert(byTool.search_knowledge.decision === 'executed' && byTool.search_knowledge.result.includes('NOTES.md'),
       'search_knowledge 库内检索命中项目文件');
-    assert(byTool.run_command.decision === 'rejected' && byTool.run_command.result.includes('approval_required'),
-      'run_command 高风险未批不执行（approval_required）');
+    assert(byTool.run_command.decision === 'proposed', 'run_command 提案保持 proposed（挂起）');
+
+    // 审批通过 → 恢复 → 完成；模型调用恰好 5 次（无重复计费）。
+    let pending = await toolClient.rpc('approval.list', { limit: 10 });
+    const appr = pending.items.find((a) => a.subject_type === 'tool_proposal') ?? pending.items[0];
+    const decided = await toolClient.rpc('approval.decide', {
+      approvalId: appr.id, decision: 'approved', decidedBy: 'e2e', reason: 'M1 恢复验证',
+    });
+    assert(decided?.run?.status === 'resuming', 'approval.decide 返回恢复联动');
+    run = await waitTerminal(toolClient, started.runId, 30000);
+    assert(run.status === 'completed_execution', `恢复后终态 completed（实际 ${run.status}：${run.result}）`);
+    assert(await waitEvent(toolClient, 'run.resumed'), '收到 run.resumed 通知');
+
+    props = (await toolClient.rpc('agent.proposals', { runId: started.runId })).items;
+    byTool = Object.fromEntries(props.map((p) => [p.tool, p]));
+    assert(props.length === 4, `4 个提案（实际 ${props.length}）`);
+    assert(byTool.run_command.decision === 'executed' && byTool.run_command.result.includes('NOTES.md'),
+      '恢复后执行挂起提案（wc -c 真实输出）');
     assert(byTool.write_file.decision === 'executed' && byTool.write_file.result.includes('written'),
       'write_file 落工件草稿区');
-    const pending = await toolClient.rpc('approval.list', { limit: 10 });
-    assert(pending.items.length >= 1, '审批中心出现 run_command 待审批项');
+    const got = await toolClient.rpc('agent.get', { runId: started.runId });
+    assert(got.modelCalls === 5, `模型调用恰好 5 次、不重复计费（实际 ${got.modelCalls}）`);
+    assert(got.rollout && got.rollout.lines >= 8, `rollout 摘要存在（${got.rollout?.lines ?? 0} 行）`);
 
+    // ===== M1/F03：拒绝路径 → Run failed（approval_rejected）=====
+    const wi2 = await toolClient.rpc('workitem.create', { projectId: project.id, title: '拒绝路径', description: '' });
+    const manifest2 = await toolClient.rpc('context.create', {
+      projectId: project.id, workItemId: wi2.id, query: 'e2e', selectedSources: [],
+    });
+    const started2 = await toolClient.rpc('agent.start', {
+      workItemId: wi2.id, goal: '将被拒绝', contextManifestId: manifest2.id,
+      toolAllowlist: ['run_command'], idempotencyKey: 'agent-e2e-tools-2',
+    });
+    const run2 = await waitStatus(toolClient, started2.runId, (st) => st === 'paused');
+    pending = await toolClient.rpc('approval.list', { limit: 10 });
+    const appr2 = pending.items.find((a) => a.subject_type === 'tool_proposal') ?? pending.items[0];
+    const rejected = await toolClient.rpc('approval.decide', {
+      approvalId: appr2.id, decision: 'rejected', decidedBy: 'e2e', reason: '风险过大',
+    });
+    assert(rejected?.run?.status === 'failed', '拒绝联动返回 failed');
+    const final2 = await toolClient.rpc('agent.get', { runId: started2.runId });
+    assert(final2.status === 'failed' && final2.result.includes('审批拒绝'), `Run 以审批拒绝收尾（${final2.result}）`);
+
+    // ===== M1/F04：rollout 入备份 + 秘密探针 + 篡改检测 =====
+    const bk = await toolClient.rpc('backup.create', {});
+    let verified = await toolClient.rpc('backup.verify', { backupId: bk.id });
+    assert(verified.status === 'verified', `备份 verify 通过（${verified.status}）`);
+    assert((verified.manifest.rolloutsCount ?? 0) >= 2, `manifest 带 rolloutsCount（${verified.manifest.rolloutsCount}）`);
+    // 秘密探针：扫备份目录全部文件（db + rollouts/）
+    const backupsDir = join(verified.path, '..');
+    let secretHits = 0;
+    for (const entry of readdirSync(backupsDir, { recursive: true })) {
+      const full = join(backupsDir, entry.toString());
+      let stat;
+      try { stat = statSync(full); } catch { continue; }
+      if (!stat.isFile()) continue;
+      const body = readFileSync(full, 'utf8');
+      if (/(sk-[A-Za-z0-9]{20}|ghp_[A-Za-z0-9]{20}|glpat-[A-Za-z0-9_-]{20}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY)/.test(body)) {
+        secretHits += 1;
+      }
+    }
+    assert(secretHits === 0, `备份目录秘密探针零命中（命中 ${secretHits}）`);
+    // 篡改一个 rollout 字节 → verify corrupt
+    const rolloutsDir = verified.path.replace(/\.db$/, '.rollouts');
+    const rolloutFiles = readdirSync(rolloutsDir);
+    appendFileSync(join(rolloutsDir, rolloutFiles[0]), 'tamper\n');
+    const corrupt = await toolClient.rpc('backup.verify', { backupId: bk.id });
+    assert(corrupt.status === 'corrupt', `篡改 rollout 后 verify corrupt（${corrupt.status}）`);
     console.log('\nAgent 工具链 E2E 通过。');
   } finally {
     toolClient.kill();

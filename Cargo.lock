@@ -588,6 +588,7 @@ dependencies = [
  "sg-integrations",
  "sg-policy",
  "sg-store",
+ "sha2",
 ]
 
 [[package]]
