@@ -579,7 +579,16 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
         })),
 
         // --- 执行沙箱设置 + 自检（S22） ---
-        "executor.settings.get" => Ok(settings::executor_ext::get(store).map_err(serr)?),
+        "executor.settings.get" => {
+            let mut v = settings::executor_ext::get(store).map_err(serr)?;
+            // F10/M3：附生效模式与来源（env > 设置 > 探测）。
+            let (mode, source) = crate::dispatch::effective_executor_mode(state, store);
+            v["effective"] = json!({
+                "mode": crate::dispatch::mode_str(mode),
+                "source": source,
+            });
+            Ok(v)
+        }
         "executor.settings.update" => Ok(settings::executor_ext::update(
             store,
             p.get("settings").unwrap_or(&Value::Null),

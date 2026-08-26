@@ -16,6 +16,8 @@ interface KnowledgeSettings {
   contextBudgetBytes?: number;
   instructionFileNames?: string[];
   maxInstructionBytes?: number;
+  autoCompactThresholdTokens?: number;
+  compactionKeepTurns?: number;
   revision?: number;
 }
 
@@ -29,6 +31,8 @@ const EMPTY: Required<Omit<KnowledgeSettings, 'revision'>> = {
   contextBudgetBytes: 65536,
   instructionFileNames: ['SixGates.md', 'AGENTS.md'],
   maxInstructionBytes: 32768,
+  autoCompactThresholdTokens: 24000,
+  compactionKeepTurns: 2,
 };
 
 export function KnowledgeDefaultsPage() {
@@ -135,6 +139,25 @@ export function KnowledgeDefaultsPage() {
                 <input id="kb-instrbytes" className="sg-input" type="number" min={1} max={256}
                   value={Math.floor((draft.maxInstructionBytes ?? EMPTY.maxInstructionBytes) / 1024)}
                   onChange={(e) => set('maxInstructionBytes', Number(e.target.value) * 1024)} />
+              </div>
+            </div>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection title="上下文压缩（F09）" description="输入估算超过阈值时自动压缩会话历史（保留冻结头与最近 K 轮工具往返，system 段不变）。">
+          <div className="sg-card sg-set-form">
+            <div className="sg-form-grid--2">
+              <div className="sg-field">
+                <label htmlFor="kb-compactthr">自动压缩阈值（tokens，估算 chars/4）</label>
+                <input id="kb-compactthr" className="sg-input" type="number" min={1000} max={200000}
+                  value={draft.autoCompactThresholdTokens ?? EMPTY.autoCompactThresholdTokens}
+                  onChange={(e) => set('autoCompactThresholdTokens', Number(e.target.value))} />
+              </div>
+              <div className="sg-field">
+                <label htmlFor="kb-compactkeep">保留最近工具轮数 K</label>
+                <input id="kb-compactkeep" className="sg-input" type="number" min={0} max={10}
+                  value={draft.compactionKeepTurns ?? EMPTY.compactionKeepTurns}
+                  onChange={(e) => set('compactionKeepTurns', Number(e.target.value))} />
               </div>
             </div>
           </div>

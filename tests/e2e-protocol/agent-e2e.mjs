@@ -156,9 +156,11 @@ try {
     { content: '{"action":"run_command","arguments":{"argv":["wc","-c","NOTES.md"]},"summary":"统计"}', tokensIn: 10, tokensOut: 5 },
     { content: '{"action":"write_file","arguments":{"path":"drafts/out.md","content":"# M0-3 草稿"},"summary":"写草稿"}', tokensIn: 10, tokensOut: 5 },
     { content: '{"action":"final","summary":"工具链验证完成"}', tokensIn: 10, tokensOut: 5 },
-    // 拒绝场景（第二个 Run）：run_command → 暂停 → 拒绝（final 不应被消费）
+    // 拒绝场景（第二个 Run）：run_command → 暂停 → 拒绝（后续不应被消费）
     { content: '{"action":"run_command","arguments":{"argv":["wc","-c","NOTES.md"]},"summary":"统计"}', tokensIn: 10, tokensOut: 5 },
-    { content: '{"action":"final","summary":"不应到达"}', tokensIn: 10, tokensOut: 5 },
+    // M3/F10 场景3：toolPolicy 免批覆盖后 run_command 直接执行
+    { content: '{"action":"run_command","arguments":{"argv":["wc","-c","NOTES.md"]},"summary":"免批执行"}', tokensIn: 10, tokensOut: 5 },
+    { content: '{"action":"final","summary":"免批完成"}', tokensIn: 10, tokensOut: 5 },
   ];
   const scriptPath = join(tmpdir(), `sg-agent-e2e-script-${Date.now()}.json`);
   writeFileSync(scriptPath, JSON.stringify(script));
@@ -289,7 +291,92 @@ try {
     appendFileSync(join(rolloutsDir, rolloutFiles[0]), 'tamper\n');
     const corrupt = await toolClient.rpc('backup.verify', { backupId: bk.id });
     assert(corrupt.status === 'corrupt', `篡改 rollout 后 verify corrupt（${corrupt.status}）`);
+
+    // ===== M3/F10 场景3：toolPolicy 免批覆盖 + 真实权限快照落库 =====
+    const tl = await toolClient.rpc('tool.list');
+    const rc = tl.items.find((t) => t.tool_id === 'run_command');
+    await toolClient.rpc('toolPolicy.update', {
+      toolId: 'run_command', expectedRevision: rc.revision ?? 0, requiresApproval: false,
+    });
+    const wi3 = await toolClient.rpc('workitem.create', { projectId: project.id, title: '免批覆盖', description: '' });
+    const manifest3 = await toolClient.rpc('context.create', {
+      projectId: project.id, workItemId: wi3.id, query: 'hello', selectedSources: [source.id],
+    });
+    const s3 = await toolClient.rpc('agent.start', {
+      workItemId: wi3.id, goal: '免批执行', contextManifestId: manifest3.id,
+      toolAllowlist: ['run_command'], idempotencyKey: 'agent-e2e-tools-3',
+    });
+    assert(s3.instructions?.modeSource === 'env', `执行模式来源标记（${s3.instructions?.modeSource}）`);
+    const run3 = await waitTerminal(toolClient, s3.runId, 30000);
+    assert(run3.status === 'completed_execution', `免批后直接完成、无暂停（实际 ${run3.status}：${run3.result}）`);
+    const props3 = (await toolClient.rpc('agent.proposals', { runId: s3.runId })).items;
+    assert(props3.length === 1 && props3[0].tool === 'run_command' && props3[0].decision === 'executed',
+      '免批覆盖后 run_command 直接执行');
+    const g3 = await toolClient.rpc('agent.get', { runId: s3.runId });
+    assert(g3.policySnapshot && g3.policySnapshot !== 'default' && g3.policySnapshot.includes('run_command'),
+      '真实权限快照落库（非 default 占位）');
+    assert(g3.policySnapshot.includes('settings'), '快照含设置来源标记');
     console.log('\nAgent 工具链 E2E 通过。');
+
+    // ===== M3/F10 场景4：executionProfile 设置域模式来源（独立 core，无 env 覆盖）=====
+    const dataDir4 = mkdtempSync(join(tmpdir(), 'sg-agent-e2e4-'));
+    const projDir4 = mkdtempSync(join(tmpdir(), 'sg-agent-e2e4-proj-'));
+    writeFileSync(join(projDir4, 'NOTES.md'), 'hello-m3');
+    const script4 = [
+      { content: '{"action":"read_file","arguments":{"path":"NOTES.md"},"summary":"读取A"}', tokensIn: 10, tokensOut: 5 },
+      { content: '{"action":"final","summary":"A完成"}', tokensIn: 10, tokensOut: 5 },
+      { content: '{"action":"read_file","arguments":{"path":"NOTES.md"},"summary":"读取B"}', tokensIn: 10, tokensOut: 5 },
+      { content: '{"action":"final","summary":"B完成"}', tokensIn: 10, tokensOut: 5 },
+    ];
+    const script4Path = join(tmpdir(), `sg-agent-e2e4-script-${Date.now()}.json`);
+    writeFileSync(script4Path, JSON.stringify(script4));
+    const modeClient = new CoreClient(CORE, dataDir4, {
+      SIXGATES_FAKE_MODEL_SCRIPT: script4Path, // 无 EXEC_MODE：默认来源=探测
+    });
+    try {
+      const project4 = await modeClient.rpc('project.create', {
+        gitlabInstance: 'x', namespace: 'n', project: 'p', name: '模式来源', localRoot: projDir4,
+      });
+      const source4 = await modeClient.rpc('knowledge.create', {
+        projectId: project4.id, kind: 'repo_path', name: 'p4', locator: projDir4,
+      });
+      await modeClient.rpc('knowledge.scan', { sourceId: source4.id, projectRoot: projDir4 });
+      const wi4 = await modeClient.rpc('workitem.create', { projectId: project4.id, title: '模式来源', description: '' });
+      const manifest4 = await modeClient.rpc('context.create', {
+        projectId: project4.id, workItemId: wi4.id, query: 'hello', selectedSources: [source4.id],
+      });
+      // Run A：默认探测来源（Docker 读不到宿主文件 / Disabled 拒绝）——都读不到 hello-m3。
+      const sa = await modeClient.rpc('agent.start', {
+        workItemId: wi4.id, goal: 'A', contextManifestId: manifest4.id,
+        toolAllowlist: ['read_file'], idempotencyKey: 'mode-a',
+      });
+      const runA = await waitTerminal(modeClient, sa.runId, 30000);
+      assert(runA.status === 'completed_execution', `Run A 完成（${runA.status}）`);
+      const propA = (await modeClient.rpc('agent.proposals', { runId: sa.runId })).items[0];
+      assert(!propA.result.includes('hello-m3'), `默认来源（探测）读不到宿主文件内容（decision=${propA.decision}）`);
+      // 设置域生效：executionProfile → safe_restricted（env 缺省时覆盖探测）。
+      await modeClient.rpc('executor.settings.update', {
+        settings: { mode: 'safe_restricted', unsafeConfirmed: false }, expectedRevision: 0,
+      });
+      const eff = await modeClient.rpc('executor.settings.get', {});
+      assert(eff.effective?.mode === 'safe_restricted' && eff.effective?.source === 'settings',
+        `生效模式来源=设置（${JSON.stringify(eff.effective)}）`);
+      const sb = await modeClient.rpc('agent.start', {
+        workItemId: wi4.id, goal: 'B', contextManifestId: manifest4.id,
+        toolAllowlist: ['read_file'], idempotencyKey: 'mode-b',
+      });
+      const runB = await waitTerminal(modeClient, sb.runId, 30000);
+      assert(runB.status === 'completed_execution', `Run B 完成（${runB.status}）`);
+      const propB = (await modeClient.rpc('agent.proposals', { runId: sb.runId })).items[0];
+      assert(propB.decision === 'executed' && propB.result.includes('hello-m3'),
+        `设置来源生效：read_file 读到真实内容（decision=${propB.decision}）`);
+      console.log('Agent 模式来源 E2E 通过。');
+    } finally {
+      modeClient.kill();
+      rmSync(dataDir4, { recursive: true, force: true });
+      rmSync(projDir4, { recursive: true, force: true });
+      rmSync(script4Path, { force: true });
+    }
   } finally {
     toolClient.kill();
     rmSync(dataDir2, { recursive: true, force: true });

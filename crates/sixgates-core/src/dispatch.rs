@@ -28,6 +28,7 @@ fn store_err(e: Error) -> RpcError {
         ("not_found", ErrorCode::NotFound),
         ("path_outside_project", ErrorCode::PathOutsideProject),
         ("budget_exhausted", ErrorCode::BudgetExceeded),
+        ("context_too_large", ErrorCode::ContextTooLarge),
         ("approval_invalid", ErrorCode::ApprovalInvalid),
         ("model_", ErrorCode::ModelUnavailable),
         ("preflight_failed", ErrorCode::Conflict),
@@ -215,6 +216,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let env = sg_agent::prompt::PromptEnv {
                 mode: Some(state.executor_mode),
                 work_dir_label: root.as_ref().map(|p| p.to_string_lossy().to_string()),
+                requires_approval_tools: vec!["run_command".into()],
             };
             let initial =
                 sg_agent::prompt::assemble(&env, &["read_file".to_string()], &knowledge, "");
@@ -555,6 +557,19 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let run = sg_agent::get_run(store, &run_id).map_err(store_err)?;
             let mut v = serde_json::to_value(&run).unwrap_or_default();
             v["modelCalls"] = json!(sg_agent::count_model_calls(store, &run_id).unwrap_or(0));
+            // F10：真实权限快照（'default' 为旧占位）。
+            let snap_raw: String = store
+                .with_conn(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT policy_snapshot FROM agent_runs WHERE id=?1",
+                            [&run_id],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .unwrap_or_default())
+                })
+                .unwrap_or_default();
+            v["policySnapshot"] = json!(snap_raw);
             // rollout 摘要（F04）：行数/字节/路径；全文查看走 logs.* 既有域。
             let path = sg_agent::rollout::Rollout::path_for(&store.data_dir, &run_id);
             v["rollout"] = match std::fs::read_to_string(&path) {
@@ -1095,6 +1110,93 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// F10/M3：装配运行时权限快照——注册表为工具权威（risk/data_level/max_result_bytes/timeout），
+/// toolPolicy 全局行覆盖 enabled/requiresApproval/risk；enabled=false 即从规则集中移除（策略拒绝）。
+fn assemble_policy_snapshot(store: &Store) -> (sg_policy::Snapshot, Value) {
+    let overrides = sg_settings::policy_ext::tool_list(store).unwrap_or_default();
+    let mut rules = Vec::new();
+    let mut sources = Vec::new();
+    for def in sg_agent::tools::registry() {
+        let o = overrides
+            .iter()
+            .find(|o| o.tool_id == def.name && o.project_id.is_empty());
+        if let Some(o) = o {
+            if !o.enabled {
+                sources.push(json!({"tool": def.name, "source": "settings", "enabled": false}));
+                continue;
+            }
+        }
+        let risk = match o.map(|o| o.risk.as_str()) {
+            Some("low") => sg_policy::Risk::Low,
+            Some("medium") => sg_policy::Risk::Medium,
+            Some("high") => sg_policy::Risk::High,
+            _ => def.risk,
+        };
+        let requires_approval = o
+            .map(|o| o.requires_approval)
+            .unwrap_or(def.risk == sg_policy::Risk::High);
+        rules.push(sg_policy::ToolRule {
+            tool: def.name.to_string(),
+            risk,
+            requires_approval,
+            data_level: def.data_level.into(),
+            max_result_bytes: def.max_result_bytes as i64,
+            timeout_sec: def.timeout_sec,
+        });
+        sources.push(json!({
+            "tool": def.name,
+            "source": if o.is_some() { "settings" } else { "registry" },
+            "requiresApproval": requires_approval,
+        }));
+    }
+    (
+        sg_policy::Snapshot {
+            tool_rules: rules,
+            approval_ttl_secs: 3600,
+        },
+        json!({"sources": sources}),
+    )
+}
+
+/// F10/M3：执行模式生效来源——env 覆盖（CI 优先）> 设置域 executionProfile（unsafe 需双确认）> 探测。
+pub(crate) fn mode_str(m: sg_executor::Mode) -> &'static str {
+    match m {
+        sg_executor::Mode::Docker => "docker",
+        sg_executor::Mode::SafeRestricted => "safe_restricted",
+        sg_executor::Mode::UnsafeExplicit => "unsafe_explicit",
+        sg_executor::Mode::Disabled => "disabled",
+    }
+}
+
+pub(crate) fn effective_executor_mode(
+    state: &AppState,
+    store: &Store,
+) -> (sg_executor::Mode, &'static str) {
+    if let Some(m) = std::env::var("SIXGATES_EXEC_MODE")
+        .ok()
+        .and_then(|m| match m.as_str() {
+            "docker" => Some(sg_executor::Mode::Docker),
+            "safe_restricted" => Some(sg_executor::Mode::SafeRestricted),
+            "unsafe_explicit" => Some(sg_executor::Mode::UnsafeExplicit),
+            "disabled" => Some(sg_executor::Mode::Disabled),
+            _ => None,
+        })
+    {
+        return (m, "env");
+    }
+    let prof = sg_settings::executor_ext::get(store).unwrap_or_else(|_| json!({}));
+    let confirmed = prof["unsafeConfirmed"].as_bool() == Some(true);
+    match prof["mode"].as_str() {
+        Some("docker") if sg_executor::docker_available() => {
+            (sg_executor::Mode::Docker, "settings")
+        }
+        Some("safe_restricted") => (sg_executor::Mode::SafeRestricted, "settings"),
+        Some("unsafe_explicit") if confirmed => (sg_executor::Mode::UnsafeExplicit, "settings"),
+        Some("disabled") => (sg_executor::Mode::Disabled, "settings"),
+        _ => (state.executor_mode, "detected"),
+    }
+}
+
 /// 派发 Run 任务（agent.start 与审批恢复共用，M1/F03）：
 /// 行配置重建 → ToolCtx/executor → rollout → tokio 任务（spawn_blocking 驱动循环，run_store 专属连接）。
 fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value, RpcError> {
@@ -1119,8 +1221,69 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
     } else {
         Some(std::path::PathBuf::from(&local_root))
     };
+    // F10：权限快照与生效执行模式——已存快照（暂停恢复）原样复用（运行中不受设置变更影响），
+    // 否则装配（注册表+toolPolicy 覆盖）并落库 policy_snapshot 列。
+    let parse_mode = |v: &str| match v {
+        "docker" => Some(sg_executor::Mode::Docker),
+        "safe_restricted" => Some(sg_executor::Mode::SafeRestricted),
+        "unsafe_explicit" => Some(sg_executor::Mode::UnsafeExplicit),
+        "disabled" => Some(sg_executor::Mode::Disabled),
+        _ => None,
+    };
+    let existing_snap: String = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT policy_snapshot FROM agent_runs WHERE id=?1",
+                    [run_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap_or_default())
+        })
+        .unwrap_or_default();
+    let (policy_snapshot, snapshot_envelope, mode, mode_source) = if existing_snap.starts_with('{')
+    {
+        match serde_json::from_str::<Value>(&existing_snap)
+            .ok()
+            .and_then(|v| {
+                Some((
+                    serde_json::from_value::<sg_policy::Snapshot>(v["snapshot"].clone()).ok()?,
+                    v,
+                ))
+            }) {
+            Some((snap, v)) => {
+                let m = v["mode"]
+                    .as_str()
+                    .and_then(parse_mode)
+                    .unwrap_or(state.executor_mode);
+                (snap, v, m, "stored")
+            }
+            None => {
+                let (snap, _) = assemble_policy_snapshot(store);
+                let (m, src) = effective_executor_mode(state, store);
+                (snap, json!(null), m, src)
+            }
+        }
+    } else {
+        let (snap, sources) = assemble_policy_snapshot(store);
+        let (m, src) = effective_executor_mode(state, store);
+        let envelope = json!({
+            "snapshot": serde_json::to_value(&snap).unwrap_or_default(),
+            "sources": sources["sources"],
+            "mode": mode_str(m),
+            "modeSource": src,
+        });
+        let _ = store.with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_runs SET policy_snapshot=?1 WHERE id=?2",
+                rusqlite::params![envelope.to_string(), run_id],
+            )?;
+            Ok(())
+        });
+        (snap, envelope, m, src)
+    };
     let ctx = sg_agent::tools::ToolCtx {
-        mode: state.executor_mode,
+        mode,
         work_dir: work_dir.clone(),
         artifacts_dir: store.data_dir.join("artifacts").join(run_id),
     };
@@ -1153,10 +1316,26 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
                 .join("\n\n")
         })
         .unwrap_or_default();
+    let compact_policy = sg_agent::CompactPolicy {
+        threshold_tokens: knowledge_settings
+            .get("autoCompactThresholdTokens")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(24000) as usize,
+        keep_turns: knowledge_settings
+            .get("compactionKeepTurns")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(2) as usize,
+    };
     let knowledge = sg_agent::prompt::knowledge_text(&instr_text, &blocks_text);
     let env = sg_agent::prompt::PromptEnv {
-        mode: Some(state.executor_mode),
+        mode: Some(mode),
         work_dir_label: work_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+        requires_approval_tools: policy_snapshot
+            .tool_rules
+            .iter()
+            .filter(|r| r.requires_approval)
+            .map(|r| r.tool.clone())
+            .collect(),
     };
     let initial = sg_agent::prompt::assemble(&env, &allowlist, &knowledge, &goal);
     let summary = json!({
@@ -1167,6 +1346,13 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         "knowledgeBytes": blocks["totalBytes"].clone(),
         "knowledgeExcluded": blocks["excludedCount"].clone(),
         "promptBytes": sg_agent::prompt::segment_bytes(&initial),
+        "modeSource": mode_source,
+        "policyRuleCount": policy_snapshot.tool_rules.len(),
+        "policySources": if snapshot_envelope.is_null() {
+            json!(null)
+        } else {
+            snapshot_envelope["sources"].clone()
+        },
     });
     // rollout（F04）：打开失败不阻断 Run（观测数据可用性优先），记 stderr 继续。
     let mut rollout = sg_agent::rollout::Rollout::open(&store.data_dir, run_id).ok();
@@ -1178,7 +1364,7 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
     let run_store = state.run_store.clone();
     let audit_store = state.run_store.clone();
     let gateway = state.model.clone();
-    let policy = state.policy.clone();
+    let policy = policy_snapshot.clone();
     let registry = state.runs.clone();
     let run_id_owned = run_id.to_string();
     let _ = run;
@@ -1189,6 +1375,8 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
     let t_budget = budget;
     let initial = std::sync::Arc::new(initial);
     let initial_for_task = initial.clone();
+    let compact_policy = std::sync::Arc::new(compact_policy);
+    let compact_for_task = compact_policy.clone();
     let summary = std::sync::Arc::new(summary);
     let summary_for_task = summary.clone();
     state.handle.spawn(async move {
@@ -1196,6 +1384,7 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         let joined = tokio::task::spawn_blocking(move || {
             let mut rollout = rollout.take();
             let initial = initial_for_task;
+            let compact_policy = compact_for_task;
             let summary = summary_for_task;
             let config = sg_agent::RunConfig {
                 workitem_id: &t_workitem,
@@ -1221,6 +1410,7 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
                 Some(&flag),
                 rollout.take(),
                 &initial,
+                &compact_policy,
             );
             (out, rollout)
         })
