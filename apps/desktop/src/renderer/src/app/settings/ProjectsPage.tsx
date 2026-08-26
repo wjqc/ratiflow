@@ -170,11 +170,11 @@ export function ProjectsPage() {
     setEditing(p);
     setEditForm({
       name: p.name,
-      localRoot: p.localRoot,
-      gitlabInstance: p.gitlabInstance,
+      localRoot: p.local_root,
+      gitlabInstance: p.gitlab_instance,
       namespace: p.namespace,
       project: p.project,
-      defaultBranch: p.defaultBranch,
+      defaultBranch: p.default_branch,
     });
   };
 
@@ -291,14 +291,14 @@ export function ProjectsPage() {
                 <tr key={p.id}>
                   <td>
                     <div style={{ fontWeight: 500 }}>{p.name}</div>
-                    <div className="sg-path">{p.localRoot || '未设置本地目录'}</div>
+                    <div className="sg-path">{p.local_root || '未设置本地目录'}</div>
                   </td>
                   <td>
-                    <span className="sg-code">{p.gitlabInstance}</span>{' '}
+                    <span className="sg-code">{p.gitlab_instance}</span>{' '}
                     <span className="sg-muted">
                       {p.namespace}/{p.project}
                     </span>
-                    <div className="sg-hint">分支 {p.defaultBranch}</div>
+                    <div className="sg-hint">分支 {p.default_branch}</div>
                   </td>
                   <td>
                     <StatusPill

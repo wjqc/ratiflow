@@ -1,17 +1,25 @@
 // 设置中心共享的 RPC 载荷类型（字段与 core 侧 dispatch 实际返回对齐）。
 
 export interface IntegrationCheck {
-  id: 'gitlab' | 'model' | 'ssh';
-  name: string;
-  status: 'ready' | 'pending' | 'error' | 'disabled';
+  checkId: string;
+  label: string;
+  scope: string;
+  status: string;
+  severity: string;
+  durationMs: number;
   detail: string;
+  fixTarget: string;
 }
 
 export interface LocalCheck {
-  id: 'core' | 'executor' | 'sqlite';
-  name: string;
-  status: 'ready' | 'error';
+  checkId: string;
+  label: string;
+  scope: string;
+  status: string;
+  severity: string;
+  durationMs: number;
   detail: string;
+  fixTarget: string;
 }
 
 export interface DiagnosticsReport {
@@ -29,14 +37,14 @@ export interface CoreVersionInfo {
 export interface ProjectRow {
   id: string;
   name: string;
-  gitlabInstance: string;
+  gitlab_instance: string;
   namespace: string;
   project: string;
-  defaultBranch: string;
-  localRoot: string;
-  status: 'ready' | 'archived';
-  createdAt?: string;
-  updatedAt?: string;
+  default_branch: string;
+  local_root: string;
+  status: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface ProjectListResult {
@@ -45,23 +53,38 @@ export interface ProjectListResult {
 
 export interface AuditEvent {
   seq: number;
-  time: string;
+  createdAt: string;
   actor: string;
   action: string;
   targetType: string;
   targetId?: string;
-  detailJson: string;
+  detail: unknown;
 }
 
 export interface AuditListResult {
   items: AuditEvent[];
 }
 
-export interface BackupManifest {
+export interface BackupRecord {
+  id: string;
   path: string;
-  createdAt: string;
-  coreVersion: string;
-  schemaVersion: number;
-  sha256: string;
-  objectsCount: Record<string, number>;
+  format_version: number;
+  schema_version: number;
+  size_bytes: number;
+  digest: string;
+  verified: boolean;
+  problems: unknown;
+  status: string;
+  manifest: {
+    schemaVersion: number;
+    snapshotSha256: string;
+    objectsCount: Record<string, number>;
+    objectsRootHash: string;
+    rolloutsCount: number;
+    rolloutsRootHash: string;
+    sixgatesVersion: string;
+    createdAt: string;
+  };
+  created_at: string;
+  updated_at: string;
 }

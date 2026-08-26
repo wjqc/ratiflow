@@ -52,9 +52,8 @@ export function ExecutionPage() {
     setSaving(true); setError(null); setNotice(null);
     try {
       await rpc('executor.settings.update', {
-        settings: draft,
+        settings: { ...draft, unsafeConfirmed: draft.mode === 'unsafe_explicit' },
         expectedRevision: value?.revision ?? 0,
-        unsafeConfirmed: draft.mode === 'unsafe_explicit',
       });
       setNotice('执行设置已保存');
       await load();

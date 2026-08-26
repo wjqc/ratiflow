@@ -41,9 +41,9 @@ export function ModelsPage() {
     setError(null); setNotice(null);
     try {
       await rpc('modelProfile.create', {
-        name: form.name.trim(), provider_kind: 'openai_compatible',
-        base_url: form.baseUrl.trim(), credential_ref_id: form.credentialRefId.trim() || undefined,
-        default_model: form.defaultModel.trim(),
+        name: form.name.trim(), providerKind: 'openai_compatible',
+        baseUrl: form.baseUrl.trim(), credentialRefId: form.credentialRefId.trim() || undefined,
+        defaultModel: form.defaultModel.trim(),
       });
       setNotice(`Provider「${form.name.trim()}」已创建`);
       setForm(EMPTY); setCreating(false);
@@ -55,7 +55,7 @@ export function ModelsPage() {
     if (!window.confirm(`删除 Provider「${p.name}」？不可撤销。`)) return;
     setError(null);
     try {
-      await rpc('modelProfile.remove', { profile_id: p.id, expected_revision: p.revision });
+      await rpc('modelProfile.remove', { profileId: p.id, expectedRevision: p.revision });
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
   };
@@ -63,7 +63,7 @@ export function ModelsPage() {
   const test = async (p: ModelProfile) => {
     setTesting(p.id); setTestResult(null); setError(null);
     try {
-      setTestResult(await rpc<{ status: string; steps: TestStep[] }>('modelProfile.test', { profile_id: p.id }));
+      setTestResult(await rpc<{ status: string; steps: TestStep[] }>('modelProfile.test', { profileId: p.id }));
     } catch (e) { setError(e instanceof Error ? e.message : '测试失败'); }
     finally { setTesting(''); }
   };

@@ -53,7 +53,7 @@ export function CredentialsPage() {
     if (!rotateSecret) return;
     setError(null);
     try {
-      await rpc('credentialRef.replace', { ref_id: ref.id, secret: rotateSecret, expected_revision: ref.revision });
+      await rpc('credentialRef.replace', { refId: ref.id, secret: rotateSecret, expectedRevision: ref.revision });
       setNotice(`「${ref.name}」已轮换`);
       setRotating(''); setRotateSecret('');
       await load();
@@ -63,7 +63,7 @@ export function CredentialsPage() {
   const verify = async (ref: CredentialRef) => {
     setError(null); setNotice(null);
     try {
-      const res = await rpc<CredentialRef>('credentialRef.verify', { ref_id: ref.id });
+      const res = await rpc<CredentialRef>('credentialRef.verify', { refId: ref.id });
       setNotice(`「${ref.name}」验证：${res.status === 'active' ? '可用' : res.status}`);
     } catch (e) { setError(e instanceof Error ? e.message : '验证失败'); }
   };
@@ -72,7 +72,7 @@ export function CredentialsPage() {
     if (!window.confirm(`删除凭据「${ref.name}」？引用方将进入 degraded，不回退到其他秘密。`)) return;
     setError(null);
     try {
-      await rpc('credentialRef.remove', { ref_id: ref.id, expected_revision: ref.revision, force: true });
+      await rpc('credentialRef.remove', { refId: ref.id, expectedRevision: ref.revision, force: true });
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
   };

@@ -48,7 +48,7 @@ export default function SettingsShell({ section }: { section?: string }) {
 
   const dotFor = (id: SettingsRouteId): DotTone | null => {
     if (!diag) return null;
-    const hit = diag.integrations.find((c) => DOT_TARGET[c.id] === id && c.status !== 'ready');
+    const hit = diag.integrations.find((c) => DOT_TARGET[c.checkId] === id && c.status !== 'ready');
     if (!hit) return null;
     return hit.status === 'pending' ? 'warn' : 'error';
   };

@@ -10,14 +10,6 @@ import { IconRefresh, IconX } from '../../components/Icons';
 
 const PAGE_SIZE = 50;
 
-function parseDetail(json: string): unknown {
-  try {
-    return JSON.parse(json);
-  } catch {
-    return json;
-  }
-}
-
 export function AuditPage() {
   const [items, setItems] = useState<AuditEvent[]>([]);
   const [keyword, setKeyword] = useState('');
@@ -156,8 +148,8 @@ export function AuditPage() {
               <tbody>
                 {filtered.map((e) => (
                   <tr key={e.seq} className={selected?.seq === e.seq ? 'is-selected' : ''}>
-                    <td className="sg-muted" title={formatDateTime(e.time)}>
-                      {relativeTime(e.time)}
+                    <td className="sg-muted" title={formatDateTime(e.createdAt)}>
+                      {relativeTime(e.createdAt)}
                     </td>
                     <td>{e.actor}</td>
                     <td>
@@ -208,7 +200,7 @@ export function AuditPage() {
             <div className="sg-drawer-body">
               <div className="sg-kv">
                 <span className="sg-kv-k">时间</span>
-                <span>{formatDateTime(selected.time)}</span>
+                <span>{formatDateTime(selected.createdAt)}</span>
                 <span className="sg-kv-k">actor</span>
                 <span>{selected.actor}</span>
                 <span className="sg-kv-k">动作</span>
@@ -219,8 +211,8 @@ export function AuditPage() {
                   {selected.targetId ? ` / ${selected.targetId}` : ''}
                 </span>
               </div>
-              <h3 className="sg-set-pending-title" style={{ marginTop: 16 }}>detailJson（已脱敏）</h3>
-              <pre className="sg-json-view">{redactedJson(parseDetail(selected.detailJson))}</pre>
+              <h3 className="sg-set-pending-title" style={{ marginTop: 16 }}>detail（已脱敏）</h3>
+              <pre className="sg-json-view">{redactedJson(selected.detail)}</pre>
             </div>
           </aside>
         </>

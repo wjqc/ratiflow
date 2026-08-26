@@ -40,8 +40,8 @@ export function GitlabPage() {
     e.preventDefault(); setError(null); setNotice(null);
     try {
       await rpc('gitlabProfile.create', {
-        name: form.name.trim(), base_url: form.baseUrl.trim(),
-        credential_ref_id: form.credentialRefId.trim() || undefined,
+        name: form.name.trim(), baseUrl: form.baseUrl.trim(),
+        credentialRefId: form.credentialRefId.trim() || undefined,
       });
       setNotice(`实例「${form.name.trim()}」已创建`);
       setForm(EMPTY); setCreating(false);
@@ -53,14 +53,14 @@ export function GitlabPage() {
     if (!window.confirm(`删除实例「${p.name}」？不可撤销。`)) return;
     setError(null);
     try {
-      await rpc('gitlabProfile.remove', { profile_id: p.id, expected_revision: p.revision });
+      await rpc('gitlabProfile.remove', { profileId: p.id, expectedRevision: p.revision });
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
   };
 
   const test = async (p: GitlabProfile) => {
     setTesting(p.id); setTestResult(null); setError(null);
-    try { setTestResult(await rpc<{ status: string; steps: TestStep[] }>('gitlabProfile.test', { profile_id: p.id })); }
+    try { setTestResult(await rpc<{ status: string; steps: TestStep[] }>('gitlabProfile.test', { profileId: p.id })); }
     catch (e) { setError(e instanceof Error ? e.message : '测试失败'); }
     finally { setTesting(''); }
   };
@@ -68,7 +68,7 @@ export function GitlabPage() {
   const fetchUser = async (p: GitlabProfile) => {
     setCurrentUser(''); setError(null);
     try {
-      const u = await rpc<{ username?: string }>('gitlabProfile.currentUser', { profile_id: p.id });
+      const u = await rpc<{ username?: string }>('gitlabProfile.currentUser', { profileId: p.id });
       setCurrentUser(u.username ?? '未知用户');
       setNotice(`当前用户：${u.username ?? '未知'}`);
     } catch (e) { setError(e instanceof Error ? e.message : '读取用户失败'); }

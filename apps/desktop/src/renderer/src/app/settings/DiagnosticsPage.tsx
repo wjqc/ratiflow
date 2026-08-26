@@ -19,10 +19,10 @@ export const FIX_TARGET: Record<string, SettingsRouteId> = {
   executor: 'execution',
 };
 
-function pillKind(status: IntegrationCheck['status'] | LocalCheck['status']) {
+function pillKind(status: string) {
   if (status === 'ready') return 'ready' as const;
   if (status === 'pending') return 'pending' as const;
-  if (status === 'disabled') return 'readonly' as const;
+  if (status === 'disabled' || status === 'needs_configuration') return 'readonly' as const;
   return 'error' as const;
 }
 
@@ -45,13 +45,13 @@ function CheckTable({
       </thead>
       <tbody>
         {checks.map((c) => (
-          <tr key={c.id}>
-            <td>{c.name}</td>
+          <tr key={c.checkId}>
+            <td>{c.label}</td>
             <td><StatusPill kind={pillKind(c.status)} /></td>
             <td className="sg-muted" style={{ wordBreak: 'break-all' }}>{c.detail}</td>
             <td>
-              {FIX_TARGET[c.id] ? (
-                <button className="sg-link-btn" onClick={() => onNavigate(FIX_TARGET[c.id])}>
+              {FIX_TARGET[c.checkId] ? (
+                <button className="sg-link-btn" onClick={() => onNavigate(FIX_TARGET[c.checkId])}>
                   去处理 <IconChevronRight size={12} />
                 </button>
               ) : (

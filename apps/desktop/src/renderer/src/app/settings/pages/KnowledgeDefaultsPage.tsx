@@ -42,14 +42,17 @@ export function KnowledgeDefaultsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
       const res = await rpc<KnowledgeSettings>('knowledge.settings.get', {});
-      const merged = { ...EMPTY, ...res };
+      const { revision: resRevision, ...rest } = res;
+      const merged = { ...EMPTY, ...rest };
       setValue(merged);
       setDraft(merged);
+      setRevision(typeof resRevision === 'number' ? resRevision : 0);
     } catch (e) {
       setError(e instanceof Error ? e.message : '知识策略加载失败');
     } finally { setLoading(false); }
@@ -64,7 +67,11 @@ export function KnowledgeDefaultsPage() {
     e.preventDefault();
     setSaving(true); setError(null); setNotice(null);
     try {
-      await rpc('knowledge.settings.update', { settings: draft, expectedRevision: value?.revision ?? 0 });
+      const res = await rpc<{ revision: number }>('knowledge.settings.update', {
+        settings: { ...draft, revision: revision + 1 },
+        expectedRevision: revision,
+      });
+      setRevision(res.revision);
       setNotice('知识默认策略已保存');
       await load();
     } catch (err) {

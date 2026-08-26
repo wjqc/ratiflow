@@ -72,9 +72,9 @@ describe('S00 deriveBlockers', () => {
     generatedAt: '2026-08-22T10:00:00Z',
     local: [],
     integrations: [
-      { id: 'gitlab', name: 'GitLab', status: statuses[0], detail: '' },
-      { id: 'model', name: '模型', status: statuses[1], detail: '' },
-      { id: 'ssh', name: 'SSH', status: statuses[2], detail: '' },
+      { checkId: 'gitlab', label: 'GitLab', scope: 'integration', status: statuses[0], severity: 'error', durationMs: 1, detail: '', fixTarget: 'gitlab' },
+      { checkId: 'model', label: '模型', scope: 'integration', status: statuses[1], severity: 'error', durationMs: 1, detail: '', fixTarget: 'models' },
+      { checkId: 'ssh', label: 'SSH', scope: 'integration', status: statuses[2], severity: 'error', durationMs: 1, detail: '', fixTarget: 'ssh' },
     ],
   });
 

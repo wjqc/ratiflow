@@ -41,8 +41,8 @@ export function SshPage() {
     try {
       await rpc('sshTarget.create', {
         name: form.name.trim() || form.host.trim(), host: form.host.trim(), port: form.port,
-        user: form.user.trim(), remote_dir: form.remoteDir.trim(),
-        credential_ref_id: form.credentialRefId.trim() || undefined,
+        user: form.user.trim(), remoteDir: form.remoteDir.trim(),
+        credentialRefId: form.credentialRefId.trim() || undefined,
       });
       setNotice('SSH 目标已创建');
       setForm(EMPTY); setCreating(false);
@@ -54,7 +54,7 @@ export function SshPage() {
     if (!window.confirm(`删除目标「${t.name}」？不可撤销。`)) return;
     setError(null);
     try {
-      await rpc('sshTarget.remove', { target_id: t.id, expected_revision: t.revision });
+      await rpc('sshTarget.remove', { targetId: t.id, expectedRevision: t.revision });
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
   };
@@ -62,7 +62,7 @@ export function SshPage() {
   const test = async (t: SshTarget) => {
     setTesting(t.id); setTestResult(null); setPendingFp(null); setError(null);
     try {
-      const report = await rpc<{ status: string; steps: TestStep[] }>('sshTarget.test', { target_id: t.id });
+      const report = await rpc<{ status: string; steps: TestStep[] }>('sshTarget.test', { targetId: t.id });
       setTestResult(report);
       const hostKey = report.steps.find((s) => s.error_code === 'HOST_KEY_FIRST_USE');
       if (hostKey?.detail?.fingerprint) {
@@ -76,7 +76,7 @@ export function SshPage() {
     if (!pendingFp) return;
     setError(null);
     try {
-      await rpc('sshTarget.acceptHostKey', { target_id: pendingFp.targetId, fingerprint: pendingFp.fingerprint });
+      await rpc('sshTarget.acceptHostKey', { targetId: pendingFp.targetId, fingerprint: pendingFp.fingerprint });
       setNotice('主机指纹已确认保存');
       setPendingFp(null);
       await load();

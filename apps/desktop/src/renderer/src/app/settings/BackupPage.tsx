@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { rpc } from '../../rpc/client';
 import { formatDateTime } from '../../lib/format';
-import type { BackupManifest, CoreVersionInfo } from './types';
+import type { BackupRecord, CoreVersionInfo } from './types';
 import { SettingsPageHeader } from './components/SettingsPageHeader';
 import { SettingsSection } from './components/SettingsSection';
 import { StatusPill } from './components/StatusPill';
@@ -13,7 +13,7 @@ export function BackupPage() {
   const [version, setVersion] = useState<CoreVersionInfo | null>(null);
   const [dataDir, setDataDir] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [manifest, setManifest] = useState<BackupManifest | null>(null);
+  const [manifest, setManifest] = useState<BackupRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -30,7 +30,7 @@ export function BackupPage() {
     setCreating(true);
     setError(null);
     try {
-      const m = await rpc<BackupManifest>('backup.create');
+      const m = await rpc<BackupRecord>('backup.create');
       setManifest(m);
     } catch (e) {
       setError(e instanceof Error ? e.message : '备份失败');
@@ -75,18 +75,18 @@ export function BackupPage() {
           <div className="sg-card" style={{ marginTop: 12 }} role="status" aria-live="polite">
             <div className="sg-row" style={{ fontWeight: 600, marginBottom: 8 }}>
               <StatusPill kind="ready" label="备份成功" />
-              <span className="sg-muted">{formatDateTime(manifest.createdAt)}</span>
+              <span className="sg-muted">{formatDateTime(manifest.created_at)}</span>
             </div>
             <div className="sg-kv">
               <span className="sg-kv-k">路径</span>
               <span className="sg-path">{manifest.path}</span>
               <span className="sg-kv-k">sha256</span>
-              <span className="sg-path">{manifest.sha256}</span>
+              <span className="sg-path">{manifest.digest}</span>
               <span className="sg-kv-k">schema</span>
-              <span>v{manifest.schemaVersion}（core {manifest.coreVersion}）</span>
+              <span>v{manifest.schema_version}（core {manifest.manifest.sixgatesVersion}）</span>
               <span className="sg-kv-k">对象数</span>
               <span>
-                {Object.entries(manifest.objectsCount)
+                {Object.entries(manifest.manifest.objectsCount ?? {})
                   .map(([k, v]) => `${k}:${v}`)
                   .join(' · ') || '—'}
               </span>

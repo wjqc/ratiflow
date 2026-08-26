@@ -31,13 +31,13 @@ export function deriveBlockers(report: DiagnosticsReport | null): OverviewBlocke
     ssh: { title: 'SSH 目标未配置', impact: '阻塞目标机部署', section: 'ssh' },
   };
   return report.integrations
-    .filter((c) => c.status !== 'ready' && meta[c.id])
-    .map((c) => ({ key: c.id, ...meta[c.id] }));
+    .filter((c) => c.status !== 'ready' && meta[c.checkId])
+    .map((c) => ({ key: c.checkId, ...meta[c.checkId] }));
 }
 
 type PillOf = 'ready' | 'pending' | 'error';
 
-function pillOf(status: IntegrationCheck['status']): PillOf {
+function pillOf(status: string): PillOf {
   if (status === 'ready') return 'ready';
   if (status === 'pending') return 'pending';
   return 'error';
@@ -85,7 +85,7 @@ export function OverviewPage({ onNavigate }: { onNavigate: (section: SettingsRou
 
   const blockers = useMemo(() => deriveBlockers(diag), [diag]);
   const weekCount = useMemo(
-    () => audit.filter((e) => Date.now() - new Date(e.time).getTime() < 7 * 86400_000).length,
+    () => audit.filter((e) => Date.now() - new Date(e.createdAt).getTime() < 7 * 86400_000).length,
     [audit],
   );
 
@@ -148,8 +148,8 @@ export function OverviewPage({ onNavigate }: { onNavigate: (section: SettingsRou
           />
           {diag?.local.map((c) => (
             <SummaryRow
-              key={c.id}
-              label={c.name}
+              key={c.checkId}
+              label={c.label}
               status={<StatusPill kind={pillOf(c.status)} />}
               detail={c.detail}
             />
@@ -161,8 +161,8 @@ export function OverviewPage({ onNavigate }: { onNavigate: (section: SettingsRou
         <div className="sg-summary-rows">
           {diag?.integrations.map((c) => (
             <SummaryRow
-              key={c.id}
-              label={c.name}
+              key={c.checkId}
+              label={c.label}
               status={<StatusPill kind={pillOf(c.status)} />}
               detail={c.detail}
             />
@@ -200,7 +200,7 @@ export function OverviewPage({ onNavigate }: { onNavigate: (section: SettingsRou
           <div className="sg-stack" style={{ gap: 6 }}>
             {audit.slice(0, 5).map((e) => (
               <div key={e.seq} className="sg-row" style={{ fontSize: 12 }}>
-                <span className="sg-muted" style={{ width: 90, flexShrink: 0 }}>{relativeTime(e.time)}</span>
+                <span className="sg-muted" style={{ width: 90, flexShrink: 0 }}>{relativeTime(e.createdAt)}</span>
                 <code className="sg-code">{e.action}</code>
                 <span className="sg-muted">
                   {e.actor} · {e.targetType}
