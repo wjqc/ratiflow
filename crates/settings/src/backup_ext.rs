@@ -123,6 +123,21 @@ pub fn verify(store: &Store, id: &str) -> SettingsResult<BackupRecord> {
     } else {
         verified = false;
     }
+    // M1/F04：rollouts 捆绑复验（旧备份无 rolloutsCount 字段则跳过——空集兼容）。
+    let rollouts_count = rec.manifest["rolloutsCount"].as_i64().unwrap_or(0);
+    if verified && rollouts_count > 0 {
+        let ok = sg_store::backup::verify_rollouts(
+            std::path::Path::new(&rec.path),
+            rollouts_count,
+            rec.manifest["rolloutsRootHash"].as_str().unwrap_or(""),
+        )
+        .unwrap_or(false);
+        if !ok {
+            problems
+                .push(json!({"code": codes::BACKUP_CORRUPT, "detail": "rollouts 根哈希不匹配"}));
+            verified = false;
+        }
+    }
 
     let status = if verified {
         "verified"
@@ -213,6 +228,20 @@ pub fn restore(store: &Store, id: &str) -> SettingsResult<RestoreOutcome> {
         .with_details(json!({"safetySnapshot": safety.path})));
     }
 
+    // M1/F04：rollouts 随备份恢复（数量不符 → 回滚 db，fail-closed）。
+    let rollouts_count = rec.manifest["rolloutsCount"].as_i64().unwrap_or(0);
+    if rollouts_count > 0 {
+        let restored = sg_store::backup::restore_rollouts(store, std::path::Path::new(&rec.path));
+        if !matches!(restored, Ok(n) if n == rollouts_count) {
+            let _ = std::fs::copy(&safety.path, &db_path);
+            return Err(SettingsError::new(
+                codes::BACKUP_CORRUPT,
+                "rollouts 恢复不完整，已回滚安全快照",
+            )
+            .with_details(json!({"safetySnapshot": safety.path})));
+        }
+    }
+
     store
         .with_conn(|conn| {
             conn.execute(
@@ -239,6 +268,7 @@ pub fn delete(store: &Store, id: &str) -> SettingsResult<()> {
         .map_err(store_err)?;
     let _ = std::fs::remove_file(&rec.path);
     let _ = std::fs::remove_file(format!("{}.manifest.json", rec.path));
+    let _ = std::fs::remove_dir_all(format!("{}.rollouts", rec.path.trim_end_matches(".db")));
     Ok(())
 }
 
