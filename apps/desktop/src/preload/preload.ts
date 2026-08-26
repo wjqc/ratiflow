@@ -40,6 +40,14 @@ const api = {
   openLogs(): Promise<void> {
     return ipcRenderer.invoke('sg:openLogs');
   },
+  // F02 只读事件订阅：main 转发的 sg:event 通知，返回退订函数。
+  onEvent(callback: (event: CoreEvent) => void): () => void {
+    const listener = (_e: unknown, event: CoreEvent): void => callback(event);
+    ipcRenderer.on('sg:event', listener);
+    return () => {
+      ipcRenderer.removeListener('sg:event', listener);
+    };
+  },
 };
 
 export type SixGatesBridge = typeof api;

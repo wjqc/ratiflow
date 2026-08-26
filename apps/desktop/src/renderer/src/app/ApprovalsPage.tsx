@@ -33,7 +33,17 @@ export default function ApprovalsPage({ onDecided }: Props) {
     }
   }, []);
 
-  useEffect(() => { void reload(); const t = setInterval(() => void reload(), 4000); return () => clearInterval(t); }, [reload]);
+  // F02 事件驱动刷新：审批/任务事件即时拉取；30s 轮询仅作断线降级。
+  useEffect(() => {
+    const off = window.sixgates.onEvent((e) => {
+      if (e.type.startsWith('approval.') || e.type.startsWith('run.')) void reload();
+    });
+    const t = setInterval(() => void reload(), 30000);
+    return () => {
+      off();
+      clearInterval(t);
+    };
+  }, [reload]);
 
   const bucketOf = useCallback((a: ApprovalInfo): Tab => {
     if (a.status === 'approved' || a.status === 'rejected') return 'decided';

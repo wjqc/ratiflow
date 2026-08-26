@@ -162,10 +162,16 @@ export function Workbench({
     void loadAll();
   }, [loadAll]);
 
-  // 轮询任务进度与时间线（3s）：当前无推送通道，进度/审批裁决后需及时刷新。
+  // F02 事件驱动刷新：sg:event 推送触发对账拉取；30s 轮询仅作断线降级。
   useEffect(() => {
-    const t = setInterval(loadAll, 3000);
-    return () => clearInterval(t);
+    const off = window.sixgates.onEvent(() => {
+      void loadAll();
+    });
+    const t = setInterval(loadAll, 30000);
+    return () => {
+      off();
+      clearInterval(t);
+    };
   }, [loadAll]);
 
   const stagesByGate = new Map((progress?.stages ?? []).map((s) => [s.gate, s]));

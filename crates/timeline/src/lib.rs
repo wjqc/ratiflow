@@ -66,6 +66,18 @@ fn summarize(row: &Value) -> String {
         "approval.requested" => "高风险动作请求审批".into(),
         "approval.approved" => "审批通过".into(),
         "approval.rejected" => "审批拒绝".into(),
+        "run.started" => "任务开始执行".into(),
+        "run.waiting_approval" => "任务挂起等待审批".into(),
+        "run.resumed" => "审批通过，任务恢复".into(),
+        "run.compacted" => "上下文已自动压缩".into(),
+        "tool.started" => format!(
+            "工具开始执行：{}",
+            row["payload"]["tool"].as_str().unwrap_or("")
+        ),
+        "tool.completed" => format!(
+            "工具执行完成：{}",
+            row["payload"]["tool"].as_str().unwrap_or("")
+        ),
         "evidence.recorded" => format!(
             "记录证据：{}",
             row["payload"]["kind"].as_str().unwrap_or("")

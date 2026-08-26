@@ -385,6 +385,12 @@ app.whenReady().then(async () => {
   const logPath = join(userData, 'logs', 'core.log');
   mkdirSync(join(userData, 'logs'), { recursive: true });
   client = new CoreClient(resolveCoreBinary(), join(userData, 'data'), logPath);
+  // F02 事件通道端到端：core 通知转发到所有渲染窗口（renderer 经 preload onEvent 订阅）。
+  client.onEvent((event) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('sg:event', event);
+    }
+  });
   try {
     await client.start();
   } catch (error) {
