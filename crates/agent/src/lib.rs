@@ -7,6 +7,7 @@ use sg_policy::{self, PolicyError, Snapshot};
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
 pub mod modelgw;
+pub mod rollout;
 pub mod tools;
 pub use modelgw::{Budget, Gateway, Usage};
 
@@ -88,7 +89,9 @@ pub fn start(
         let output = run.result.clone();
         return Ok(RunOutput { run, output });
     }
-    execute_run(store, gateway, policy, executor, config, &run.id, None)
+    execute_run(
+        store, gateway, policy, executor, config, &run.id, None, None,
+    )
 }
 
 /// 建行（幂等）：重复 idempotency_key 返回既有 Run，created=false。
@@ -136,11 +139,22 @@ pub fn create_run(store: &Store, config: &RunConfig<'_>) -> Result<(AgentRun, bo
         Ok(())
     })?;
     let mut run = get_run(store, &id)?;
-    set_status(store, &mut run, "running")?;
+    set_status(store, &mut run, "running", "run.started")?;
     Ok((run, true))
 }
 
-/// 执行既有 Run 的循环（M0-② 起 Run 由装配层在独立任务/连接上驱动）。
+/// 单步结果（M1/F03）：NeedsApproval 表示挂起等待审批（Run 置 paused 并写 checkpoint）。
+pub enum StepOutcome {
+    /// 继续：返回给模型的 tool 消息文本。
+    Continue(String),
+    /// 挂起：审批已请求、提案保持 proposed。
+    NeedsApproval { proposal_id: String, tool: String },
+}
+
+/// 执行既有 Run 的循环（M0-② 起由装配层在独立任务/连接上驱动；M1 支持从 waiting_approval 恢复）。
+/// 恢复语义：messages/迭代号/挂起提案取自 checkpoint；预算台账不入 checkpoint——
+/// 模型调用数/工具数从库重算（单一事实源，不重复计费）。
+#[allow(clippy::too_many_arguments)]
 pub fn execute_run(
     store: &Store,
     gateway: &Gateway,
@@ -149,6 +163,7 @@ pub fn execute_run(
     config: &RunConfig<'_>,
     run_id: &str,
     cancel: Option<&std::sync::atomic::AtomicBool>,
+    mut rollout: Option<crate::rollout::Rollout>,
 ) -> Result<RunOutput, Error> {
     let RunConfig {
         goal,
@@ -164,19 +179,69 @@ pub fn execute_run(
             .unwrap_or(false)
     };
 
-    let mut messages = vec![ChatMessage {
-        role: "user".into(),
-        content: goal.into(),
-    }];
-    let mut tool_calls = 0i64;
+    let (mut messages, start_iteration, mut pending_proposal) = load_checkpoint(store, run_id)
+        .unwrap_or_else(|| {
+            (
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: goal.into(),
+                }],
+                0,
+                None,
+            )
+        });
+    if run.status == "paused" {
+        log_rollout(
+            &mut rollout,
+            "resumed",
+            json!({"pendingProposal": pending_proposal.is_some()}),
+        );
+        set_status(store, &mut run, "running", "run.resumed")?;
+    } else {
+        log_rollout(
+            &mut rollout,
+            "run_started",
+            json!({"workitemId": run.workitem_id}),
+        );
+    }
+    let mut tool_calls = count_tool_calls(store, run_id)?;
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_secs(budget.max_duration_sec.max(1) as u64);
+
+    // 恢复：先执行挂起提案（digest 绑定再验一次，fail-closed；通过则追加 developer 通知而非改写历史）。
+    if let Some(proposal_id) = pending_proposal.take() {
+        let proposal = get_proposal(store, &proposal_id)?;
+        sg_policy::validate_for(
+            store,
+            "tool_proposal",
+            &proposal.id,
+            &proposal.action_digest,
+        )
+        .map_err(|e| Error::Message(format!("approval_invalid: {e}")))?;
+        let result_text = run_executor(store, executor, &proposal)?;
+        tool_calls += 1;
+        messages.push(ChatMessage {
+            role: "developer".into(),
+            content: format!("审批已通过，执行工具提案：{}", proposal.tool),
+        });
+        messages.push(ChatMessage {
+            role: "tool".into(),
+            content: result_text.clone(),
+        });
+        log_rollout(
+            &mut rollout,
+            "tool_result",
+            json!({"tool": proposal.tool, "preview": tools::truncate_output(&result_text, 400)}),
+        );
+    }
+
     #[allow(unused_assignments)]
-    for iteration in 0..max_iterations {
+    for iteration in start_iteration..max_iterations {
         if cancelled(cancel) {
             run.result = "已取消（用户请求）".into();
-            set_status(store, &mut run, "cancelled")?;
+            set_status(store, &mut run, "cancelled", "run.cancelled")?;
             finish(store, &run)?;
+            log_rollout(&mut rollout, "run_finished", json!({"status": "cancelled"}));
             return Ok(RunOutput {
                 run,
                 output: String::new(),
@@ -184,7 +249,7 @@ pub fn execute_run(
         }
         if std::time::Instant::now() > deadline {
             run.result = "budget: duration exceeded".into();
-            set_status(store, &mut run, "failed")?;
+            set_status(store, &mut run, "failed", "run.failed")?;
             finish(store, &run)?;
             return Err(Error::Message("budget_exhausted: duration".into()));
         }
@@ -195,17 +260,22 @@ pub fn execute_run(
             max_tokens: 4096,
             response_schema: None,
         };
+        log_rollout(
+            &mut rollout,
+            "model_request",
+            json!({"messages": messages.len(), "estTokens": estimate_tokens(&request)}),
+        );
         let response = match gateway.call(store, run_id, &budget.model, &request) {
             Ok(resp) => resp,
             Err(e) => {
                 if e.contains("budget_exceeded") {
                     run.result = e.clone();
-                    set_status(store, &mut run, "failed")?;
+                    set_status(store, &mut run, "failed", "run.failed")?;
                     finish(store, &run)?;
                     return Err(Error::Message(e));
                 }
                 run.result = format!("model: {e}");
-                set_status(store, &mut run, "failed")?;
+                set_status(store, &mut run, "failed", "run.failed")?;
                 finish(store, &run)?;
                 return Err(Error::Message(e));
             }
@@ -225,12 +295,27 @@ pub fn execute_run(
                 continue;
             }
         };
+        log_rollout(
+            &mut rollout,
+            "model_response",
+            json!({"action": decision.action, "summary": tools::truncate_output(&decision.summary, 200)}),
+        );
 
         if decision.action == "final" {
             run.result = decision.summary.clone();
-            set_status(store, &mut run, "completed_execution")?;
-            checkpoint(store, run_id, iteration, &messages);
+            set_status(
+                store,
+                &mut run,
+                "completed_execution",
+                "run.completed_execution",
+            )?;
+            checkpoint(store, run_id, iteration, &messages, None);
             finish(store, &run)?;
+            log_rollout(
+                &mut rollout,
+                "run_finished",
+                json!({"status": "completed_execution"}),
+            );
             return Ok(RunOutput {
                 run,
                 output: decision.summary,
@@ -239,14 +324,14 @@ pub fn execute_run(
 
         if tool_calls >= budget.max_tool_calls {
             run.result = "budget: tool calls exhausted".into();
-            set_status(store, &mut run, "failed")?;
+            set_status(store, &mut run, "failed", "run.failed")?;
             finish(store, &run)?;
             return Err(Error::Message("budget_exhausted: tool calls".into()));
         }
 
         if cancelled(cancel) {
             run.result = "已取消（用户请求）".into();
-            set_status(store, &mut run, "cancelled")?;
+            set_status(store, &mut run, "cancelled", "run.cancelled")?;
             finish(store, &run)?;
             return Ok(RunOutput {
                 run,
@@ -254,25 +339,67 @@ pub fn execute_run(
             });
         }
 
-        let (_outcome, output_text) =
-            propose_and_execute(store, policy, executor, &run, &decision)?;
-        tool_calls += 1;
-        let _ = &output_text;
-        messages.push(ChatMessage {
-            role: "assistant".into(),
-            content: format!("tool {}({})", decision.action, decision.arguments),
-        });
-        messages.push(ChatMessage {
-            role: "tool".into(),
-            content: output_text,
-        });
-        checkpoint(store, run_id, iteration, &messages);
+        let outcome = propose_and_execute(store, policy, executor, &mut rollout, &run, &decision)?;
+        match outcome {
+            StepOutcome::NeedsApproval { proposal_id, tool } => {
+                messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: format!("tool {}({})", decision.action, decision.arguments),
+                });
+                checkpoint(store, run_id, iteration, &messages, Some(&proposal_id));
+                log_rollout(
+                    &mut rollout,
+                    "checkpoint_saved",
+                    json!({"iteration": iteration, "phase": "waiting_approval"}),
+                );
+                run.result = format!("等待审批：{tool}");
+                set_status(store, &mut run, "paused", "run.waiting_approval")?;
+                finish(store, &run)?;
+                log_rollout(&mut rollout, "run_finished", json!({"status": "paused"}));
+                return Ok(RunOutput {
+                    run,
+                    output: String::new(),
+                });
+            }
+            StepOutcome::Continue(output_text) => {
+                tool_calls += 1;
+                messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: format!("tool {}({})", decision.action, decision.arguments),
+                });
+                messages.push(ChatMessage {
+                    role: "tool".into(),
+                    content: output_text,
+                });
+                checkpoint(store, run_id, iteration, &messages, None);
+                log_rollout(
+                    &mut rollout,
+                    "turn_completed",
+                    json!({"iteration": iteration, "toolCalls": tool_calls}),
+                );
+            }
+        }
     }
 
     run.result = "max iterations reached without final answer".into();
-    set_status(store, &mut run, "failed")?;
+    set_status(store, &mut run, "failed", "run.failed")?;
     finish(store, &run)?;
     Err(Error::Message("agent loop exhausted".into()))
+}
+
+fn estimate_tokens(req: &CompletionRequest) -> usize {
+    let chars =
+        req.system_prompt.len() + req.messages.iter().map(|m| m.content.len()).sum::<usize>();
+    chars / 4 + 64
+}
+
+fn log_rollout(rollout: &mut Option<crate::rollout::Rollout>, kind: &str, data: Value) {
+    if let Some(r) = rollout {
+        // rollout 是观测数据：写失败不中断 Run（记录 stderr）。
+        if let Err(e) = r.append(kind, data) {
+            eprintln!("{{\"level\":\"warn\",\"msg\":\"rollout append failed: {e}\"}}");
+        }
+    }
 }
 
 struct Decision {
@@ -302,9 +429,10 @@ fn propose_and_execute(
     store: &Store,
     policy: &Snapshot,
     executor: Option<&ToolExecutor>,
+    rollout: &mut Option<crate::rollout::Rollout>,
     run: &AgentRun,
     decision: &Decision,
-) -> Result<(String, String), Error> {
+) -> Result<StepOutcome, Error> {
     let action = json!({"tool": decision.action, "arguments": serde_json::from_str::<Value>(&decision.arguments).unwrap_or(Value::Null)});
     let digest = sg_policy::action_digest(&action);
     let id = ids::new_id("tp");
@@ -334,13 +462,18 @@ fn propose_and_execute(
         "tool.proposed",
         json!({"workitemId": run.workitem_id, "tool": proposal.tool, "digest": digest}),
     )?;
+    log_rollout(
+        rollout,
+        "tool_proposed",
+        json!({"tool": proposal.tool, "digest": digest}),
+    );
 
     let needs_approval = match sg_policy::evaluate(policy, &decision.action, &digest) {
         Ok(_) => false,
         Err(PolicyError::ApprovalRequired) => true,
         Err(e) => {
             mark_proposal(store, &proposal, "rejected", &e.to_string())?;
-            return Ok((e.to_string(), format!("工具被策略拒绝：{e}")));
+            return Ok(StepOutcome::Continue(format!("工具被策略拒绝：{e}")));
         }
     };
 
@@ -356,27 +489,47 @@ fn propose_and_execute(
             &format!("run {} tool {}", run.id, decision.action),
             3600,
         )?;
-        mark_proposal(store, &proposal, "rejected", "approval_required")?;
-        return Ok((
-            "approval_required".into(),
-            "该工具需要人工审批；审批通过后重新运行任务。".into(),
-        ));
+        // M1/F03：提案保持 proposed（不再记 rejected/approval_required），Run 挂起等待审批。
+        log_rollout(
+            rollout,
+            "approval_requested",
+            json!({"tool": proposal.tool, "digest": digest}),
+        );
+        return Ok(StepOutcome::NeedsApproval {
+            proposal_id: proposal.id,
+            tool: proposal.tool,
+        });
     }
 
+    let text = run_executor(store, executor, &proposal)?;
+    log_rollout(
+        rollout,
+        "tool_result",
+        json!({"tool": proposal.tool, "preview": tools::truncate_output(&text, 400)}),
+    );
+    Ok(StepOutcome::Continue(text))
+}
+
+/// 执行提案并落 executed/exec_failed 标记，返回给模型的文本。
+fn run_executor(
+    store: &Store,
+    executor: Option<&ToolExecutor>,
+    proposal: &Proposal,
+) -> Result<String, Error> {
     match executor {
-        Some(exec) => match exec(&proposal) {
+        Some(exec) => match exec(proposal) {
             Ok(result) => {
-                mark_proposal(store, &proposal, "executed", &result)?;
-                Ok((result.clone(), result))
+                mark_proposal(store, proposal, "executed", &result)?;
+                Ok(result)
             }
             Err(e) => {
-                mark_proposal(store, &proposal, "exec_failed", &e)?;
-                Ok((e.clone(), format!("执行失败：{e}")))
+                mark_proposal(store, proposal, "exec_failed", &e)?;
+                Ok(format!("执行失败：{e}"))
             }
         },
         None => {
-            mark_proposal(store, &proposal, "rejected", "no executor")?;
-            Ok(("no executor".into(), "执行器不可用。".into()))
+            mark_proposal(store, proposal, "rejected", "no executor")?;
+            Ok("执行器不可用。".into())
         }
     }
 }
@@ -396,7 +549,7 @@ fn mark_proposal(
     })
 }
 
-fn set_status(store: &Store, run: &mut AgentRun, to: &str) -> Result<(), Error> {
+fn set_status(store: &Store, run: &mut AgentRun, to: &str, event: &str) -> Result<(), Error> {
     run.status = to.into();
     store.with_conn(|conn| {
         conn.execute(
@@ -405,18 +558,12 @@ fn set_status(store: &Store, run: &mut AgentRun, to: &str) -> Result<(), Error> 
         )?;
         Ok(())
     })?;
-    // running 的对外事件名是 run.started（M0-② 契约）；其余沿用 run.<status>。
-    let event_type = if to == "running" {
-        "run.started".to_string()
-    } else {
-        format!("run.{to}")
-    };
     outbox::emit(
         store,
         "agent_run",
         &run.id,
-        &event_type,
-        json!({"workitemId": run.workitem_id}),
+        event,
+        json!({"workitemId": run.workitem_id, "status": to}),
     )?;
     Ok(())
 }
@@ -431,8 +578,21 @@ fn finish(store: &Store, run: &AgentRun) -> Result<(), Error> {
     })
 }
 
-fn checkpoint(store: &Store, run_id: &str, seq: usize, messages: &[ChatMessage]) {
-    let body = serde_json::to_string(messages).unwrap_or_default();
+fn checkpoint(
+    store: &Store,
+    run_id: &str,
+    seq: usize,
+    messages: &[ChatMessage],
+    pending: Option<&str>,
+) {
+    // M1/F03：checkpoint 载荷带恢复元数据（phase/pending 提案）；messages 结构不变。
+    let body = serde_json::json!({
+        "messages": messages,
+        "iteration": seq,
+        "pending_proposal_id": pending,
+        "phase": if pending.is_some() { "waiting_approval" } else { "running" },
+    })
+    .to_string();
     let _ = store.with_conn(|conn| {
         let _ = conn.execute(
             "INSERT INTO agent_checkpoints(id, agent_run_id, seq, state, created_at)
@@ -476,8 +636,132 @@ pub fn cancel(store: &Store, id: &str) -> Result<(), Error> {
     ) {
         return Ok(());
     }
-    set_status(store, &mut run, "cancelled")?;
+    set_status(store, &mut run, "cancelled", "run.cancelled")?;
     Ok(())
+}
+
+/// 最新 checkpoint 的恢复元数据（M0 旧格式 messages 数组不可恢复，返回 None 走全新循环）。
+fn load_checkpoint(
+    store: &Store,
+    run_id: &str,
+) -> Option<(Vec<ChatMessage>, usize, Option<String>)> {
+    let raw: Option<String> = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT state FROM agent_checkpoints WHERE agent_run_id=?1
+                     ORDER BY seq DESC LIMIT 1",
+                    [run_id],
+                    |r| r.get(0),
+                )
+                .ok())
+        })
+        .ok()
+        .flatten();
+    let v: Value = serde_json::from_str(&raw?).ok()?;
+    let arr = v.get("messages")?.as_array()?;
+    let mut messages = Vec::with_capacity(arr.len());
+    for m in arr {
+        messages.push(ChatMessage {
+            role: m.get("role")?.as_str()?.into(),
+            content: m.get("content")?.as_str()?.into(),
+        });
+    }
+    let iteration = v.get("iteration").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    let pending = v
+        .get("pending_proposal_id")
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    Some((messages, iteration, pending))
+}
+
+pub fn get_proposal(store: &Store, id: &str) -> Result<Proposal, Error> {
+    store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT id, agent_run_id, tool, arguments, risk, action_digest, decision, COALESCE(result,''), created_at
+             FROM tool_proposals WHERE id=?1",
+            [id],
+            |r| {
+                Ok(Proposal {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    tool: r.get(2)?,
+                    arguments: r.get(3)?,
+                    risk: r.get(4)?,
+                    action_digest: r.get(5)?,
+                    decision: r.get(6)?,
+                    result: r.get(7)?,
+                    created_at: r.get(8)?,
+                })
+            },
+        )
+        .map_err(|_| Error::Message("proposal_not_found".into()))
+    })
+}
+
+/// 已执行工具数（恢复时从库重算，不依赖 checkpoint）。
+pub fn count_tool_calls(store: &Store, run_id: &str) -> Result<i64, Error> {
+    store.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM tool_proposals WHERE agent_run_id=?1 AND decision IN ('executed','exec_failed')",
+            [run_id],
+            |r| r.get(0),
+        )?)
+    })
+}
+
+/// 模型调用数（不重复计费的对账口径）。
+pub fn count_model_calls(store: &Store, run_id: &str) -> Result<i64, Error> {
+    store.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM model_calls WHERE agent_run_id=?1",
+            [run_id],
+            |r| r.get(0),
+        )?)
+    })
+}
+
+/// 从 run 行重建任务侧配置（审批通过后拉起恢复任务用）：
+/// (workitem_id, goal, manifest_id, tool_allowlist, budget)
+pub fn row_config(
+    store: &Store,
+    run_id: &str,
+) -> Result<(String, String, String, Vec<String>, RunBudget), Error> {
+    store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT workitem_id, goal, context_manifest_id, tool_allowlist, budget FROM agent_runs WHERE id=?1",
+            [run_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .map_err(|_| Error::Message("run_not_found".into()))
+    })
+    .map(|(wi, goal, manifest, allow, budget)| {
+        let allowlist: Vec<String> =
+            serde_json::from_str(&allow).unwrap_or_else(|_| vec!["read_file".into()]);
+        let budget: RunBudget =
+            serde_json::from_str(&budget).unwrap_or_default();
+        (wi, goal, manifest, allowlist, budget)
+    })
+}
+
+/// 审批拒绝后的收尾：paused → failed（F03）。
+pub fn fail_paused_run(store: &Store, run_id: &str, message: &str) -> Result<AgentRun, Error> {
+    let mut run = get_run(store, run_id)?;
+    if run.status != "paused" {
+        return Ok(run);
+    }
+    run.result = message.into();
+    set_status(store, &mut run, "failed", "run.failed")?;
+    finish(store, &run)?;
+    Ok(run)
 }
 
 pub fn proposals(store: &Store, run_id: &str) -> Result<Vec<Proposal>, Error> {
@@ -627,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn high_risk_requires_approval_never_executes() {
+    fn high_risk_pauses_run_waiting_approval() {
         let store = setup();
         let fake = FakeModel::default();
         fake.push_response(
@@ -635,7 +919,7 @@ mod tests {
             5,
             3,
         );
-        fake.push_response(r#"{"action":"final","summary":"等待审批"}"#, 5, 3);
+        fake.push_response(r#"{"action":"final","summary":"完成"}"#, 5, 3);
         let gateway = Gateway::new(Box::new(fake));
         let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = executed.clone();
@@ -660,14 +944,112 @@ mod tests {
             },
         )
         .unwrap();
+        // M1/F03：Run 挂起而非作废；提案保持 proposed；审批待办出现。
+        assert_eq!(out.run.status, "paused");
         assert_eq!(
             executed.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "高风险工具未获批准不得执行"
         );
+        let props = proposals(&store, &out.run.id).unwrap();
+        assert_eq!(props[0].decision, "proposed");
         let pending = sg_policy::pending(&store, 10).unwrap();
         assert_eq!(pending.len(), 1);
-        let _ = out;
+
+        let count = |ty: &str| -> i64 {
+            store
+                .with_conn(|c| {
+                    let n: i64 = c.query_row(
+                        "SELECT COUNT(*) FROM events_outbox WHERE type=?1 AND aggregate_id=?2",
+                        rusqlite::params![ty, out.run.id],
+                        |r| r.get(0),
+                    )?;
+                    Ok(n)
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            count("run.waiting_approval"),
+            1,
+            "run.waiting_approval 恰好一条"
+        );
+        assert_eq!(count("run.failed"), 0, "暂停不是失败");
+
+        // 审批通过 → 恢复 → 执行挂起提案 → final 完成；模型调用共 2 次（不重复计费）。
+        let approval_id = pending[0].id.clone();
+        sg_policy::decide(&store, &approval_id, "approved", "tester", "测试批准").unwrap();
+        let config2 = RunConfig {
+            workitem_id: "wi",
+            task_id: "",
+            goal: "g",
+            manifest_id: "ctx1",
+            tool_allowlist: &["read_file".into(), "run_command".into()],
+            idempotency_key: "key-3-resume",
+            budget: &RunBudget::default(),
+            max_iterations: 5,
+        };
+        let resumed = execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &config2,
+            &out.run.id,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumed.run.status, "completed_execution");
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "恢复后执行挂起提案一次"
+        );
+        let props = proposals(&store, &out.run.id).unwrap();
+        assert_eq!(props[0].decision, "executed");
+        assert_eq!(
+            count_model_calls(&store, &out.run.id).unwrap(),
+            2,
+            "模型调用恰好 2 次（不重复计费）"
+        );
+        assert_eq!(count("run.resumed"), 1, "run.resumed 恰好一条");
+        assert_eq!(count("run.completed_execution"), 1);
+    }
+
+    #[test]
+    fn approval_rejected_fails_paused_run() {
+        let store = setup();
+        let fake = FakeModel::default();
+        fake.push_response(
+            r#"{"action":"run_command","arguments":{"argv":["ls"]},"summary":"执行"}"#,
+            5,
+            3,
+        );
+        let gateway = Gateway::new(Box::new(fake));
+        let executor = |_p: &Proposal| -> Result<String, String> { Ok(String::new()) };
+        let out = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["run_command".into()],
+                idempotency_key: "key-reject",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.run.status, "paused");
+        let pending = sg_policy::pending(&store, 10).unwrap();
+        sg_policy::decide(&store, &pending[0].id, "rejected", "tester", "风险过大").unwrap();
+        let run = fail_paused_run(&store, &out.run.id, "审批拒绝：风险过大（tester）").unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run.result.contains("审批拒绝"));
     }
 
     #[test]
@@ -760,6 +1142,7 @@ mod tests {
             &config,
             &run.id,
             Some(&flag),
+            None,
         )
         .unwrap();
         assert_eq!(out.run.status, "cancelled");
