@@ -13,6 +13,10 @@ interface ToolPolicy {
   requires_approval: boolean;
   network: 'deny' | 'allow';
   revision: number;
+  // F05/M0-③：注册表提供的限制字段（注册表外策略行可能缺省）。
+  description?: string;
+  max_result_bytes?: number;
+  timeout_sec?: number;
 }
 
 const RISK_LABEL: Record<string, string> = { low: '低', medium: '中', high: '高' };
@@ -78,12 +82,15 @@ export function ToolsPage() {
         ) : (
           <table className="sg-table" aria-label="工具策略表">
             <thead>
-              <tr><th>工具</th><th>状态</th><th>风险</th><th>审批</th><th>网络</th></tr>
+              <tr><th>工具</th><th>状态</th><th>风险</th><th>审批</th><th>限制</th><th>网络</th></tr>
             </thead>
             <tbody>
               {items.map((t) => (
                 <tr key={t.tool_id}>
-                  <td><code className="sg-code">{t.tool_id}</code></td>
+                  <td>
+                    <code className="sg-code">{t.tool_id}</code>
+                    {t.description ? <div className="sg-hint" style={{ margin: 0 }}>{t.description}</div> : null}
+                  </td>
                   <td>
                     <label className="sg-row" style={{ gap: 6, cursor: 'pointer' }}>
                       <input type="checkbox" checked={t.enabled} onChange={(e) => void update(t, { enabled: e.target.checked })} />
@@ -98,6 +105,9 @@ export function ToolsPage() {
                       <input type="checkbox" checked={t.requires_approval} onChange={(e) => void update(t, { requiresApproval: e.target.checked })} />
                       <span className="sg-hint" style={{ margin: 0 }}>{t.requires_approval ? '每次审批' : '无需审批'}</span>
                     </label>
+                  </td>
+                  <td className="sg-muted">
+                    {t.max_result_bytes ? `${Math.round(t.max_result_bytes / 1024)}KB` : '—'} · {t.timeout_sec ? `${t.timeout_sec}s` : '—'}
                   </td>
                   <td className="sg-muted">{t.network === 'allow' ? '允许' : '禁止'}</td>
                 </tr>

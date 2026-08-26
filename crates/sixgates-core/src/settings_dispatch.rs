@@ -723,11 +723,42 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
         }
 
         // --- 工具清单/测试（S21） ---
+        // F05/M0-③：运行时注册表（sg_agent::tools）是工具身份/风险/限制的权威；
+        // toolPolicy 行覆盖策略字段（enabled/requires_approval/network）；注册表外的既有策略行（如 deploy）保留。
         "tool.list" => {
-            Ok(json!({"items": settings::policy_ext::tool_effective(store, None).map_err(serr)?}))
+            let overrides = settings::policy_ext::tool_list(store).map_err(serr)?;
+            let mut items: Vec<Value> = Vec::new();
+            for def in sg_agent::tools::registry() {
+                let o = overrides.iter().find(|o| o.tool_id == def.name);
+                let mut v = def.to_json();
+                v["tool_id"] = json!(def.name);
+                v["enabled"] = json!(o.map(|o| o.enabled).unwrap_or(true));
+                v["requires_approval"] = json!(o
+                    .map(|o| o.requires_approval)
+                    .unwrap_or(def.risk == sg_policy::Risk::High));
+                v["network"] = json!(o
+                    .map(|o| o.network.clone())
+                    .unwrap_or_else(|| "deny".into()));
+                v["revision"] = json!(o.map(|o| o.revision).unwrap_or(0));
+                v["max_result_bytes"] = json!(def.max_result_bytes);
+                v["timeout_sec"] = json!(def.timeout_sec);
+                items.push(v);
+            }
+            for o in &overrides {
+                if sg_agent::tools::find(&o.tool_id).is_none() {
+                    items.push(json!({
+                        "name": o.tool_id, "tool_id": o.tool_id, "description": "",
+                        "risk": o.risk, "dataLevel": "internal",
+                        "enabled": o.enabled, "requires_approval": o.requires_approval,
+                        "network": o.network, "revision": o.revision,
+                        "maxResultBytes": 0, "timeoutSec": 0, "parameters": null,
+                    }));
+                }
+            }
+            Ok(json!({"items": items}))
         }
         "tool.test" => Ok(json!({"toolId": s(p, "toolId")?, "status": "skipped",
-            "note": "工具执行测试复用 agent.run 提案路径（allowlist + executor manifest）"})),
+            "note": "工具执行测试复用 agent.start 提案路径（allowlist + executor manifest）"})),
 
         _ => Err(RpcError::new(
             ErrorCode::MethodNotFound,

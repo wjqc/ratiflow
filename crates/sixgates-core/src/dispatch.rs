@@ -507,13 +507,36 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             };
             let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
             if created {
+                // 工具上下文（F05/M0-③）：项目根来自工作项所属项目的 local_root；
+                // 工件草稿区 <dataDir>/artifacts/<runId>/。
+                let (project_id, local_root): (String, String) = store
+                    .with_conn(|conn| {
+                        conn.query_row(
+                            "SELECT p.id, COALESCE(p.local_root,'') FROM projects p
+                             JOIN workitems w ON w.project_id = p.id WHERE w.id=?1",
+                            [&workitem_id],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .map_err(|_| sg_store::Error::Message("workitem_not_found".into()))
+                    })
+                    .map_err(store_err)?;
+                let ctx = sg_agent::tools::ToolCtx {
+                    mode: state.executor_mode,
+                    work_dir: if local_root.is_empty() {
+                        None
+                    } else {
+                        Some(std::path::PathBuf::from(&local_root))
+                    },
+                    artifacts_dir: store.data_dir.join("artifacts").join(&run.id),
+                };
+                let executor =
+                    crate::tool_exec::make_executor(ctx, state.run_store.clone(), project_id);
                 let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 state.runs.register(&run.id, flag.clone());
                 let run_store = state.run_store.clone();
                 let gateway = state.model.clone();
                 let policy = state.policy.clone();
                 let registry = state.runs.clone();
-                let mode = state.executor_mode;
                 let run_id = run.id.clone();
                 // RunConfig 借用局部变量，任务需要 'static：克隆任务侧配置副本。
                 let t_workitem = workitem_id.clone();
@@ -535,30 +558,11 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                             budget: &t_budget,
                             max_iterations: 20,
                         };
-                        // executor：映射到受约束执行（提案 → ExecutionManifest）。
-                        let executor = move |p: &sg_agent::Proposal| -> Result<String, String> {
-                            let manifest = sg_executor::ExecutionManifest {
-                                argv: vec![p.tool.clone()],
-                                work_dir: String::new(),
-                                image: "alpine:3".into(),
-                                network_off: true,
-                                memory_mb: 256,
-                                cpus: 0.5,
-                                timeout_sec: 120,
-                                writes_files: false,
-                            };
-                            match sg_executor::execute(mode, &manifest) {
-                                Ok(result) => {
-                                    serde_json::to_string(&result).map_err(|e| e.to_string())
-                                }
-                                Err(e) => Err(e.to_string()),
-                            }
-                        };
                         sg_agent::execute_run(
                             &run_store,
                             &gateway,
                             &policy,
-                            Some(&executor),
+                            Some(executor.as_ref()),
                             &config,
                             &run_id_inner,
                             Some(&flag),

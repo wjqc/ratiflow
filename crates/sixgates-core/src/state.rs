@@ -82,7 +82,25 @@ impl AppState {
                     model: std::env::var("SIXGATES_MODEL_NAME").unwrap_or_default(),
                 }))
             }
-            _ => Gateway::new(Box::new(sg_integrations::FakeModel::default())),
+            _ => {
+                // E2E 钩子（仅未配置真实模型时生效）：SIXGATES_FAKE_MODEL_SCRIPT 指向
+                // JSON 数组 [{content, tokensIn, tokensOut}]，按序作为脚本响应。
+                let fake = sg_integrations::FakeModel::default();
+                if let Ok(path) = std::env::var("SIXGATES_FAKE_MODEL_SCRIPT") {
+                    if let Ok(body) = std::fs::read_to_string(&path) {
+                        if let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&body) {
+                            for item in list {
+                                fake.push_response(
+                                    item["content"].as_str().unwrap_or(""),
+                                    item["tokensIn"].as_i64().unwrap_or(1),
+                                    item["tokensOut"].as_i64().unwrap_or(1),
+                                );
+                            }
+                        }
+                    }
+                }
+                Gateway::new(Box::new(fake))
+            }
         };
         let ssh: Arc<dyn sg_integrations::SSHAdapter> = Arc::new(FakeSSH::default());
         let _ = gitlab_fake;
@@ -95,6 +113,15 @@ impl AppState {
                     data_level: "internal".into(),
                     max_result_bytes: 1 << 20,
                     timeout_sec: 60,
+                },
+                sg_policy::ToolRule {
+                    // F05/M0-③：注册表新增工具，策略同步放行（low 风险免审批）。
+                    tool: "search_knowledge".into(),
+                    risk: sg_policy::Risk::Low,
+                    requires_approval: false,
+                    data_level: "internal".into(),
+                    max_result_bytes: 1 << 20,
+                    timeout_sec: 30,
                 },
                 sg_policy::ToolRule {
                     tool: "write_file".into(),
@@ -121,12 +148,25 @@ impl AppState {
             } else {
                 std::sync::Arc::new(sg_settings::credentials::InMemoryCredentials::default())
             };
-        let executor_mode = sg_executor::detect_mode(
-            sg_executor::docker_available(),
-            std::env::var("SIXGATES_UNSAFE_EXEC")
-                .map(|v| v == "1")
-                .unwrap_or(false),
-        );
+        // 执行模式：SIXGATES_EXEC_MODE 显式覆盖（开发/E2E 用），否则按 Docker 可用性探测
+        // （不静默降级，ADR-024）。设置域 executionProfile 接线在 M3/F10 重排来源优先级。
+        let executor_mode = std::env::var("SIXGATES_EXEC_MODE")
+            .ok()
+            .and_then(|m| match m.as_str() {
+                "docker" => Some(sg_executor::Mode::Docker),
+                "safe_restricted" => Some(sg_executor::Mode::SafeRestricted),
+                "unsafe_explicit" => Some(sg_executor::Mode::UnsafeExplicit),
+                "disabled" => Some(sg_executor::Mode::Disabled),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                sg_executor::detect_mode(
+                    sg_executor::docker_available(),
+                    std::env::var("SIXGATES_UNSAFE_EXEC")
+                        .map(|v| v == "1")
+                        .unwrap_or(false),
+                )
+            });
         Self {
             db,
             run_store,

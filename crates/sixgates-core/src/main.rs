@@ -16,6 +16,7 @@ unsafe fn libc_getppid() -> i32 {
 mod migrate;
 mod settings_dispatch;
 mod state;
+mod tool_exec;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
