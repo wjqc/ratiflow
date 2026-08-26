@@ -666,40 +666,53 @@
       "result": "value"
     },
     {
-      "name": "agent.run",
+      "name": "agent.start",
       "params": [
         {
           "name": "workItemId",
           "type": "string",
-          "required": true
+          "required": true,
+          "description": "工作项 ID"
         },
         {
           "name": "goal",
           "type": "string",
-          "required": true
+          "required": true,
+          "description": "任务目标"
         },
         {
           "name": "contextManifestId",
           "type": "string",
-          "required": true
+          "required": true,
+          "description": "上下文清单 ID（须属于该工作项）"
         },
         {
           "name": "toolAllowlist",
           "type": "array",
-          "required": false
-        },
-        {
-          "name": "idempotencyKey",
-          "type": "string",
-          "required": false
+          "required": false,
+          "description": "工具白名单（默认 read_file）"
         },
         {
           "name": "budget",
           "type": "object",
-          "required": false
+          "required": false,
+          "description": "预算（maxToolCalls/maxDurationSec/model）"
+        },
+        {
+          "name": "taskId",
+          "type": "string",
+          "required": false,
+          "description": "关联任务 ID"
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": false,
+          "description": "幂等键（重放返回同一 runId）"
         }
       ],
-      "result": "value"
+      "result": "value",
+      "description": "启动 Agent Run（唯一入口，ADR-028）：建行后立即返回 runId，循环在后台任务执行；终态经事件/agent.get 查询"
     },
     {
       "name": "agent.get",

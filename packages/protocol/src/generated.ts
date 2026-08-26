@@ -40,7 +40,7 @@ export type RpcMethodName =
   | 'artifact.revisionContent'
   | 'artifact.addReview'
   | 'artifact.freezeBaseline'
-  | 'agent.run'
+  | 'agent.start'
   | 'agent.get'
   | 'agent.cancel'
   | 'agent.proposals'
@@ -168,7 +168,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'artifact.revisionContent',
   'artifact.addReview',
   'artifact.freezeBaseline',
-  'agent.run',
+  'agent.start',
   'agent.get',
   'agent.cancel',
   'agent.proposals',
@@ -518,13 +518,14 @@ export interface ArtifactFreezeBaselineParams {
   gitlabCommitSha?: string;
 }
 
-export interface AgentRunParams {
+export interface AgentStartParams {
   workItemId: string;
   goal: string;
   contextManifestId: string;
   toolAllowlist?: unknown[];
-  idempotencyKey?: string;
   budget?: unknown;
+  taskId?: string;
+  idempotencyKey?: string;
 }
 
 export interface AgentGetParams {
