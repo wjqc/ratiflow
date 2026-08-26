@@ -1,0 +1,77 @@
+apps/desktop/src/renderer/src/app/settings/pages/KnowledgeDefaultsPage.tsx
+  s_912ffb5b75230f::t_d501de8b63fb72 45,51-52,55
+  s_912ffb5b75230f::t_2cbf8dcd33b23d 70-74
+apps/desktop/src/renderer/src/app/settings/pages/CredentialsPage.tsx
+  s_912ffb5b75230f::t_b0941b24036c74 56
+  s_912ffb5b75230f::t_dae3fee907dccd 75
+  s_912ffb5b75230f::t_13483c58337548 66
+apps/desktop/src/renderer/src/app/settings/pages/ExecutionPage.tsx
+  s_912ffb5b75230f::t_1758bc312b145b 55
+apps/desktop/src/renderer/src/app/settings/AuditPage.tsx
+  s_912ffb5b75230f::t_66d5179285b80a 203
+  s_912ffb5b75230f::t_0603725f74b1da 214-215
+  s_912ffb5b75230f::t_79b95284e6ec0f 151-152
+apps/desktop/src/renderer/src/app/settings/pages/GitlabPage.tsx
+  s_912ffb5b75230f::t_00be0d891727c3 43-44
+  s_912ffb5b75230f::t_33d32b4b366b98 56
+  s_912ffb5b75230f::t_9137084287d083 63
+  s_912ffb5b75230f::t_a452dbbde0c3ad 71
+apps/desktop/src/renderer/src/app/settings/OverviewPage.tsx
+  s_912ffb5b75230f::t_98fe995fd0a17c 88
+  s_912ffb5b75230f::t_1eb2112ae0b9fd 151-152
+  s_912ffb5b75230f::t_e1ae4f2772cf63 203
+  s_912ffb5b75230f::t_41ca45cd2e0427 34-35,40
+  s_912ffb5b75230f::t_bbad2bc0f376f5 164-165
+apps/desktop/src/renderer/src/app/settings/types.ts
+  s_912ffb5b75230f::t_f1b293b64b68ee 4-9,11,15-20,22
+  s_912ffb5b75230f::t_ad53400bbbad74 40,43-47,56,61,68-69,71-89
+apps/desktop/src/renderer/src/app/settings/pages/SshPage.tsx
+  s_912ffb5b75230f::t_f31717a2720534 44-45
+  s_912ffb5b75230f::t_ea41ae4782319b 57
+  s_912ffb5b75230f::t_28093e07da87dc 65
+  s_912ffb5b75230f::t_aebd430b76b87f 79
+apps/desktop/src/renderer/src/app/settings/pages/ModelsPage.tsx
+  s_912ffb5b75230f::t_7e4bf55ca83a76 44-46
+  s_912ffb5b75230f::t_a78b27fdab9517 66
+  s_912ffb5b75230f::t_81e324761bf823 58
+apps/desktop/src/renderer/src/app/settings/BackupPage.tsx
+  s_912ffb5b75230f::t_1830b0b599bae6 33
+  s_912ffb5b75230f::t_66af9516e4441d 5
+  s_912ffb5b75230f::t_6bab33dbf70826 16
+  s_912ffb5b75230f::t_dda05cddb03d18 78,84,86,89
+apps/desktop/src/renderer/src/app/settings/DiagnosticsPage.tsx
+  s_912ffb5b75230f::t_21bd857da19fc7 22,25
+  s_912ffb5b75230f::t_3e2c84d33a5395 48-49,53-54
+apps/desktop/src/renderer/src/app/settings/ProjectsPage.tsx
+  s_912ffb5b75230f::t_efdcc049472122 173-174,177
+  s_912ffb5b75230f::t_478e08b1c13351 294,297,301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "8850eda7ee02aa0d6bcb0f3006b7b5d9690ffa45",
+  "prompts": {},
+  "sessions": {
+    "s_912ffb5b75230f": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a89935b7fbc3f178f693fdc",
+        "model": "volc/deepseek-v4-flash-0731"
+      },
+      "human_author": "wenjian3 <wenjian3@asiainfo.com>",
+      "custom_attributes": {
+        "client_type": "ide",
+        "external_session_id": "6a89935b7fbc3f178f693fdc",
+        "session_id": "6a89935b7fbc3f178f693fdc",
+        "tool_type": "builtin",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "runtime_client": "trae-tob-git-ai",
+        "source_scene": "agent",
+        "edit_kind": "file_edit",
+        "dedupe_key": "6a89935b7fbc3f178f693fdc:6a8ea932d7e16d6030b7a83d:afterEdit:2bcf6ff6",
+        "tool_use_id": "6a8ea932d7e16d6030b7a83d",
+        "operation_id": "6a8ea932d7e16d6030b7a83d"
+      }
+    }
+  }
+}
