@@ -55,18 +55,18 @@ fn opt_str_param(params: &Value, key: &str) -> Option<String> {
     params.get(key).and_then(|v| v.as_str()).map(String::from)
 }
 
-/// 分发一个 RPC 请求。返回 (结果, 待推送事件截止 sequence)。
-pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
-    if let Some(result) = crate::settings_dispatch::dispatch(state, method, params) {
+/// 分发一个 RPC 请求（在 DB actor 线程上执行；store 由 actor 提供）。
+pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -> RpcResult {
+    if let Some(result) = crate::settings_dispatch::dispatch(state, store, method, params) {
         return result;
     }
     match method {
         // --- 系统 ---
         "core.version" => Ok(
             json!({"version": state.core_version, "protocolVersion": sg_protocol::PROTOCOL_VERSION,
-            "schemaVersion": state.store.schema_version().map_err(store_err)?}),
+            "schemaVersion": store.schema_version().map_err(store_err)?}),
         ),
-        "diagnostics.check" => diagnostics(state),
+        "diagnostics.check" => diagnostics(state, store),
 
         // --- 项目 ---
         "project.list" => {
@@ -74,18 +74,18 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 .get("includeArchived")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let items = sg_project::list(&state.store, include_archived).map_err(store_err)?;
+            let items = sg_project::list(store, include_archived).map_err(store_err)?;
             Ok(json!({"items": items}))
         }
         "project.get" => {
             let id = str_param(params, "projectId")?;
-            sg_project::get(&state.store, &id)
+            sg_project::get(store, &id)
                 .map(|p| serde_json::to_value(p).unwrap_or_default())
                 .map_err(store_err)
         }
         "project.create" => {
             let p = sg_project::register(
-                &state.store,
+                store,
                 &str_param(params, "gitlabInstance")?,
                 &str_param(params, "namespace")?,
                 &str_param(params, "project")?,
@@ -99,7 +99,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         "project.update" => {
             let id = str_param(params, "projectId")?;
             let p = sg_project::update(
-                &state.store,
+                store,
                 &id,
                 opt_str_param(params, "name").as_deref(),
                 opt_str_param(params, "localRoot").as_deref(),
@@ -115,22 +115,22 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 .get("archived")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            sg_project::archive(&state.store, &id, archived).map_err(store_err)?;
+            sg_project::archive(store, &id, archived).map_err(store_err)?;
             Ok(json!({"status": if archived { "archived" } else { "active" }}))
         }
         "project.summary" => {
-            sg_project::summary(&state.store, &str_param(params, "projectId")?).map_err(store_err)
+            sg_project::summary(store, &str_param(params, "projectId")?).map_err(store_err)
         }
 
         // --- 知识库 ---
         "knowledge.list" => {
-            let items = sg_knowledge::list_sources(&state.store, &str_param(params, "projectId")?)
+            let items = sg_knowledge::list_sources(store, &str_param(params, "projectId")?)
                 .map_err(store_err)?;
             Ok(json!({"items": items}))
         }
         "knowledge.create" => {
             let src = sg_knowledge::create_source(
-                &state.store,
+                store,
                 &str_param(params, "projectId")?,
                 &str_param(params, "kind")?,
                 &str_param(params, "name")?,
@@ -141,7 +141,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         }
         "knowledge.update" => {
             sg_knowledge::update_source(
-                &state.store,
+                store,
                 &str_param(params, "sourceId")?,
                 params.get("enabled").and_then(|v| v.as_bool()),
                 opt_str_param(params, "name").as_deref(),
@@ -150,13 +150,13 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             Ok(json!({"status": "updated"}))
         }
         "knowledge.remove" => {
-            sg_knowledge::remove_source(&state.store, &str_param(params, "sourceId")?)
+            sg_knowledge::remove_source(store, &str_param(params, "sourceId")?)
                 .map_err(store_err)?;
             Ok(json!({"status": "removed"}))
         }
         "knowledge.scan" => {
             let src = sg_knowledge::scan_source(
-                &state.store,
+                store,
                 &str_param(params, "sourceId")?,
                 opt_str_param(params, "projectRoot")
                     .map(std::path::PathBuf::from)
@@ -169,7 +169,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         }
         "knowledge.search" => {
             let hits = sg_knowledge::search(
-                &state.store,
+                store,
                 &str_param(params, "projectId")?,
                 &str_param(params, "query")?,
                 params.get("limit").and_then(|v| v.as_i64()).unwrap_or(20),
@@ -178,7 +178,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             Ok(json!({"items": hits}))
         }
         "context.preview" => sg_knowledge::context_preview(
-            &state.store,
+            store,
             &str_param(params, "projectId")?,
             &str_param(params, "query")?,
             params
@@ -198,7 +198,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 })
                 .unwrap_or_default();
             sg_knowledge::create_manifest(
-                &state.store,
+                store,
                 &str_param(params, "projectId")?,
                 &str_param(params, "workItemId")?,
                 &str_param(params, "query")?,
@@ -213,7 +213,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             let content =
                 base64_decode(&content_b64).map_err(|e| err(ErrorCode::InvalidParams, e))?;
             let att = sg_attachment::import(
-                &state.store,
+                store,
                 &str_param(params, "workItemId")?,
                 &str_param(params, "filename")?,
                 &content,
@@ -223,33 +223,32 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             Ok(serde_json::to_value(att).unwrap_or_default())
         }
         "attachment.list" => {
-            let items = sg_attachment::list(&state.store, &str_param(params, "workItemId")?)
-                .map_err(store_err)?;
+            let items =
+                sg_attachment::list(store, &str_param(params, "workItemId")?).map_err(store_err)?;
             Ok(json!({"items": items}))
         }
         "attachment.parse" => {
             sg_attachment::set_parse_result(
-                &state.store,
+                store,
                 &str_param(params, "attachmentId")?,
                 &str_param(params, "state")?,
                 opt_str_param(params, "extractedText").as_deref(),
                 &opt_str_param(params, "error").unwrap_or_default(),
             )
             .map_err(store_err)?;
-            sg_attachment::get(&state.store, &str_param(params, "attachmentId")?)
+            sg_attachment::get(store, &str_param(params, "attachmentId")?)
                 .map(|a| serde_json::to_value(a).unwrap_or_default())
                 .map_err(store_err)
         }
         "attachment.remove" => {
-            sg_attachment::remove(&state.store, &str_param(params, "attachmentId")?)
-                .map_err(store_err)?;
+            sg_attachment::remove(store, &str_param(params, "attachmentId")?).map_err(store_err)?;
             Ok(json!({"status": "removed"}))
         }
 
         // --- 工作项 ---
         "workitem.list" => {
             let (items, next) = sg_workitem::list(
-                &state.store,
+                store,
                 &str_param(params, "projectId")?,
                 &opt_str_param(params, "cursor").unwrap_or_default(),
                 params.get("limit").and_then(|v| v.as_i64()).unwrap_or(20),
@@ -259,8 +258,8 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         }
         "workitem.get" => {
             let id = str_param(params, "workItemId")?;
-            let wi = sg_workitem::get(&state.store, &id).map_err(store_err)?;
-            let stages = sg_workitem::stages(&state.store, &id).map_err(store_err)?;
+            let wi = sg_workitem::get(store, &id).map_err(store_err)?;
+            let stages = sg_workitem::stages(store, &id).map_err(store_err)?;
             Ok(json!({"workItem": wi, "stages": stages}))
         }
         "workitem.create" => {
@@ -274,7 +273,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 })
                 .unwrap_or_default();
             let wi = sg_workitem::create(
-                &state.store,
+                store,
                 &str_param(params, "projectId")?,
                 &str_param(params, "title")?,
                 &opt_str_param(params, "description").unwrap_or_default(),
@@ -284,7 +283,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             .map_err(store_err)?;
             // 需求文档落盘（工作目录 data/docs/）。
             let doc = format!("# {}\n\n{}\n", wi.title, wi.description);
-            let doc_path = sg_workitem::docs::save(&state.store, &wi.id, "requirement.md", &doc)
+            let doc_path = sg_workitem::docs::save(store, &wi.id, "requirement.md", &doc)
                 .map_err(store_err)?;
             let mut value = serde_json::to_value(&wi).unwrap_or_default();
             value["requirementDoc"] = json!(doc_path);
@@ -296,7 +295,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             let to = sg_workitem::StageState::parse(&str_param(params, "state")?)
                 .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown state"))?;
             sg_workitem::set_stage(
-                &state.store,
+                store,
                 &str_param(params, "workItemId")?,
                 gate,
                 to,
@@ -306,17 +305,17 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             Ok(json!({"status": "updated"}))
         }
         "workitem.progress" => {
-            sg_workitem::progress::progress(&state.store, &str_param(params, "workItemId")?)
+            sg_workitem::progress::progress(store, &str_param(params, "workItemId")?)
                 .map_err(store_err)
         }
         "workitem.documents" => {
-            let names = sg_workitem::docs::list(&state.store, &str_param(params, "workItemId")?)
+            let names = sg_workitem::docs::list(store, &str_param(params, "workItemId")?)
                 .map_err(store_err)?;
             Ok(json!({"items": names}))
         }
         "workitem.getDocument" => {
             let content = sg_workitem::docs::read(
-                &state.store,
+                store,
                 &str_param(params, "workItemId")?,
                 &str_param(params, "name")?,
             )
@@ -333,7 +332,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 title
             };
             let wi = sg_workitem::create(
-                &state.store,
+                store,
                 &str_param(params, "projectId")?,
                 &title,
                 "",
@@ -341,8 +340,8 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 &[],
             )
             .map_err(store_err)?;
-            let doc_path = sg_workitem::docs::save(&state.store, &wi.id, &filename, &content)
-                .map_err(store_err)?;
+            let doc_path =
+                sg_workitem::docs::save(store, &wi.id, &filename, &content).map_err(store_err)?;
             let mut value = serde_json::to_value(&wi).unwrap_or_default();
             value["requirementDoc"] = json!(doc_path);
             Ok(value)
@@ -365,7 +364,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                     )
                 })?;
             let wi = sg_workitem::create(
-                &state.store,
+                store,
                 &str_param(params, "projectId")?,
                 &issue.title,
                 &issue.body,
@@ -374,8 +373,8 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             )
             .map_err(store_err)?;
             let doc = format!("# {}\n\n{}\n", issue.title, issue.body);
-            let doc_path = sg_workitem::docs::save(&state.store, &wi.id, "requirement.md", &doc)
-                .unwrap_or_default();
+            let doc_path =
+                sg_workitem::docs::save(store, &wi.id, "requirement.md", &doc).unwrap_or_default();
             let mut value = serde_json::to_value(&wi).unwrap_or_default();
             value["requirementDoc"] = json!(doc_path);
             Ok(value)
@@ -383,14 +382,13 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
 
         // --- 工件 ---
         "artifact.list" => {
-            let items =
-                sg_artifact::list_artifacts(&state.store, &str_param(params, "workItemId")?)
-                    .map_err(store_err)?;
+            let items = sg_artifact::list_artifacts(store, &str_param(params, "workItemId")?)
+                .map_err(store_err)?;
             Ok(json!({"items": items}))
         }
         "artifact.create" => {
             let art = sg_artifact::create_artifact(
-                &state.store,
+                store,
                 &str_param(params, "workItemId")?,
                 &str_param(params, "kind")?,
                 &str_param(params, "title")?,
@@ -400,7 +398,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         }
         "artifact.createDraft" => {
             let rev = sg_artifact::create_draft(
-                &state.store,
+                store,
                 &str_param(params, "artifactId")?,
                 &str_param(params, "content")?,
             )
@@ -409,7 +407,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         }
         "artifact.updateDraft" => {
             let rev = sg_artifact::update_draft(
-                &state.store,
+                store,
                 &str_param(params, "revisionId")?,
                 &str_param(params, "etag")?,
                 &str_param(params, "content")?,
@@ -418,20 +416,18 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             Ok(serde_json::to_value(rev).unwrap_or_default())
         }
         "artifact.listRevisions" => {
-            let items =
-                sg_artifact::list_revisions(&state.store, &str_param(params, "artifactId")?)
-                    .map_err(store_err)?;
+            let items = sg_artifact::list_revisions(store, &str_param(params, "artifactId")?)
+                .map_err(store_err)?;
             Ok(json!({"items": items}))
         }
         "artifact.revisionContent" => {
-            let content =
-                sg_artifact::revision_content(&state.store, &str_param(params, "revisionId")?)
-                    .map_err(store_err)?;
+            let content = sg_artifact::revision_content(store, &str_param(params, "revisionId")?)
+                .map_err(store_err)?;
             Ok(json!({"content": String::from_utf8_lossy(&content)}))
         }
         "artifact.addReview" => {
             sg_artifact::add_review(
-                &state.store,
+                store,
                 &str_param(params, "revisionId")?,
                 &str_param(params, "reviewer")?,
                 &str_param(params, "verdict")?,
@@ -452,7 +448,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 })
                 .ok_or_else(|| err(ErrorCode::InvalidParams, "revisionIds required"))?;
             let base = sg_artifact::freeze(
-                &state.store,
+                store,
                 &str_param(params, "workItemId")?,
                 &str_param(params, "gate")?,
                 &revision_ids,
@@ -465,7 +461,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             {
                 let inputs = base.inputs_sha256.clone();
                 let wi = str_param(params, "workItemId")?;
-                let _ = sg_workitem::mark_stale_from(&state.store, &wi, gate, &inputs);
+                let _ = sg_workitem::mark_stale_from(store, &wi, gate, &inputs);
             }
             Ok(serde_json::to_value(base).unwrap_or_default())
         }
@@ -476,8 +472,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             let goal = str_param(params, "goal")?;
             let manifest_id = str_param(params, "contextManifestId")?;
             // 校验清单属于该工作项。
-            let manifest =
-                sg_knowledge::get_manifest(&state.store, &manifest_id).map_err(store_err)?;
+            let manifest = sg_knowledge::get_manifest(store, &manifest_id).map_err(store_err)?;
             if manifest["workitemId"].as_str() != Some(workitem_id.as_str()) {
                 return Err(err(ErrorCode::InvalidParams, "上下文清单与工作项不匹配"));
             }
@@ -516,7 +511,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             };
             let task_id = opt_str_param(params, "taskId").unwrap_or_default();
             let out = sg_agent::start(
-                &state.store,
+                store,
                 &state.model,
                 &state.policy,
                 Some(&executor),
@@ -532,21 +527,20 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 },
             )
             .map_err(store_err)?;
-            let proposals = sg_agent::proposals(&state.store, &out.run.id).unwrap_or_default();
+            let proposals = sg_agent::proposals(store, &out.run.id).unwrap_or_default();
             Ok(json!({"run": out.run, "output": out.output, "proposals": proposals}))
         }
         "agent.get" => {
-            let run =
-                sg_agent::get_run(&state.store, &str_param(params, "runId")?).map_err(store_err)?;
+            let run = sg_agent::get_run(store, &str_param(params, "runId")?).map_err(store_err)?;
             Ok(serde_json::to_value(run).unwrap_or_default())
         }
         "agent.cancel" => {
-            sg_agent::cancel(&state.store, &str_param(params, "runId")?).map_err(store_err)?;
+            sg_agent::cancel(store, &str_param(params, "runId")?).map_err(store_err)?;
             Ok(json!({"status": "cancelled"}))
         }
         "agent.proposals" => {
-            let items = sg_agent::proposals(&state.store, &str_param(params, "runId")?)
-                .map_err(store_err)?;
+            let items =
+                sg_agent::proposals(store, &str_param(params, "runId")?).map_err(store_err)?;
             Ok(json!({"items": items}))
         }
 
@@ -567,9 +561,9 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 inputs_current: sg_workitem::InputState::Unknown,
             };
             if let Some(base) =
-                sg_artifact::latest_baseline(&state.store, &workitem_id).map_err(store_err)?
+                sg_artifact::latest_baseline(store, &workitem_id).map_err(store_err)?
             {
-                if sg_artifact::is_baseline_current(&state.store, &base.id).map_err(store_err)? {
+                if sg_artifact::is_baseline_current(store, &base.id).map_err(store_err)? {
                     inputs.required_artifacts_frozen = sg_workitem::InputState::Pass;
                     inputs.inputs_current = sg_workitem::InputState::Pass;
                 } else {
@@ -577,7 +571,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                     inputs.inputs_current = sg_workitem::InputState::Fail;
                 }
             }
-            let evidences = sg_evidence::list(&state.store, &workitem_id, Some(gate_name.as_str()))
+            let evidences = sg_evidence::list(store, &workitem_id, Some(gate_name.as_str()))
                 .map_err(store_err)?;
             if !evidences.is_empty() {
                 inputs.evidence_complete = if evidences.iter().all(|e| e.verified) {
@@ -587,17 +581,17 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 };
                 inputs.required_checks_passed = sg_workitem::InputState::Pass;
             }
-            let pending = sg_policy::pending(&state.store, 100).map_err(store_err)?;
+            let pending = sg_policy::pending(store, 100).map_err(store_err)?;
             if pending.is_empty() {
                 inputs.approvals_valid = sg_workitem::InputState::Pass;
             } else {
                 inputs.no_blocking_risk = sg_workitem::InputState::Fail;
             }
             let result =
-                sg_workitem::gate::evaluate_and_record(&state.store, &inputs).map_err(store_err)?;
+                sg_workitem::gate::evaluate_and_record(store, &inputs).map_err(store_err)?;
             if result.passed {
                 let gate = sg_workitem::Gate::parse(&gate_name).unwrap();
-                sg_workitem::pass_gate(&state.store, &workitem_id, gate).map_err(store_err)?;
+                sg_workitem::pass_gate(store, &workitem_id, gate).map_err(store_err)?;
             }
             Ok(serde_json::to_value(result).unwrap_or_default())
         }
@@ -605,7 +599,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         // --- 审批 ---
         "approval.list" => {
             let items = sg_policy::pending(
-                &state.store,
+                store,
                 params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50),
             )
             .map_err(store_err)?;
@@ -616,7 +610,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             let decision = str_param(params, "decision")?;
             // 批准前重算 digest 由领域层 validate_for 保证；前端只提交决定。
             let appr = sg_policy::decide(
-                &state.store,
+                store,
                 &approval_id,
                 &decision,
                 &str_param(params, "decidedBy")?,
@@ -624,7 +618,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             )
             .map_err(store_err)?;
             sg_store::audit::append(
-                &state.store,
+                store,
                 &str_param(params, "decidedBy")?,
                 &format!("approval.{decision}"),
                 "approval",
@@ -636,13 +630,11 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         }
         "approval.listByWorkItem" => {
             let workitem_id = str_param(params, "workItemId")?;
-            let deployments =
-                list_deployments_for(&state.store, &workitem_id).map_err(store_err)?;
+            let deployments = list_deployments_for(store, &workitem_id).map_err(store_err)?;
             let mut items = Vec::new();
             for dep in &deployments {
                 items.extend(
-                    sg_policy::list_by_subject(&state.store, "deployment", dep)
-                        .map_err(store_err)?,
+                    sg_policy::list_by_subject(store, "deployment", dep).map_err(store_err)?,
                 );
             }
             Ok(json!({"items": items}))
@@ -651,7 +643,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         // --- 证据 / 文牒 ---
         "evidence.list" => {
             let items = sg_evidence::list(
-                &state.store,
+                store,
                 &str_param(params, "workItemId")?,
                 opt_str_param(params, "gate").as_deref(),
             )
@@ -672,12 +664,12 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 payload: &payload,
                 source: &source,
             };
-            let ev = sg_evidence::record(&state.store, &input).map_err(store_err)?;
+            let ev = sg_evidence::record(store, &input).map_err(store_err)?;
             Ok(serde_json::to_value(ev).unwrap_or_default())
         }
         "evidence.verify" => {
             sg_evidence::verify(
-                &state.store,
+                store,
                 &str_param(params, "evidenceId")?,
                 &str_param(params, "verifiedBy")?,
             )
@@ -689,13 +681,12 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             let mut gates = Vec::new();
             let mut ok = true;
             for gate in sg_workitem::Gate::ALL {
-                match sg_workitem::gate::latest(&state.store, &workitem_id, gate.as_str())
+                match sg_workitem::gate::latest(store, &workitem_id, gate.as_str())
                     .map_err(store_err)?
                 {
                     Some(result) if result.passed => {
-                        let evidences =
-                            sg_evidence::list(&state.store, &workitem_id, Some(gate.as_str()))
-                                .map_err(store_err)?;
+                        let evidences = sg_evidence::list(store, &workitem_id, Some(gate.as_str()))
+                            .map_err(store_err)?;
                         gates.push(sg_evidence::GateSummary {
                             gate: gate.as_str().into(),
                             passed: true,
@@ -716,7 +707,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 ));
             }
             let passport = sg_evidence::issue_passport(
-                &state.store,
+                store,
                 &workitem_id,
                 &gates,
                 &opt_str_param(params, "sharedSummary").unwrap_or_default(),
@@ -725,7 +716,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
             Ok(serde_json::to_value(passport).unwrap_or_default())
         }
         "passport.latest" => {
-            match sg_evidence::latest_passport(&state.store, &str_param(params, "workItemId")?)
+            match sg_evidence::latest_passport(store, &str_param(params, "workItemId")?)
                 .map_err(store_err)?
             {
                 Some(p) => Ok(serde_json::to_value(p).unwrap_or_default()),
@@ -741,24 +732,23 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
                 .ok_or_else(|| err(ErrorCode::InvalidParams, "plan required"))?;
             let plan: sg_workflow::DeploymentPlan = serde_json::from_value(plan_value)
                 .map_err(|e| err(ErrorCode::InvalidParams, format!("plan: {e}")))?;
-            let dep =
-                sg_workflow::create_plan(&state.store, &str_param(params, "workItemId")?, &plan)
-                    .map_err(store_err)?;
+            let dep = sg_workflow::create_plan(store, &str_param(params, "workItemId")?, &plan)
+                .map_err(store_err)?;
             Ok(serde_json::to_value(dep).unwrap_or_default())
         }
         "deployment.get" => {
-            let dep = sg_workflow::get(&state.store, &str_param(params, "deploymentId")?)
-                .map_err(store_err)?;
+            let dep =
+                sg_workflow::get(store, &str_param(params, "deploymentId")?).map_err(store_err)?;
             Ok(serde_json::to_value(dep).unwrap_or_default())
         }
         "deployment.submit" => {
             let id = str_param(params, "deploymentId")?;
-            sg_workflow::submit_for_approval(&state.store, &id).map_err(store_err)?;
+            sg_workflow::submit_for_approval(store, &id).map_err(store_err)?;
             Ok(json!({"status": "awaiting_approval"}))
         }
         "deployment.deploy" => {
             let dep = sg_workflow::approve_and_deploy(
-                &state.store,
+                store,
                 &str_param(params, "deploymentId")?,
                 state.ssh.as_ref(),
             )
@@ -767,7 +757,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         }
         "deployment.verify" => {
             let dep = sg_workflow::verify(
-                &state.store,
+                store,
                 &str_param(params, "deploymentId")?,
                 state.ssh.as_ref(),
             )
@@ -776,7 +766,7 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         }
         "deployment.rollback" => {
             let dep = sg_workflow::rollback(
-                &state.store,
+                store,
                 &str_param(params, "deploymentId")?,
                 state.ssh.as_ref(),
             )
@@ -788,19 +778,19 @@ pub fn dispatch(state: &AppState, method: &str, params: &Value) -> RpcResult {
         "timeline.snapshot" => {
             let wi = opt_str_param(params, "workItemId");
             let after = params.get("afterSeq").and_then(|v| v.as_i64()).unwrap_or(0);
-            let events = sg_timeline::snapshot(&state.store, wi.as_deref(), after, 500)
-                .map_err(store_err)?;
+            let events =
+                sg_timeline::snapshot(store, wi.as_deref(), after, 500).map_err(store_err)?;
             Ok(
-                json!({"events": events, "latest": outbox::latest_sequence(&state.store).map_err(store_err)?}),
+                json!({"events": events, "latest": outbox::latest_sequence(store).map_err(store_err)?}),
             )
         }
         "backup.create" => {
-            let snap = sg_store::backup::snapshot(&state.store).map_err(store_err)?;
+            let snap = sg_store::backup::snapshot(store).map_err(store_err)?;
             Ok(snap.manifest)
         }
         "audit.list" => {
             let items = sg_store::audit::list(
-                &state.store,
+                store,
                 params.get("afterSeq").and_then(|v| v.as_i64()).unwrap_or(0),
                 params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50),
             )
@@ -824,8 +814,8 @@ fn list_deployments_for(store: &Store, workitem_id: &str) -> Result<Vec<String>,
     })
 }
 
-fn diagnostics(state: &AppState) -> RpcResult {
-    let checks = diagnostics_checks(state);
+fn diagnostics(state: &AppState, store: &Store) -> RpcResult {
+    let checks = diagnostics_checks(state, store);
     let ready = checks
         .iter()
         .all(|c| c["status"] != json!("error") && c["status"] != json!("needs_configuration"));
@@ -834,20 +824,19 @@ fn diagnostics(state: &AppState) -> RpcResult {
         "ready": ready,
         "checks": checks,
         // 兼容字段（旧 UI 消费）：由 checks 派生。
-        "integrations": diagnostics_checks(state).iter().filter(|c| c["scope"] == json!("integration")).cloned().collect::<Vec<_>>(),
-        "local": diagnostics_checks(state).iter().filter(|c| c["scope"] == json!("local")).cloned().collect::<Vec<_>>(),
+        "integrations": diagnostics_checks(state, store).iter().filter(|c| c["scope"] == json!("integration")).cloned().collect::<Vec<_>>(),
+        "local": diagnostics_checks(state, store).iter().filter(|c| c["scope"] == json!("local")).cloned().collect::<Vec<_>>(),
     }))
 }
 
 /// S50：每个检查项含 checkId/scope/severity/status/durationMs/fixTarget（一键跳转配置页）。
-fn diagnostics_checks(state: &AppState) -> Vec<Value> {
+fn diagnostics_checks(state: &AppState, store: &Store) -> Vec<Value> {
     let start = std::time::Instant::now();
-    let store_ok = state.store.quick_check().is_ok();
-    let schema = state.store.schema_version().unwrap_or(0);
+    let store_ok = store.quick_check().is_ok();
+    let schema = store.schema_version().unwrap_or(0);
     let dur = |s: std::time::Instant| s.elapsed().as_millis() as i64;
 
-    let gl_profiles: i64 = state
-        .store
+    let gl_profiles: i64 = store
         .with_conn(|conn| {
             Ok(conn
                 .query_row("SELECT COUNT(*) FROM gitlab_profiles", [], |r| r.get(0))
@@ -857,8 +846,7 @@ fn diagnostics_checks(state: &AppState) -> Vec<Value> {
     let gl_env = std::env::var("SIXGATES_GITLAB_URL")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    let mp_profiles: i64 = state
-        .store
+    let mp_profiles: i64 = store
         .with_conn(|conn| {
             Ok(conn
                 .query_row("SELECT COUNT(*) FROM model_profiles", [], |r| r.get(0))
@@ -868,8 +856,7 @@ fn diagnostics_checks(state: &AppState) -> Vec<Value> {
     let mp_env = std::env::var("SIXGATES_MODEL_API_KEY")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    let ssh_targets: i64 = state
-        .store
+    let ssh_targets: i64 = store
         .with_conn(|conn| {
             Ok(conn
                 .query_row("SELECT COUNT(*) FROM ssh_targets", [], |r| r.get(0))
@@ -970,19 +957,19 @@ fn diagnostics_checks(state: &AppState) -> Vec<Value> {
             "local",
             if store_ok { "ready" } else { "error" },
             "blocking",
-            state.store.data_dir.display().to_string(),
+            store.data_dir.display().to_string(),
             "/settings/backup",
         ),
     ]
 }
 
-pub fn diagnostics_run_pub(state: &AppState, check_id: &str) -> RpcResult {
-    diagnostics_run(state, check_id)
+pub fn diagnostics_run_pub(state: &AppState, store: &Store, check_id: &str) -> RpcResult {
+    diagnostics_run(state, store, check_id)
 }
 
 /// diagnostics.run(checkId)：单项重查（S50）。
-fn diagnostics_run(state: &AppState, check_id: &str) -> RpcResult {
-    let checks = diagnostics_checks(state);
+fn diagnostics_run(state: &AppState, store: &Store, check_id: &str) -> RpcResult {
+    let checks = diagnostics_checks(state, store);
     let found = checks
         .into_iter()
         .find(|c| c["checkId"] == json!(check_id))

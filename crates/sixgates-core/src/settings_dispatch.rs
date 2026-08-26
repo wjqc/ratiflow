@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use sg_integrations::GitLabClient as _;
 use sg_protocol::{ErrorCode, RpcError};
 use sg_settings as settings;
+use sg_store::Store;
 
 use crate::state::AppState;
 
@@ -41,9 +42,9 @@ fn n(p: &Value, k: &str) -> Result<i64, RpcError> {
         .ok_or_else(|| RpcError::new(ErrorCode::InvalidParams, format!("缺少 {k}")))
 }
 
-fn changed(state: &AppState, resource: &str, id: &str) {
+fn changed(store: &Store, resource: &str, id: &str) {
     let _ = sg_store::outbox::emit(
-        &state.store,
+        store,
         resource,
         id,
         &format!("{resource}.changed"),
@@ -81,17 +82,17 @@ const PREFIXES: [&str; 27] = [
     "tool.test",
 ];
 
-pub fn dispatch(state: &AppState, method: &str, p: &Value) -> Option<R> {
+pub fn dispatch(state: &AppState, store: &Store, method: &str, p: &Value) -> Option<R> {
     if !PREFIXES.iter().any(|pfx| method.starts_with(pfx)) {
         return None;
     }
-    Some(run(state, method, p))
+    Some(run(state, store, method, p))
 }
 
-fn run(state: &AppState, method: &str, p: &Value) -> R {
+fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
     match method {
         // --- 系统与设置 ---
-        "settings.summary" => settings::settings::summary::aggregate(&state.store).map_err(serr),
+        "settings.summary" => settings::settings::summary::aggregate(store).map_err(serr),
         "settings.get" => {
             let keys: Option<Vec<String>> = p.get("keys").and_then(|v| v.as_array()).map(|a| {
                 a.iter()
@@ -99,7 +100,7 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                     .collect()
             });
             let items = settings::settings::get(
-                &state.store,
+                store,
                 opt_s(p, "scope").unwrap_or("global"),
                 opt_s(p, "projectId"),
                 keys.as_deref(),
@@ -108,8 +109,8 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
             Ok(json!({"items": items}))
         }
         "settings.effective" => {
-            let items = settings::settings::effective(&state.store, opt_s(p, "projectId"), None)
-                .map_err(serr)?;
+            let items =
+                settings::settings::effective(store, opt_s(p, "projectId"), None).map_err(serr)?;
             Ok(json!({"items": items}))
         }
         "settings.update" => {
@@ -131,58 +132,52 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                 })
                 .ok_or_else(|| RpcError::new(ErrorCode::InvalidParams, "patches 必填"))?;
             let updated = settings::settings::update(
-                &state.store,
+                store,
                 opt_s(p, "scope").unwrap_or("global"),
                 opt_s(p, "projectId"),
                 &patches,
                 "local",
             )
             .map_err(serr)?;
-            changed(state, "settings", "app");
+            changed(store, "settings", "app");
             Ok(json!({"items": updated}))
         }
 
         // --- 模型 ---
         "modelProfile.list" => {
-            let v = settings::profiles::model_list(&state.store).map_err(serr)?;
+            let v = settings::profiles::model_list(store).map_err(serr)?;
             Ok(json!({"items": v}))
         }
         "modelProfile.get" => {
-            let v =
-                settings::profiles::model_get(&state.store, s(p, "profileId")?).map_err(serr)?;
+            let v = settings::profiles::model_get(store, s(p, "profileId")?).map_err(serr)?;
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "modelProfile.create" => {
-            let v = settings::profiles::model_create(&state.store, p).map_err(serr)?;
-            changed(state, "modelProfile", &v.id);
+            let v = settings::profiles::model_create(store, p).map_err(serr)?;
+            changed(store, "modelProfile", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "modelProfile.update" => {
             let v = settings::profiles::model_update(
-                &state.store,
+                store,
                 s(p, "profileId")?,
                 p,
                 n(p, "expectedRevision")?,
             )
             .map_err(serr)?;
-            changed(state, "modelProfile", &v.id);
+            changed(store, "modelProfile", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "modelProfile.remove" => {
-            settings::profiles::model_remove(
-                &state.store,
-                s(p, "profileId")?,
-                n(p, "expectedRevision")?,
-            )
-            .map_err(serr)?;
+            settings::profiles::model_remove(store, s(p, "profileId")?, n(p, "expectedRevision")?)
+                .map_err(serr)?;
             Ok(json!({"status": "removed"}))
         }
         "modelProfile.test" => {
-            let profile =
-                settings::profiles::model_get(&state.store, s(p, "profileId")?).map_err(serr)?;
+            let profile = settings::profiles::model_get(store, s(p, "profileId")?).map_err(serr)?;
             let api_key = match &profile.credential_ref_id {
                 Some(rid) => Some(
-                    settings::profiles::reveal_for(&state.store, state.credentials.as_ref(), rid)
+                    settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
                 None => std::env::var("SIXGATES_MODEL_API_KEY").ok(),
@@ -198,70 +193,69 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
             } else {
                 "error"
             };
-            let _ = settings::profiles::model_mark_tested(&state.store, &profile.id, status)
-                .map_err(serr);
+            let _ = settings::profiles::model_mark_tested(store, &profile.id, status).map_err(serr);
             Ok(serde_json::to_value(&report).unwrap_or_default())
         }
         "modelProfile.syncModels" => {
             Ok(json!({"models": [], "note": "syncModels 留待 provider 模型列表接入（P1）"}))
         }
-        "modelRoute.get" => settings::profiles::route_get(&state.store).map_err(serr),
+        "modelRoute.get" => settings::profiles::route_get(store).map_err(serr),
         "modelRoute.update" => {
             let v = settings::profiles::route_update(
-                &state.store,
+                store,
                 p.get("route").unwrap_or(p),
                 n(p, "expectedRevision")?,
             )
             .map_err(serr)?;
-            changed(state, "modelRoute", "route");
+            changed(store, "modelRoute", "route");
             Ok(v)
         }
 
         // --- 工具/执行 ---
         "toolPolicy.list" => {
-            let v = settings::policy_ext::tool_list(&state.store).map_err(serr)?;
+            let v = settings::policy_ext::tool_list(store).map_err(serr)?;
             Ok(json!({"items": v}))
         }
         "toolPolicy.update" => {
-            let v = settings::policy_ext::tool_update(&state.store, p, n(p, "expectedRevision")?)
+            let v = settings::policy_ext::tool_update(store, p, n(p, "expectedRevision")?)
                 .map_err(serr)?;
-            changed(state, "policy", &v.tool_id);
+            changed(store, "policy", &v.tool_id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "toolPolicy.effective" => {
-            let v = settings::policy_ext::tool_effective(&state.store, opt_s(p, "projectId"))
-                .map_err(serr)?;
+            let v =
+                settings::policy_ext::tool_effective(store, opt_s(p, "projectId")).map_err(serr)?;
             Ok(json!({"items": v}))
         }
         "executionProfile.list" => {
-            let v = settings::policy_ext::execution_list(&state.store).map_err(serr)?;
+            let v = settings::policy_ext::execution_list(store).map_err(serr)?;
             Ok(json!({"items": v}))
         }
         "executionProfile.create" => {
             let v = settings::policy_ext::execution_create(
-                &state.store,
+                store,
                 s(p, "name")?,
                 s(p, "mode")?,
                 p.get("limits").unwrap_or(&Value::Null),
             )
             .map_err(serr)?;
-            changed(state, "executionProfile", &v.id);
+            changed(store, "executionProfile", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "executionProfile.update" => {
             let v = settings::policy_ext::execution_update(
-                &state.store,
+                store,
                 s(p, "profileId")?,
                 p,
                 n(p, "expectedRevision")?,
             )
             .map_err(serr)?;
-            changed(state, "executionProfile", &v.id);
+            changed(store, "executionProfile", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "executionProfile.remove" => {
             settings::policy_ext::execution_remove(
-                &state.store,
+                store,
                 s(p, "profileId")?,
                 n(p, "expectedRevision")?,
             )
@@ -271,40 +265,36 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
 
         // --- GitLab ---
         "gitlabProfile.list" => {
-            let v = settings::profiles::gitlab_list(&state.store).map_err(serr)?;
+            let v = settings::profiles::gitlab_list(store).map_err(serr)?;
             Ok(json!({"items": v}))
         }
         "gitlabProfile.create" => {
-            let v = settings::profiles::gitlab_create(&state.store, p).map_err(serr)?;
-            changed(state, "gitlabProfile", &v.id);
+            let v = settings::profiles::gitlab_create(store, p).map_err(serr)?;
+            changed(store, "gitlabProfile", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "gitlabProfile.update" => {
             let v = settings::profiles::gitlab_update(
-                &state.store,
+                store,
                 s(p, "profileId")?,
                 p,
                 n(p, "expectedRevision")?,
             )
             .map_err(serr)?;
-            changed(state, "gitlabProfile", &v.id);
+            changed(store, "gitlabProfile", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "gitlabProfile.remove" => {
-            settings::profiles::gitlab_remove(
-                &state.store,
-                s(p, "profileId")?,
-                n(p, "expectedRevision")?,
-            )
-            .map_err(serr)?;
+            settings::profiles::gitlab_remove(store, s(p, "profileId")?, n(p, "expectedRevision")?)
+                .map_err(serr)?;
             Ok(json!({"status": "removed"}))
         }
         "gitlabProfile.test" => {
             let profile =
-                settings::profiles::gitlab_get(&state.store, s(p, "profileId")?).map_err(serr)?;
+                settings::profiles::gitlab_get(store, s(p, "profileId")?).map_err(serr)?;
             let token = match &profile.credential_ref_id {
                 Some(rid) => Some(
-                    settings::profiles::reveal_for(&state.store, state.credentials.as_ref(), rid)
+                    settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
                 None => std::env::var("SIXGATES_GITLAB_TOKEN").ok(),
@@ -315,12 +305,12 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
             } else {
                 "degraded"
             };
-            let _ = settings::profiles::gitlab_update_status(&state.store, &profile.id, status);
+            let _ = settings::profiles::gitlab_update_status(store, &profile.id, status);
             Ok(serde_json::to_value(&report).unwrap_or_default())
         }
         "gitlabProfile.capabilities" => {
             let _profile =
-                settings::profiles::gitlab_get(&state.store, s(p, "profileId")?).map_err(serr)?;
+                settings::profiles::gitlab_get(store, s(p, "profileId")?).map_err(serr)?;
             Ok(
                 json!({"issueReadWrite": true, "ciRead": true, "registryRead": true, "note": "能力探测以 test 步骤为准"}),
             )
@@ -328,41 +318,36 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
 
         // --- SSH ---
         "sshTarget.list" => {
-            let v = settings::profiles::ssh_list(&state.store).map_err(serr)?;
+            let v = settings::profiles::ssh_list(store).map_err(serr)?;
             Ok(json!({"items": v}))
         }
         "sshTarget.get" => {
-            let v = settings::profiles::ssh_get(&state.store, s(p, "targetId")?).map_err(serr)?;
+            let v = settings::profiles::ssh_get(store, s(p, "targetId")?).map_err(serr)?;
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "sshTarget.create" => {
-            let v = settings::profiles::ssh_create(&state.store, p).map_err(serr)?;
-            changed(state, "sshTarget", &v.id);
+            let v = settings::profiles::ssh_create(store, p).map_err(serr)?;
+            changed(store, "sshTarget", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "sshTarget.update" => {
             let v = settings::profiles::ssh_update(
-                &state.store,
+                store,
                 s(p, "targetId")?,
                 p,
                 n(p, "expectedRevision")?,
             )
             .map_err(serr)?;
-            changed(state, "sshTarget", &v.id);
+            changed(store, "sshTarget", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "sshTarget.remove" => {
-            settings::profiles::ssh_remove(
-                &state.store,
-                s(p, "targetId")?,
-                n(p, "expectedRevision")?,
-            )
-            .map_err(serr)?;
+            settings::profiles::ssh_remove(store, s(p, "targetId")?, n(p, "expectedRevision")?)
+                .map_err(serr)?;
             Ok(json!({"status": "removed"}))
         }
         "sshTarget.test" => {
-            let target =
-                settings::profiles::ssh_get(&state.store, s(p, "targetId")?).map_err(serr)?;
+            let target = settings::profiles::ssh_get(store, s(p, "targetId")?).map_err(serr)?;
             let report = sg_integrations::ssh_target_test(
                 &target.host,
                 target.port,
@@ -375,23 +360,23 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                 "action_required" => "configured",
                 _ => "error",
             };
-            let _ = settings::profiles::ssh_mark_tested(&state.store, &target.id, status);
+            let _ = settings::profiles::ssh_mark_tested(store, &target.id, status);
             Ok(serde_json::to_value(&report).unwrap_or_default())
         }
         "sshTarget.acceptHostKey" => {
             let v = settings::profiles::ssh_accept_host_key(
-                &state.store,
+                store,
                 s(p, "targetId")?,
                 s(p, "fingerprint")?,
             )
             .map_err(serr)?;
-            changed(state, "sshTarget", &v.id);
+            changed(store, "sshTarget", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
 
         // --- 凭据 ---
         "credentialRef.list" => {
-            let v = settings::credentials::list(&state.store).map_err(serr)?;
+            let v = settings::credentials::list(store).map_err(serr)?;
             Ok(json!({"items": v}))
         }
         "credentialRef.create" => {
@@ -401,7 +386,7 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                 .unwrap_or("")
                 .to_string();
             let v = settings::credentials::create(
-                &state.store,
+                store,
                 state.credentials.as_ref(),
                 s(p, "name")?,
                 s(p, "kind")?,
@@ -411,7 +396,7 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
             )
             .map_err(serr)?;
             let _ = settings::audit_ext::append(
-                &state.store,
+                store,
                 &settings::audit_ext::AuditEvent {
                     actor: "local",
                     actor_kind: "user",
@@ -425,7 +410,7 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                     after_summary: Some(&json!({"hasSecret": true})),
                 },
             );
-            changed(state, "credentialRef", &v.id);
+            changed(store, "credentialRef", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "credentialRef.replace" => {
@@ -436,19 +421,19 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                 .to_string();
             let id = s(p, "refId")?.to_string();
             let v = settings::credentials::replace(
-                &state.store,
+                store,
                 state.credentials.as_ref(),
                 &id,
                 &secret,
                 n(p, "expectedRevision")?,
             )
             .map_err(serr)?;
-            changed(state, "credentialRef", &id);
+            changed(store, "credentialRef", &id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "credentialRef.remove" => {
             settings::credentials::remove(
-                &state.store,
+                store,
                 state.credentials.as_ref(),
                 s(p, "refId")?,
                 n(p, "expectedRevision")?,
@@ -458,76 +443,66 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
             Ok(json!({"status": "removed"}))
         }
         "credentialRef.verify" => {
-            let v = settings::credentials::verify(
-                &state.store,
-                state.credentials.as_ref(),
-                s(p, "refId")?,
-            )
-            .map_err(serr)?;
+            let v =
+                settings::credentials::verify(store, state.credentials.as_ref(), s(p, "refId")?)
+                    .map_err(serr)?;
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
 
         // --- 备份 ---
         "backup.list" => {
-            let v = settings::backup_ext::list(&state.store).map_err(serr)?;
+            let v = settings::backup_ext::list(store).map_err(serr)?;
             Ok(json!({"items": v}))
         }
         "backup.create" => {
-            let op =
-                settings::operations::begin(&state.store, "backup.create", false).map_err(serr)?;
+            let op = settings::operations::begin(store, "backup.create", false).map_err(serr)?;
             let _ = settings::operations::progress(
-                &state.store,
+                store,
                 &op.operation_id,
                 1,
                 3,
                 "backup.step.snapshot",
             );
-            let snap = sg_store::backup::snapshot(&state.store)
+            let snap = sg_store::backup::snapshot(store)
                 .map_err(|e| serr(settings::SettingsError::new("INTERNAL", e.to_string())))?;
             let _ = settings::operations::progress(
-                &state.store,
+                store,
                 &op.operation_id,
                 2,
                 3,
                 "backup.step.register",
             );
-            let record = settings::backup_ext::register(&state.store, &snap, 1).map_err(serr)?;
-            let _ = settings::operations::progress(
-                &state.store,
-                &op.operation_id,
-                3,
-                3,
-                "backup.step.done",
-            );
+            let record = settings::backup_ext::register(store, &snap, 1).map_err(serr)?;
+            let _ =
+                settings::operations::progress(store, &op.operation_id, 3, 3, "backup.step.done");
             let _ = settings::operations::finish(
-                &state.store,
+                store,
                 &op.operation_id,
                 "succeeded",
                 json!({"backupId": record.id}),
             );
-            changed(state, "backup", &record.id);
+            changed(store, "backup", &record.id);
             Ok(serde_json::to_value(record).unwrap_or_default())
         }
         "backup.verify" => {
-            let v = settings::backup_ext::verify(&state.store, s(p, "backupId")?).map_err(serr)?;
+            let v = settings::backup_ext::verify(store, s(p, "backupId")?).map_err(serr)?;
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "backup.restore" => {
-            let outcome =
-                settings::backup_ext::restore(&state.store, s(p, "backupId")?).map_err(serr)?;
+            let outcome = settings::backup_ext::restore(store, s(p, "backupId")?).map_err(serr)?;
             Ok(
                 json!({"restored": outcome.restored, "requiresRestart": outcome.requires_restart, "safetySnapshot": outcome.safety_snapshot}),
             )
         }
         "backup.delete" => {
-            settings::backup_ext::delete(&state.store, s(p, "backupId")?).map_err(serr)?;
+            settings::backup_ext::delete(store, s(p, "backupId")?).map_err(serr)?;
             Ok(json!({"status": "deleted"}))
         }
 
         // --- 审计/日志 ---
         "audit.get" => {
             let v = settings::audit_ext::get(
-                &state.store,
+                store,
                 p.get("entryId")
                     .and_then(|v| v.as_i64())
                     .or_else(|| {
@@ -541,7 +516,7 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
             Ok(json!({"entry": v}))
         }
         "audit.export" => settings::audit_ext::export(
-            &state.store,
+            store,
             p.get("filters").unwrap_or(&json!({})),
             p.get("limit").and_then(|v| v.as_i64()).unwrap_or(200),
         )
@@ -551,32 +526,32 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                 .map_err(serr)
         }
         "logs.exportDiagnosticBundle" => {
-            settings::backup_ext::export_diagnostic_bundle(&state.store).map_err(serr)
+            settings::backup_ext::export_diagnostic_bundle(store).map_err(serr)
         }
 
         // --- 长操作 ---
         "operation.get" => {
-            let v = settings::operations::get(&state.store, s(p, "operationId")?).map_err(serr)?;
+            let v = settings::operations::get(store, s(p, "operationId")?).map_err(serr)?;
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
 
         // --- 知识默认 / 检索 v2 / 项目根 ---
         "knowledge.settings.get" => {
-            settings::knowledge_defaults::get(&state.store, opt_s(p, "projectId")).map_err(serr)
+            settings::knowledge_defaults::get(store, opt_s(p, "projectId")).map_err(serr)
         }
         "knowledge.settings.update" => {
             let revision = settings::knowledge_defaults::update(
-                &state.store,
+                store,
                 opt_s(p, "projectId"),
                 p.get("settings").unwrap_or(&json!({})),
                 n(p, "expectedRevision")?,
             )
             .map_err(serr)?;
-            changed(state, "knowledge", "defaults");
+            changed(store, "knowledge", "defaults");
             Ok(json!({"revision": revision}))
         }
         "knowledge.searchV2" => sg_knowledge::search_v2(
-            &state.store,
+            store,
             s(p, "projectId")?,
             s(p, "query")?,
             p.get("includeTests")
@@ -598,31 +573,31 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
         "update.status" => Ok(json!({
             "desktop": state.version_str(), "core": state.version_str(),
             "protocol": sg_protocol::PROTOCOL_VERSION,
-            "schema": state.store.schema_version().map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string()))?,
+            "schema": store.schema_version().map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string()))?,
             "signatureVerified": false,
             "note": "签名验证状态在发布通道启用后报告"
         })),
 
         // --- 执行沙箱设置 + 自检（S22） ---
-        "executor.settings.get" => Ok(settings::executor_ext::get(&state.store).map_err(serr)?),
+        "executor.settings.get" => Ok(settings::executor_ext::get(store).map_err(serr)?),
         "executor.settings.update" => Ok(settings::executor_ext::update(
-            &state.store,
+            store,
             p.get("settings").unwrap_or(&Value::Null),
             n(p, "expectedRevision")?,
         )
         .map_err(serr)?),
-        "executor.check" => Ok(settings::executor_ext::check(&state.store).map_err(serr)?),
+        "executor.check" => Ok(settings::executor_ext::check(store).map_err(serr)?),
 
         // --- 诊断单项重查（S50） ---
-        "diagnostics.run" => crate::dispatch::diagnostics_run_pub(state, s(p, "checkId")?),
+        "diagnostics.run" => crate::dispatch::diagnostics_run_pub(state, store, s(p, "checkId")?),
 
         // --- GitLab 细分（S30） ---
         "gitlabProfile.currentUser" => {
             let profile =
-                settings::profiles::gitlab_get(&state.store, s(p, "profileId")?).map_err(serr)?;
+                settings::profiles::gitlab_get(store, s(p, "profileId")?).map_err(serr)?;
             let token = match &profile.credential_ref_id {
                 Some(rid) => Some(
-                    settings::profiles::reveal_for(&state.store, state.credentials.as_ref(), rid)
+                    settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
                 None => std::env::var("SIXGATES_GITLAB_TOKEN").ok(),
@@ -637,10 +612,10 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
         }
         "gitlabProfile.checkProjectPermissions" => {
             let profile =
-                settings::profiles::gitlab_get(&state.store, s(p, "profileId")?).map_err(serr)?;
+                settings::profiles::gitlab_get(store, s(p, "profileId")?).map_err(serr)?;
             let token = match &profile.credential_ref_id {
                 Some(rid) => Some(
-                    settings::profiles::reveal_for(&state.store, state.credentials.as_ref(), rid)
+                    settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
                 None => std::env::var("SIXGATES_GITLAB_TOKEN").ok(),
@@ -675,26 +650,24 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let v = settings::profiles::ssh_bind_project(
-                &state.store,
+                store,
                 &target_id,
                 s(p, "projectId")?,
                 bind,
                 allow_auto,
             )
             .map_err(serr)?;
-            changed(state, "sshTarget", &target_id);
+            changed(store, "sshTarget", &target_id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
 
         // --- 项目级知识覆盖（S11） ---
-        "knowledge.projectSettings.get" => Ok(settings::knowledge_defaults::get(
-            &state.store,
-            Some(s(p, "projectId")?),
-        )
-        .map_err(serr)?),
+        "knowledge.projectSettings.get" => {
+            Ok(settings::knowledge_defaults::get(store, Some(s(p, "projectId")?)).map_err(serr)?)
+        }
         "knowledge.projectSettings.update" => {
             let revision = settings::knowledge_defaults::update(
-                &state.store,
+                store,
                 Some(s(p, "projectId")?),
                 p.get("settings").unwrap_or(&json!({})),
                 n(p, "expectedRevision")?,
@@ -705,8 +678,7 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
 
         // --- 备份 reveal（S41：main 打开 Finder） ---
         "backup.revealInFolder" => {
-            let record =
-                settings::backup_ext::record(&state.store, s(p, "backupId")?).map_err(serr)?;
+            let record = settings::backup_ext::record(store, s(p, "backupId")?).map_err(serr)?;
             if record.path.is_empty() || !std::path::Path::new(&record.path).exists() {
                 return Err(RpcError::new(ErrorCode::NotFound, "备份文件不存在"));
             }
@@ -716,7 +688,7 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
         // --- 审计设置（S42） ---
         "audit.settings.get" => {
             let entries = settings::settings::get(
-                &state.store,
+                store,
                 "global",
                 None,
                 Some(&["audit.settings".to_string()]),
@@ -735,7 +707,7 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                 Some(n(p, "expectedRevision")?)
             };
             let updated = settings::settings::update(
-                &state.store,
+                store,
                 "global",
                 None,
                 &[settings::settings::Patch {
@@ -746,14 +718,14 @@ fn run(state: &AppState, method: &str, p: &Value) -> R {
                 "local",
             )
             .map_err(serr)?;
-            changed(state, "settings", "audit");
+            changed(store, "settings", "audit");
             Ok(json!({"items": updated}))
         }
 
         // --- 工具清单/测试（S21） ---
-        "tool.list" => Ok(
-            json!({"items": settings::policy_ext::tool_effective(&state.store, None).map_err(serr)?}),
-        ),
+        "tool.list" => {
+            Ok(json!({"items": settings::policy_ext::tool_effective(store, None).map_err(serr)?}))
+        }
         "tool.test" => Ok(json!({"toolId": s(p, "toolId")?, "status": "skipped",
             "note": "工具执行测试复用 agent.run 提案路径（allowlist + executor manifest）"})),
 

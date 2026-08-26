@@ -1,7 +1,8 @@
-//! sixgates-core app-server：JSON-RPC 2.0 over stdio。
-//! stdout 只输出协议消息；stderr 输出结构化日志（main 轮转写文件）。
+//! sixgates-core app-server：JSON-RPC 2.0 over stdio（tokio 运行时，ADR-028）。
+//! stdout 只输出协议消息（单写者任务）；stderr 输出结构化日志（main 轮转写文件）。
 //! 子命令：app-server（默认）| migrate-v2 --from <dir> --to <dir>
 
+mod db;
 mod dispatch;
 
 extern "C" {
@@ -16,14 +17,16 @@ mod migrate;
 mod settings_dispatch;
 mod state;
 
-use std::io::{BufRead, Write};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::json;
 use sg_protocol::{
-    err_response, event_notification, hello_compatible, ok_response, Hello, Request, RpcMessage,
+    err_response, event_notification, ok_response, ErrorCode, Hello, RpcError, RpcMessage,
 };
 use sg_store::{outbox, Store};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -54,16 +57,50 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let app = state::AppState::new(store, env!("CARGO_PKG_VERSION"));
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("{{\"level\":\"fatal\",\"msg\":\"tokio runtime init failed: {e}\"}}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(run_server(store, env!("CARGO_PKG_VERSION")));
+}
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+async fn run_server(store: Store, core_version: &'static str) {
+    // sidecar 崩溃恢复语义：启动即 quick_check。
+    // hello 的 schemaVersion 与初始事件水位必须在 Store 移入 DB actor 前读取。
+    if let Err(e) = store.quick_check() {
+        eprintln!("{{\"level\":\"error\",\"msg\":\"quick_check: {e}\"}}");
+    }
+    let schema_version = store.schema_version().unwrap_or(0);
+    let initial_seq = outbox::latest_sequence(&store).unwrap_or(0);
+
+    let db = db::Db::spawn(store);
+    let app = Arc::new(state::AppState::new(db, initial_seq, core_version));
+
+    // stdout 单写者任务：hello、响应、事件通知统一经 mpsc 排队写出，无并发交错。
+    let (wtx, mut wrx) = tokio::sync::mpsc::channel::<String>(256);
+    tokio::spawn(async move {
+        let mut writer = tokio::io::BufWriter::new(tokio::io::stdout());
+        while let Some(line) = wrx.recv().await {
+            if writer.write_all(line.as_bytes()).await.is_err()
+                || writer.write_all(b"\n").await.is_err()
+            {
+                break;
+            }
+            let _ = writer.flush().await;
+        }
+    });
 
     // hello 握手（main 校验 protocolVersion；不兼容时不创建业务窗口）。
     let hello = Hello {
         protocolVersion: sg_protocol::PROTOCOL_VERSION.into(),
-        coreVersion: env!("CARGO_PKG_VERSION").into(),
-        schemaVersion: app.store.schema_version().unwrap_or(0),
+        coreVersion: core_version.into(),
+        schemaVersion: schema_version,
         capabilities: vec![
             "workitem".into(),
             "knowledge".into(),
@@ -71,21 +108,11 @@ fn main() {
             "deployment".into(),
         ],
     };
-    let _ = writeln!(out, "{}", serde_json::to_string(&hello).unwrap_or_default());
-    let _ = out.flush();
-
-    // sidecar 崩溃恢复语义：启动即 quick_check + 恢复检查点扫描。
-    if let Err(e) = app.store.quick_check() {
-        eprintln!("{{\"level\":\"error\",\"msg\":\"quick_check: {e}\"}}");
-    }
-    // 初始事件水位。
-    if let Ok(latest) = outbox::latest_sequence(&app.store) {
-        app.last_pushed.store(latest, Ordering::SeqCst);
-    }
+    send(&wtx, serde_json::to_string(&hello).unwrap_or_default()).await;
 
     // parent-death watchdog：Electron 退出后 core 必须自动终止（P0 F 生命周期）。
     std::thread::spawn(|| loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(2));
         // getppid 变为 1（init/launchd）说明父进程已死。
         if unsafe { libc_getppid() } == 1 {
             eprintln!("{{\"level\":\"info\",\"msg\":\"parent exited; core self-terminating\"}}");
@@ -93,60 +120,71 @@ fn main() {
         }
     });
 
-    let stdin = std::io::stdin();
+    // outbox flush 任务：250ms 兜底推送（空闲也推；响应后另有即时 flush）。
+    {
+        let app = app.clone();
+        let wtx = wtx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(250));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                flush_once(&app, &wtx).await;
+            }
+        });
+    }
+
+    // stdin 读循环：纯分发；请求体在 DB actor 上串行执行。
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut pending_shutdown = false;
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+    while let Ok(Some(line)) = lines.next_line().await {
         if line.len() > sg_protocol::MAX_MESSAGE_BYTES {
-            let _ = writeln!(
-                out,
-                "{}",
+            send(
+                &wtx,
                 err_response(
                     None,
-                    sg_protocol::RpcError::new(
-                        sg_protocol::ErrorCode::InvalidRequest,
-                        "message exceeds 8 MiB limit"
-                    )
+                    RpcError::new(ErrorCode::InvalidRequest, "message exceeds 8 MiB limit"),
                 )
-                .to_line()
-            );
-            let _ = out.flush();
+                .to_line(),
+            )
+            .await;
             continue;
         }
         let message: RpcMessage = match serde_json::from_str(&line) {
             Ok(m) => m,
             Err(e) => {
-                let _ = writeln!(
-                    out,
-                    "{}",
-                    err_response(
-                        None,
-                        sg_protocol::RpcError::new(
-                            sg_protocol::ErrorCode::ParseError,
-                            e.to_string()
-                        )
-                    )
-                    .to_line()
-                );
-                let _ = out.flush();
+                send(
+                    &wtx,
+                    err_response(None, RpcError::new(ErrorCode::ParseError, e.to_string()))
+                        .to_line(),
+                )
+                .await;
                 continue;
             }
         };
         match message {
             RpcMessage::Request(req) => {
                 let id = req.id.clone();
-                let response = handle_request(&app, &req);
-                let line = match response {
+                let params = req.params.clone().unwrap_or_else(|| json!({}));
+                let app2 = app.clone();
+                let method = req.method.clone();
+                let result: Result<serde_json::Value, RpcError> = app
+                    .db
+                    .call(move |store| dispatch::dispatch(&app2, store, &method, &params))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(RpcError::new(
+                            ErrorCode::InternalError,
+                            "db actor unavailable",
+                        ))
+                    });
+                let line = match result {
                     Ok(value) => ok_response(id, value).to_line(),
                     Err(e) => err_response(id, e).to_line(),
                 };
-                let _ = writeln!(out, "{line}");
-                // 增量推送事件 notification。
-                push_events(&app, &mut out);
-                let _ = out.flush();
+                send(&wtx, line).await;
+                // 响应后即时推送（延续既有 piggy-back 语义，消除 250ms 时延）。
+                flush_once(&app, &wtx).await;
                 if pending_shutdown {
                     break;
                 }
@@ -167,6 +205,41 @@ fn main() {
     eprintln!("{{\"level\":\"info\",\"msg\":\"core exiting\"}}");
 }
 
+async fn send(tx: &tokio::sync::mpsc::Sender<String>, line: String) {
+    let _ = tx.send(line).await;
+}
+
+/// 增量推送 outbox 事件（读循环与 250ms 兜底任务共用）。
+/// CAS 认领水位区间：并发调用只有一方推送，避免重复；replay 失败不推进水位（下轮重试，不丢事件）。
+async fn flush_once(app: &Arc<state::AppState>, wtx: &tokio::sync::mpsc::Sender<String>) {
+    let last = app.last_pushed.load(Ordering::SeqCst);
+    let batch: Option<(i64, Vec<serde_json::Value>)> = app
+        .db
+        .call(move |store| {
+            let latest = outbox::latest_sequence(store).ok()?;
+            if latest > last {
+                Some((latest, outbox::replay(store, last, 500).ok()?))
+            } else {
+                None
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+    if let Some((latest, events)) = batch {
+        if app
+            .last_pushed
+            .compare_exchange(last, latest, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return; // 另一次 flush 已认领该区间
+        }
+        for event in events {
+            send(wtx, event_notification(event).to_line()).await;
+        }
+    }
+}
+
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
@@ -174,31 +247,8 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-fn handle_request(
-    app: &state::AppState,
-    req: &Request,
-) -> Result<serde_json::Value, sg_protocol::RpcError> {
-    let params = req.params.clone().unwrap_or_else(|| json!({}));
-    dispatch::dispatch(app, &req.method, &params)
-}
-
-fn push_events(app: &state::AppState, out: &mut std::io::StdoutLock<'static>) {
-    let last = app.last_pushed.load(Ordering::SeqCst);
-    if let Ok(latest) = outbox::latest_sequence(&app.store) {
-        if latest > last {
-            if let Ok(events) = outbox::replay(&app.store, last, 500) {
-                for event in events {
-                    let notification = event_notification(event);
-                    let _ = writeln!(out, "{}", notification.to_line());
-                }
-            }
-            app.last_pushed.store(latest, Ordering::SeqCst);
-        }
-    }
-}
-
 // 供测试引用的兼容性断言。
 #[allow(unused)]
 fn assert_hello_contract(hello: &Hello) -> bool {
-    hello_compatible(hello)
+    sg_protocol::hello_compatible(hello)
 }

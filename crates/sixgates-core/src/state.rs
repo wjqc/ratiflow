@@ -1,14 +1,15 @@
-//! 应用状态：Store + 适配器装配。Rust core 是业务唯一写入者。
+//! 应用状态：DB actor 句柄 + 适配器装配。Rust core 是业务唯一写入者。
 use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 use sg_agent::Gateway;
 use sg_integrations::{FakeGitLab, FakeSSH};
 use sg_policy::Snapshot;
-use sg_store::Store;
+
+use crate::db::Db;
 
 pub struct AppState {
-    pub store: Arc<Store>,
+    pub db: Db,
     pub gitlab: Arc<dyn sg_integrations::GitLabClient>,
     pub model: Arc<Gateway>,
     pub ssh: Arc<dyn sg_integrations::SSHAdapter>,
@@ -25,7 +26,7 @@ impl AppState {
         &self.core_version
     }
 
-    pub fn new(store: Store, core_version: &str) -> Self {
+    pub fn new(db: Db, initial_watermark: i64, core_version: &str) -> Self {
         // 适配器按环境装配：未配置时使用 fake 并在诊断中标记 not_ready。
         let (gitlab, gitlab_fake) = match (
             std::env::var("SIXGATES_GITLAB_URL"),
@@ -101,7 +102,7 @@ impl AppState {
                 .unwrap_or(false),
         );
         Self {
-            store: Arc::new(store),
+            db,
             gitlab,
             model: Arc::new(model),
             ssh,
@@ -109,7 +110,7 @@ impl AppState {
             credentials,
             executor_mode,
             core_version: core_version.into(),
-            last_pushed: AtomicI64::new(0),
+            last_pushed: AtomicI64::new(initial_watermark),
         }
     }
 }
