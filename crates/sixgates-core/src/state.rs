@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use sg_agent::Gateway;
 use sg_integrations::{FakeGitLab, FakeSSH};
-use sg_policy::Snapshot;
 use sg_store::Store;
 
 use crate::db::Db;
@@ -39,7 +38,6 @@ pub struct AppState {
     pub gitlab: Arc<dyn sg_integrations::GitLabClient>,
     pub model: Arc<Gateway>,
     pub ssh: Arc<dyn sg_integrations::SSHAdapter>,
-    pub policy: Snapshot,
     pub credentials: std::sync::Arc<dyn sg_settings::credentials::CredentialStore>,
     pub executor_mode: sg_executor::Mode,
     pub core_version: String,
@@ -104,44 +102,6 @@ impl AppState {
         };
         let ssh: Arc<dyn sg_integrations::SSHAdapter> = Arc::new(FakeSSH::default());
         let _ = gitlab_fake;
-        let policy = Snapshot {
-            tool_rules: vec![
-                sg_policy::ToolRule {
-                    tool: "read_file".into(),
-                    risk: sg_policy::Risk::Low,
-                    requires_approval: false,
-                    data_level: "internal".into(),
-                    max_result_bytes: 1 << 20,
-                    timeout_sec: 60,
-                },
-                sg_policy::ToolRule {
-                    // F05/M0-③：注册表新增工具，策略同步放行（low 风险免审批）。
-                    tool: "search_knowledge".into(),
-                    risk: sg_policy::Risk::Low,
-                    requires_approval: false,
-                    data_level: "internal".into(),
-                    max_result_bytes: 1 << 20,
-                    timeout_sec: 30,
-                },
-                sg_policy::ToolRule {
-                    tool: "write_file".into(),
-                    risk: sg_policy::Risk::Medium,
-                    requires_approval: false,
-                    data_level: "internal".into(),
-                    max_result_bytes: 1 << 20,
-                    timeout_sec: 60,
-                },
-                sg_policy::ToolRule {
-                    tool: "run_command".into(),
-                    risk: sg_policy::Risk::High,
-                    requires_approval: true,
-                    data_level: "internal".into(),
-                    max_result_bytes: 1 << 20,
-                    timeout_sec: 120,
-                },
-            ],
-            approval_ttl_secs: 3600,
-        };
         let credentials: std::sync::Arc<dyn sg_settings::credentials::CredentialStore> =
             if cfg!(target_os = "macos") {
                 std::sync::Arc::new(sg_settings::credentials::MacKeychain)
@@ -175,7 +135,6 @@ impl AppState {
             gitlab,
             model: Arc::new(model),
             ssh,
-            policy,
             credentials,
             executor_mode,
             core_version: core_version.into(),

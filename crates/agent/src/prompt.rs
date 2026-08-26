@@ -8,6 +8,8 @@ pub struct PromptEnv {
     pub mode: Option<sg_executor::Mode>,
     /// 项目根标签（无 local_root 时为 None）。
     pub work_dir_label: Option<String>,
+    /// F10/M3：需人工审批的工具（来自运行时权限快照；模型自知边界）。
+    pub requires_approval_tools: Vec<String>,
 }
 
 /// 一次 Run 的初始装配：system 进 request.system_prompt，prefix 进 messages。
@@ -110,6 +112,7 @@ mod tests {
         let env = PromptEnv {
             mode: Some(sg_executor::Mode::SafeRestricted),
             work_dir_label: Some("/tmp/proj".into()),
+            requires_approval_tools: vec!["run_command".into()],
         };
         let initial = assemble(
             &env,
@@ -141,6 +144,7 @@ mod tests {
         let env = PromptEnv {
             mode: Some(sg_executor::Mode::Docker),
             work_dir_label: Some("/w".into()),
+            requires_approval_tools: vec![],
         };
         let allow = vec!["read_file".into()];
         let a = assemble(&env, &allow, "K", "G");

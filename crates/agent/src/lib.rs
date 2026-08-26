@@ -30,6 +30,22 @@ impl Default for RunBudget {
     }
 }
 
+/// 自动压缩策略（F09/M3）：输入估算超阈值触发；keep_turns 保留最近 K 轮工具往返。
+#[derive(Clone, Debug)]
+pub struct CompactPolicy {
+    pub threshold_tokens: usize,
+    pub keep_turns: usize,
+}
+
+impl Default for CompactPolicy {
+    fn default() -> Self {
+        Self {
+            threshold_tokens: 24000,
+            keep_turns: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentRun {
     pub id: String,
@@ -99,7 +115,16 @@ pub fn start(
         config.goal,
     );
     execute_run(
-        store, gateway, policy, executor, config, &run.id, None, None, &initial,
+        store,
+        gateway,
+        policy,
+        executor,
+        config,
+        &run.id,
+        None,
+        None,
+        &initial,
+        &CompactPolicy::default(),
     )
 }
 
@@ -174,9 +199,10 @@ pub fn execute_run(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     mut rollout: Option<crate::rollout::Rollout>,
     initial: &prompt::InitialTurn,
+    compact: &CompactPolicy,
 ) -> Result<RunOutput, Error> {
     let RunConfig {
-        goal,
+        goal: _goal,
         tool_allowlist: _tool_allowlist,
         budget,
         max_iterations,
@@ -190,17 +216,8 @@ pub fn execute_run(
             .unwrap_or(false)
     };
 
-    let (mut messages, start_iteration, mut pending_proposal) = load_checkpoint(store, run_id)
-        .unwrap_or_else(|| {
-            (
-                vec![ChatMessage {
-                    role: "user".into(),
-                    content: goal.into(),
-                }],
-                0,
-                None,
-            )
-        });
+    let (mut messages, start_iteration, mut pending_proposal) =
+        load_checkpoint(store, run_id).unwrap_or_else(|| (initial.prefix.clone(), 0, None));
     if run.status == "paused" {
         log_rollout(
             &mut rollout,
@@ -264,6 +281,35 @@ pub fn execute_run(
             finish(store, &run)?;
             return Err(Error::Message("budget_exhausted: duration".into()));
         }
+        // F09/M3：输入估算超阈值 → 压缩（回滚点→专用调用→冻结头+摘要+保留 K 轮）。
+        let est = estimate_input_tokens(&system_prompt, &messages);
+        if compact.threshold_tokens > 0 && est > compact.threshold_tokens {
+            match compact_history(
+                store,
+                gateway,
+                &budget.model,
+                &run,
+                &system_prompt,
+                &mut messages,
+                compact.keep_turns,
+                iteration,
+                est,
+            ) {
+                Ok(after) => {
+                    log_rollout(
+                        &mut rollout,
+                        "compacted",
+                        json!({"beforeEst": est, "afterEst": after, "keptTurns": compact.keep_turns}),
+                    );
+                }
+                Err(e) => {
+                    run.result = e.to_string();
+                    set_status(store, &mut run, "failed", "run.failed")?;
+                    finish(store, &run)?;
+                    return Err(e);
+                }
+            }
+        }
         let request = CompletionRequest {
             model: String::new(),
             system_prompt: system_prompt.clone(),
@@ -285,7 +331,15 @@ pub fn execute_run(
                     finish(store, &run)?;
                     return Err(Error::Message(e));
                 }
-                run.result = format!("model: {e}");
+                let lower = e.to_lowercase();
+                run.result = if lower.contains("context")
+                    || lower.contains("too large")
+                    || lower.contains("length")
+                {
+                    format!("context_too_large: {e}")
+                } else {
+                    format!("model: {e}")
+                };
                 set_status(store, &mut run, "failed", "run.failed")?;
                 finish(store, &run)?;
                 return Err(Error::Message(e));
@@ -396,6 +450,71 @@ pub fn execute_run(
     set_status(store, &mut run, "failed", "run.failed")?;
     finish(store, &run)?;
     Err(Error::Message("agent loop exhausted".into()))
+}
+
+/// 输入 token 估算（启发式 chars/4+512；不引 tokenizer——诚实声明精度，阈值语义足够）。
+fn estimate_input_tokens(system: &str, messages: &[ChatMessage]) -> usize {
+    let chars = system.len() + messages.iter().map(|m| m.content.len()).sum::<usize>();
+    chars / 4 + 512
+}
+
+/// F09/M3 压缩：回滚 checkpoint → 专用压缩调用（计入 model_calls/预算）→
+/// 新历史 = 冻结头（developer/knowledge/goal，前缀纪律）+ 摘要 + 最近 K 轮工具往返。
+/// 失败重试一次，仍失败返回 Err（execute_run 置 failed）。
+#[allow(clippy::too_many_arguments)]
+fn compact_history(
+    store: &Store,
+    gateway: &Gateway,
+    budget: &Budget,
+    run: &AgentRun,
+    system_prompt: &str,
+    messages: &mut Vec<ChatMessage>,
+    keep_turns: usize,
+    iteration: usize,
+    est_before: usize,
+) -> Result<usize, Error> {
+    // 回滚点（phase=running；压缩失败可从此恢复重试）。
+    checkpoint(store, &run.id, iteration, messages, None);
+    let compress_system = "你是会话压缩器。把对话历史压缩为结构化摘要 JSON：         {\"summary\":\"...\",\"facts\":[\"...\"],\"pendingApprovals\":[],\
+         \"executedTools\":[{\"tool\":\"..\",\"result\":\"..\"}],\"keyFiles\":[\"..\"]}\u{3002}         必须保留：任务目标、当前状态、未决审批、已执行工具与结论、关键文件路径。只输出 JSON。";
+    let request = CompletionRequest {
+        model: String::new(),
+        system_prompt: compress_system.into(),
+        messages: messages.clone(),
+        max_tokens: 2048,
+        response_schema: None,
+    };
+    let resp = match gateway.call(store, &run.id, budget, &request) {
+        Ok(r) => r,
+        Err(_) => gateway
+            .call(store, &run.id, budget, &request)
+            .map_err(|e| Error::Message(format!("context_too_large: 压缩调用失败 {e}")))?,
+    };
+    let history_start = messages
+        .iter()
+        .position(|m| m.role == "assistant")
+        .unwrap_or(messages.len());
+    let frozen: Vec<ChatMessage> = messages[..history_start].to_vec();
+    let history = &messages[history_start..];
+    let keep_msgs = keep_turns.saturating_mul(2).min(history.len());
+    let tail: Vec<ChatMessage> = history[history.len() - keep_msgs..].to_vec();
+    let summary_text = tools::truncate_output(&resp.content, 8192);
+    let mut new_messages = frozen;
+    new_messages.push(ChatMessage {
+        role: "user".into(),
+        content: format!("【会话已压缩】此前对话（约 {est_before} tokens）摘要：\n{summary_text}"),
+    });
+    new_messages.extend(tail);
+    let est_after = estimate_input_tokens(system_prompt, &new_messages);
+    outbox::emit(
+        store,
+        "agent_run",
+        &run.id,
+        "run.compacted",
+        json!({"workitemId": run.workitem_id, "beforeEst": est_before, "afterEst": est_after, "keptTurns": keep_turns}),
+    )?;
+    *messages = new_messages;
+    Ok(est_after)
 }
 
 fn estimate_tokens(req: &CompletionRequest) -> usize {
@@ -1009,6 +1128,7 @@ mod tests {
             None,
             None,
             &initial,
+            &CompactPolicy::default(),
         )
         .unwrap();
         assert_eq!(resumed.run.status, "completed_execution");
@@ -1162,6 +1282,7 @@ mod tests {
             Some(&flag),
             None,
             &initial,
+            &CompactPolicy::default(),
         )
         .unwrap();
         assert_eq!(out.run.status, "cancelled");
@@ -1181,5 +1302,155 @@ mod tests {
         };
         assert_eq!(count("run.started"), 1, "run.started 恰好一条");
         assert_eq!(count("run.cancelled"), 1, "run.cancelled 恰好一条");
+    }
+
+    /// 共享 FakeModel：请求捕获（calls）对测试可见。
+    struct SharedFake(std::sync::Arc<FakeModel>);
+    impl sg_integrations::model::ModelProvider for SharedFake {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn health_check(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn complete(
+            &self,
+            req: &sg_integrations::model::CompletionRequest,
+        ) -> Result<sg_integrations::model::CompletionResponse, String> {
+            self.0.complete(req)
+        }
+    }
+
+    #[test]
+    fn compaction_triggers_preserves_frozen_and_keeps_turns() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        // 剧本：①read_file 决策 ②压缩摘要 ③final。
+        fake.push_response(
+            r#"{"action":"read_file","arguments":{"path":"a"},"summary":"读取"}"#,
+            5,
+            3,
+        );
+        fake.push_response(
+            r#"{"summary":"已读取 a 并分析","facts":["a 有 3 个模块"],"pendingApprovals":[],"executedTools":[{"tool":"read_file","result":"ok"}],"keyFiles":["a"]}"#,
+            5,
+            3,
+        );
+        fake.push_response(r#"{"action":"final","summary":"完成"}"#, 5, 3);
+        let gateway = Gateway::new(Box::new(SharedFake(fake.clone())));
+        // 大结果让第二轮估算超阈值（threshold=8000）。
+        let executor = move |_p: &Proposal| -> Result<String, String> { Ok("x".repeat(40000)) };
+        let initial = crate::prompt::assemble(
+            &crate::prompt::PromptEnv::default(),
+            &["read_file".to_string()],
+            &crate::prompt::knowledge_text("", ""),
+            "g",
+        );
+        let config = RunConfig {
+            workitem_id: "wi",
+            task_id: "",
+            goal: "g",
+            manifest_id: "ctx1",
+            tool_allowlist: &["read_file".into()],
+            idempotency_key: "key-compact",
+            budget: &RunBudget::default(),
+            max_iterations: 10,
+        };
+        let (run, created) = create_run(&store, &config).unwrap();
+        assert!(created);
+        let out = execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &config,
+            &run.id,
+            None,
+            None,
+            &initial,
+            &CompactPolicy {
+                threshold_tokens: 8000,
+                keep_turns: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.run.status, "completed_execution");
+        // 3 次模型调用：决策 + 压缩 + final（压缩计入预算）。
+        assert_eq!(count_model_calls(&store, &run.id).unwrap(), 3);
+        let n: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM events_outbox WHERE type='run.compacted' AND aggregate_id=?1",
+                    [&run.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(n, 1, "run.compacted 恰好一条");
+        // 捕获的请求：压缩调用用压缩指令；压缩后保留 冻结头3 + 摘要1 + 最近1轮2。
+        let calls = fake.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[1].system_prompt.contains("会话压缩器"));
+        let m = &calls[2].messages;
+        assert_eq!(m.len(), 3 + 1 + 2, "冻结头+摘要+保留 1 轮");
+        assert_eq!(m[3].role, "user");
+        assert!(m[3].content.contains("会话已压缩"));
+        assert!(m[3].content.contains("已读取 a 并分析"), "摘要内容注入");
+        assert_eq!(m[4].role, "assistant");
+        assert_eq!(m[5].role, "tool");
+        // 冻结头（developer/knowledge/goal）与首次请求逐字节相同（前缀纪律）。
+        assert_eq!(
+            serde_json::to_string(&m[..3]).unwrap(),
+            serde_json::to_string(&calls[0].messages[..3]).unwrap(),
+            "冻结头不改写"
+        );
+    }
+
+    #[test]
+    fn compaction_failure_fails_run_with_context_too_large() {
+        let store = setup();
+        let fake = FakeModel::default();
+        fake.push_error("boom context length exceeded");
+        let gateway = Gateway::new(Box::new(fake));
+        let goal = "g".repeat(60000);
+        let initial = crate::prompt::assemble(
+            &crate::prompt::PromptEnv::default(),
+            &["read_file".to_string()],
+            &crate::prompt::knowledge_text("", ""),
+            &goal,
+        );
+        let config = RunConfig {
+            workitem_id: "wi",
+            task_id: "",
+            goal: &goal,
+            manifest_id: "ctx1",
+            tool_allowlist: &["read_file".into()],
+            idempotency_key: "key-compact-fail",
+            budget: &RunBudget::default(),
+            max_iterations: 5,
+        };
+        let (run, _) = create_run(&store, &config).unwrap();
+        let err = match execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &config,
+            &run.id,
+            None,
+            None,
+            &initial,
+            &CompactPolicy {
+                threshold_tokens: 1000,
+                keep_turns: 2,
+            },
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("压缩失败必须使 Run failed"),
+        };
+        assert!(err.to_string().contains("context_too_large"), "{err}");
+        let final_run = get_run(&store, &run.id).unwrap();
+        assert_eq!(final_run.status, "failed");
+        assert!(final_run.result.contains("context_too_large"));
     }
 }
