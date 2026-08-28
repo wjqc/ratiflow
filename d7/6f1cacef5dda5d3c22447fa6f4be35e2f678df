@@ -1,0 +1,32 @@
+README.md
+  s_912ffb5b75230f::t_1d740952404bc0 5,8-13,18-28,45-49,53-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "d76f1cacef5dda5d3c22447fa6f4be35e2f678df",
+  "prompts": {},
+  "sessions": {
+    "s_912ffb5b75230f": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a89935b7fbc3f178f693fdc",
+        "model": "volc/deepseek-v4-flash-0731"
+      },
+      "human_author": "wenjian3 <wenjian3@asiainfo.com>",
+      "custom_attributes": {
+        "tool_use_id": "6a8fe257728b51dfef23b748",
+        "operation_id": "6a8fe257728b51dfef23b748",
+        "dedupe_key": "6a89935b7fbc3f178f693fdc:6a8fe257728b51dfef23b748:afterEdit:f1091386",
+        "source_scene": "agent",
+        "external_session_id": "6a89935b7fbc3f178f693fdc",
+        "edit_kind": "file_edit",
+        "session_id": "6a89935b7fbc3f178f693fdc",
+        "runtime_client": "trae-tob-git-ai",
+        "tool_type": "builtin",
+        "client_type": "ide",
+        "tool_id": "icube:applyChatSnapshotPatch"
+      }
+    }
+  }
+}
