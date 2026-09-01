@@ -32,11 +32,14 @@ test-electron: ## Electron E2E scenarios A/D/E/F (Playwright)
 	npm --workspace @sixgates/desktop run build
 	cd apps/desktop && npx playwright test
 
-e2e: ## Protocol E2E golden flow + agent lifecycle + settings (requires release core build)
+e2e: ## Protocol E2E golden flow + agent lifecycle + settings + trace + gate release race + rollback (requires release core build)
 	cargo build --release -p sixgates-core
 	node tests/e2e-protocol/e2e.mjs
 	node tests/e2e-protocol/agent-e2e.mjs
 	node tests/e2e-protocol/settings-e2e.mjs
+	node tests/e2e-protocol/trace-e2e.mjs
+	node tests/e2e-protocol/gate-release-race-e2e.mjs
+	node tests/e2e-protocol/rollback-e2e.mjs
 
 test-contract: ## Contract fixtures + decoders + secret probe (F11/M4)
 	node tests/contract/run.mjs

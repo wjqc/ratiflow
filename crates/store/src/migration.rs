@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-/// 嵌入迁移（v2 0001–0010 与 v3 0011–0014；v2 数据可直接续跑）。
+/// 嵌入迁移（v2 0001–0010 与 v3 0011+；v2 数据可直接续跑）。
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_auth.sql")),
@@ -17,6 +17,16 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (13, include_str!("../migrations/0013_v3_attachments.sql")),
     (14, include_str!("../migrations/0014_v3_context_items.sql")),
     (15, include_str!("../migrations/0015_v3_settings.sql")),
+    (16, include_str!("../migrations/0016_provenance.sql")),
+    (
+        17,
+        include_str!("../migrations/0017_stage_attempt_release.sql"),
+    ),
+    (
+        18,
+        include_str!("../migrations/0018_stage_snapshot_rollback.sql"),
+    ),
+    (19, include_str!("../migrations/0019_agent_profiles.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。
@@ -55,7 +65,28 @@ pub fn run(store: &crate::Store) -> Result<(), crate::Error> {
         }
         Ok(())
     })?;
+    foreign_key_check(store)?;
     store.quick_check()
+}
+
+/// 外键一致性（蓝图 §13.4）：迁移后立即校验，违例即失败（不带着断链服务）。
+fn foreign_key_check(store: &crate::Store) -> Result<(), crate::Error> {
+    let violations: usize = store.with_conn(|conn| {
+        let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut n = 0usize;
+        for row in rows {
+            let _ = row?;
+            n += 1;
+        }
+        Ok(n)
+    })?;
+    if violations > 0 {
+        return Err(crate::Error::Message(format!(
+            "foreign_key_check: {violations} violations after migration"
+        )));
+    }
+    Ok(())
 }
 
 fn adopt_v2(conn: &Connection) -> Result<(), rusqlite::Error> {

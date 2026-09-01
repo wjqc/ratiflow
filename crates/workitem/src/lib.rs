@@ -1,9 +1,15 @@
 //! WorkItem 与六关阶段状态（PRD v2 §16.1 行为等价）+ 门禁引擎（三态输入）。
 
+pub mod attempt;
 pub mod docs;
 pub mod gate;
 pub mod progress;
+pub mod release;
+pub mod requirements;
+pub mod rollback;
+pub mod snapshot;
 pub mod stages;
+pub mod worktree;
 
 use serde::{Deserialize, Serialize};
 use sg_store::{ids, outbox, timefmt, Error, Store};
@@ -50,6 +56,17 @@ impl Gate {
         let all = Gate::ALL;
         let idx = all.iter().position(|g| *g == self)?;
         all.get(idx + 1).copied()
+    }
+
+    /// 上一关（谱系 derived_from 父边用）。
+    pub fn prev(self) -> Option<Gate> {
+        let all = Gate::ALL;
+        let idx = all.iter().position(|g| *g == self)?;
+        if idx == 0 {
+            None
+        } else {
+            all.get(idx - 1).copied()
+        }
     }
 }
 
@@ -378,6 +395,8 @@ pub fn mark_stale_from(
             set_stage(store, workitem_id, *gate, StageState::Stale, new_baseline)?;
         }
     }
+    // M2：上游变化的已批准 attempt 标记 superseded（蓝图 §4.1 approved→superseded）。
+    attempt::supersede_from(store, workitem_id, from_gate)?;
     Ok(())
 }
 

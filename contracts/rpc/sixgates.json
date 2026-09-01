@@ -425,32 +425,6 @@
       "result": "value"
     },
     {
-      "name": "workitem.setStage",
-      "params": [
-        {
-          "name": "workItemId",
-          "type": "string",
-          "required": true
-        },
-        {
-          "name": "gate",
-          "type": "string",
-          "required": true
-        },
-        {
-          "name": "state",
-          "type": "string",
-          "required": true
-        },
-        {
-          "name": "inputBaselineSha",
-          "type": "string",
-          "required": false
-        }
-      ],
-      "result": "value"
-    },
-    {
       "name": "workitem.progress",
       "params": [
         {
@@ -574,6 +548,11 @@
           "name": "content",
           "type": "string",
           "required": true
+        },
+        {
+          "name": "requirementKeys",
+          "type": "array",
+          "required": false
         }
       ],
       "result": "value"
@@ -876,6 +855,11 @@
         {
           "name": "source",
           "type": "string",
+          "required": false
+        },
+        {
+          "name": "requirementKeys",
+          "type": "array",
           "required": false
         }
       ],
@@ -2102,10 +2086,531 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "requirement.importRevision",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "filename",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "sourceKind",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "createdBy",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "requirement.revisions",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "requirement.items",
+      "params": [
+        {
+          "name": "revisionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "requirement.get",
+      "params": [
+        {
+          "name": "revisionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "trace.lineage",
+      "params": [
+        {
+          "name": "nodeId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "direction",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "depth",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "trace.coverage",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "revisionId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "trace.gaps",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.requestRelease",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.decideRelease",
+      "params": [
+        {
+          "name": "approvalId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.getRelease",
+      "params": [
+        {
+          "name": "releaseId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "stage.attempts",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "stage.package",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "snapshot.get",
+      "params": [
+        {
+          "name": "snapshotId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "snapshot.list",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rollback.preview",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "targetSnapshotId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rollback.request",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "targetSnapshotId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "requestedBy",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rollback.decide",
+      "params": [
+        {
+          "name": "approvalId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rollback.get",
+      "params": [
+        {
+          "name": "operationId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rollback.list",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "stage.startActivity",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "goal",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "activityKey",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "profileVersionId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "requiredCapabilities",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "toolAllowlist",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentProfile.list",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentProfile.create",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "adapterKind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentProfile.createVersion",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "persona",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "sop",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "capabilities",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "outputSchema",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "modelRoute",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "budget",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentProfile.setEnabled",
+      "params": [
+        {
+          "name": "profileId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentBinding.list",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentBinding.set",
+      "params": [
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "activityKey",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "profileVersionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "fallbackMode",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "priority",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentBinding.remove",
+      "params": [
+        {
+          "name": "bindingId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentBinding.resolvePreview",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "activityKey",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "requiredCapabilities",
+          "type": "array",
+          "required": false
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [
+    "agent.fallback_used",
+    "agent.selection_resolved",
     "approval.approved",
+    "approval.changes_requested",
     "approval.rejected",
     "approval.requested",
     "artifact.reviewed",
@@ -2127,7 +2632,11 @@
     "diagnostics.completed",
     "evidence.recorded",
     "executionProfile.changed",
+    "gate.changes_requested",
     "gate.evaluated",
+    "gate.release_approved",
+    "gate.release_rejected",
+    "gate.release_requested",
     "gitlabProfile.changed",
     "knowledge.scanned",
     "knowledge.settingsChanged",
@@ -2138,6 +2647,14 @@
     "policy.changed",
     "project.changed",
     "project.created",
+    "requirement.revision_imported",
+    "rollback.blocked",
+    "rollback.cancelled",
+    "rollback.completed",
+    "rollback.failed",
+    "rollback.previewed",
+    "rollback.requested",
+    "rollback.started",
     "run.cancelled",
     "run.compacted",
     "run.completed_execution",
@@ -2146,13 +2663,26 @@
     "run.started",
     "run.waiting_approval",
     "settings.changed",
+    "snapshot.created",
     "sshTarget.changed",
+    "stage.attempt_approved",
+    "stage.attempt_awaiting_user_approval",
+    "stage.attempt_cancelled",
+    "stage.attempt_changes_requested",
+    "stage.attempt_failed",
+    "stage.attempt_prepared",
+    "stage.attempt_rejected",
+    "stage.attempt_review_ready",
+    "stage.attempt_rolled_back",
+    "stage.attempt_running",
+    "stage.attempt_superseded",
     "stage.passed",
     "stage.running",
     "stage.stale",
     "tool.completed",
     "tool.proposed",
     "tool.started",
+    "trace.edge_created",
     "workitem.created"
   ]
 }

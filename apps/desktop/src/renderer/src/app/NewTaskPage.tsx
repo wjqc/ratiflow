@@ -30,8 +30,8 @@ const GATE_FLOW: Array<{ name: string; sub: string }> = [
   { name: '方案关', sub: '整体方案与技术设计' },
   { name: '开发关', sub: '编码实现与单元测试' },
   { name: '测试关', sub: '集成测试与质量验证' },
-  { name: '发布关', sub: '部署与环境准备' },
-  { name: '验收关', sub: '验收与交付验证' },
+  { name: '部署关', sub: '部署与环境准备' },
+  { name: '验证关', sub: '验收与交付验证' },
 ];
 
 // 统一输入器：文字 / 本地文档 / GitLab Issue / 图片 四种来源（规范 §4.2）。

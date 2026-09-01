@@ -25,6 +25,7 @@ import {
 import DocGatePanel, { EvaluateButton } from './DocGatePanel';
 import DevGatePanel from './DevGatePanel';
 import DeployGatePanel from './DeployGatePanel';
+import TracePanel from './TracePanel';
 
 /* ---------------- 类型：与 Rust 序列化结构一一对应 ---------------- */
 
@@ -543,10 +544,10 @@ function GateWorkspace({
         {gate === 'deployment' && (
           <DeployGatePanel workItemId={workItemId} onDone={onChanged} onOpenApprovals={onOpenApprovals} />
         )}
-        {(gate === 'requirements' || gate === 'design' || gate === 'testing') && (
-          <DocGatePanel workItemId={workItemId} gate={gate} onDone={onChanged} />
-        )}
+        <DocGatePanel workItemId={workItemId} gate={gate} onDone={onChanged} />
         {gate === 'verification' && <AcceptancePanel workItemId={workItemId} progress={progress} />}
+
+        <TracePanel workItemId={workItemId} />
 
         <div className="sg-card">
           <div className="sg-card-head">
@@ -648,7 +649,7 @@ function GateChecksCard({ stage, progress }: { stage?: StageInfo; progress: Prog
   );
 }
 
-/* ---------------- 验收关 ---------------- */
+/* ---------------- 验证关 ---------------- */
 
 interface PassportInfo {
   id: string;

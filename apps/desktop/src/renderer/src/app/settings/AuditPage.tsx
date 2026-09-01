@@ -1,12 +1,18 @@
-// S42 审计日志：audit.list 真实（分页/筛选/详情检查器）；detailJson 渲染前统一脱敏（§15）。
+// S42 审计日志：audit.list 真实（分页/筛选）+ audit.get 抽屉深查 + audit.export 去敏导出（§15）。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { rpc } from '../../rpc/client';
 import { formatDateTime, relativeTime } from '../../lib/format';
 import { redactedJson } from '../../lib/redact';
-import type { AuditEvent, AuditListResult } from './types';
+import type {
+  AuditEntryExt,
+  AuditEvent,
+  AuditExportEntry,
+  AuditGetResult,
+  AuditListResult,
+} from './types';
 import { SettingsPageHeader } from './components/SettingsPageHeader';
 import { SettingsSection } from './components/SettingsSection';
-import { IconRefresh, IconX } from '../../components/Icons';
+import { IconDownload, IconRefresh, IconX } from '../../components/Icons';
 
 const PAGE_SIZE = 50;
 
@@ -18,6 +24,10 @@ export function AuditPage() {
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [selected, setSelected] = useState<AuditEvent | null>(null);
+  const [entry, setEntry] = useState<AuditEntryExt | null>(null);
+  const [entryLoading, setEntryLoading] = useState(false);
+  const [entryError, setEntryError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   const lastFocusRef = useRef<HTMLElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
@@ -46,10 +56,18 @@ export function AuditPage() {
   const openDetail = (e: AuditEvent, trigger: HTMLElement) => {
     lastFocusRef.current = trigger;
     setSelected(e);
+    setEntry(null);
+    setEntryError(null);
+    setEntryLoading(true);
+    rpc<AuditGetResult>('audit.get', { entryId: e.seq })
+      .then((res) => setEntry(res.entry))
+      .catch((err) => setEntryError(err instanceof Error ? err.message : '详情加载失败'))
+      .finally(() => setEntryLoading(false));
   };
 
   const closeDetail = useCallback(() => {
     setSelected(null);
+    setEntry(null);
     lastFocusRef.current?.focus();
   }, []);
 
@@ -62,6 +80,25 @@ export function AuditPage() {
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [selected, closeDetail]);
+
+  const exportAudit = async () => {
+    setExporting(true);
+    setError(null);
+    try {
+      const data = await rpc<AuditExportEntry[]>('audit.export', { limit: 200 });
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `audit-export-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '导出失败');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const filtered = items.filter((e) => {
     if (actionFilter && !e.action.includes(actionFilter)) return false;
@@ -82,7 +119,7 @@ export function AuditPage() {
       <SettingsPageHeader
         title="审计日志"
         scope="本地"
-        description="本地 append-only 事件链（每条含 prevHash）；秘密键已脱敏，导出契约待开放。"
+        description="本地 append-only 事件链（每条含 prevHash）；秘密键已脱敏，导出为去敏 JSON。"
         actions={
           <button className="sg-btn" onClick={() => void load()} disabled={loading}>
             <IconRefresh size={14} />
@@ -179,8 +216,9 @@ export function AuditPage() {
               ) : (
                 <span className="sg-hint">共 {items.length} 条（已加载全部）</span>
               )}
-              <button className="sg-btn sg-btn--sm" disabled title="audit.export 契约待 ZCode 提交">
-                导出
+              <button className="sg-btn sg-btn--sm" disabled={exporting || items.length === 0} onClick={() => void exportAudit()}>
+                <IconDownload size={14} />
+                {exporting ? '导出中…' : '导出'}
               </button>
             </div>
           </>
@@ -198,21 +236,72 @@ export function AuditPage() {
               </button>
             </div>
             <div className="sg-drawer-body">
-              <div className="sg-kv">
-                <span className="sg-kv-k">时间</span>
-                <span>{formatDateTime(selected.createdAt)}</span>
-                <span className="sg-kv-k">actor</span>
-                <span>{selected.actor}</span>
-                <span className="sg-kv-k">动作</span>
-                <span><code className="sg-code">{selected.action}</code></span>
-                <span className="sg-kv-k">目标</span>
-                <span>
-                  {selected.targetType}
-                  {selected.targetId ? ` / ${selected.targetId}` : ''}
-                </span>
-              </div>
-              <h3 className="sg-set-pending-title" style={{ marginTop: 16 }}>detail（已脱敏）</h3>
-              <pre className="sg-json-view">{redactedJson(selected.detail)}</pre>
+              {entryLoading ? (
+                <div className="sg-skeleton-rows" aria-busy="true">
+                  <div className="sg-skeleton-row" />
+                  <div className="sg-skeleton-row" />
+                </div>
+              ) : entryError ? (
+                <p className="sg-hint">详情加载失败：{entryError}</p>
+              ) : null}
+              {entry ? (
+                <div className="sg-kv">
+                  <span className="sg-kv-k">时间</span>
+                  <span>{formatDateTime(entry.created_at)}</span>
+                  <span className="sg-kv-k">actor</span>
+                  <span>
+                    {entry.actor}
+                    <span className="sg-muted">（{entry.actor_kind}）</span>
+                  </span>
+                  <span className="sg-kv-k">动作</span>
+                  <span><code className="sg-code">{entry.action}</code></span>
+                  <span className="sg-kv-k">目标</span>
+                  <span>
+                    {entry.target_type}
+                    {entry.target_id ? ` / ${entry.target_id}` : ''}
+                  </span>
+                  <span className="sg-kv-k">结果</span>
+                  <span><code className="sg-code">{entry.result}</code></span>
+                  <span className="sg-kv-k">correlationId</span>
+                  <span className="sg-path">{entry.correlation_id ?? '—'}</span>
+                  <span className="sg-kv-k">projectId</span>
+                  <span className="sg-path">{entry.project_id ?? '—'}</span>
+                  <span className="sg-kv-k">脱敏</span>
+                  <span>{entry.metadata_redacted ? '是（秘密键已脱敏）' : '否'}</span>
+                </div>
+              ) : !entryLoading && !entryError ? (
+                <div className="sg-kv">
+                  <span className="sg-kv-k">时间</span>
+                  <span>{formatDateTime(selected.createdAt)}</span>
+                  <span className="sg-kv-k">actor</span>
+                  <span>{selected.actor}</span>
+                  <span className="sg-kv-k">动作</span>
+                  <span><code className="sg-code">{selected.action}</code></span>
+                  <span className="sg-kv-k">目标</span>
+                  <span>
+                    {selected.targetType}
+                    {selected.targetId ? ` / ${selected.targetId}` : ''}
+                  </span>
+                </div>
+              ) : null}
+              {entry?.before_summary ? (
+                <>
+                  <h3 className="sg-set-pending-title" style={{ marginTop: 16 }}>变更前（已脱敏）</h3>
+                  <pre className="sg-json-view">{redactedJson(entry.before_summary)}</pre>
+                </>
+              ) : null}
+              {entry?.after_summary ? (
+                <>
+                  <h3 className="sg-set-pending-title" style={{ marginTop: 16 }}>变更后（已脱敏）</h3>
+                  <pre className="sg-json-view">{redactedJson(entry.after_summary)}</pre>
+                </>
+              ) : null}
+              {!entry && !entryLoading && !entryError ? (
+                <>
+                  <h3 className="sg-set-pending-title" style={{ marginTop: 16 }}>detail（已脱敏）</h3>
+                  <pre className="sg-json-view">{redactedJson(selected.detail)}</pre>
+                </>
+              ) : null}
             </div>
           </aside>
         </>

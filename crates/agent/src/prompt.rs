@@ -74,23 +74,46 @@ pub fn knowledge_text(instruction_layers: &str, manifest_blocks: &str) -> String
 
 /// 完整装配（execute_run 的 InitialTurn；恢复路径 prefix 以 checkpoint 为准、system 仍取此处）。
 pub fn assemble(env: &PromptEnv, allowlist: &[String], knowledge: &str, goal: &str) -> InitialTurn {
+    assemble_with_profile(env, allowlist, knowledge, goal, None)
+}
+
+/// M4：profile developer 层（persona/版本/SOP/输出契约）紧随边界层之后，Run 内冻结。
+pub fn assemble_with_profile(
+    env: &PromptEnv,
+    allowlist: &[String],
+    knowledge: &str,
+    goal: &str,
+    profile_text: Option<&str>,
+) -> InitialTurn {
+    let mut prefix = vec![ChatMessage {
+        role: "developer".into(),
+        content: boundary_content(env),
+    }];
+    if let Some(text) = profile_text.filter(|t| !t.trim().is_empty()) {
+        prefix.push(ChatMessage {
+            role: "developer".into(),
+            content: text.to_string(),
+        });
+    }
+    let rest = assemble_rest(env, knowledge, goal);
+    prefix.extend(rest);
     InitialTurn {
         system_prompt: base_system_prompt(allowlist),
-        prefix: vec![
-            ChatMessage {
-                role: "developer".into(),
-                content: boundary_content(env),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: knowledge.to_string(),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: goal.to_string(),
-            },
-        ],
+        prefix,
     }
+}
+
+fn assemble_rest(_env: &PromptEnv, knowledge: &str, goal: &str) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage {
+            role: "user".into(),
+            content: knowledge.to_string(),
+        },
+        ChatMessage {
+            role: "user".into(),
+            content: goal.to_string(),
+        },
+    ]
 }
 
 /// 段落字节统计（rollout instructions_assembled / context.instructions 用）。

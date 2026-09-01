@@ -22,6 +22,22 @@ fn store_err(e: Error) -> RpcError {
             "invalid_stage_transition",
             ErrorCode::InvalidStageTransition,
         ),
+        ("trace_incomplete", ErrorCode::TraceIncomplete),
+        ("trace_cycle", ErrorCode::Conflict),
+        ("output_digest_changed", ErrorCode::Conflict),
+        ("snapshot_failed", ErrorCode::SnapshotFailed),
+        ("rollback_drift", ErrorCode::RollbackDrift),
+        (
+            "rollback_manual_action_required",
+            ErrorCode::RollbackManualActionRequired,
+        ),
+        (
+            "agent_profile_unavailable",
+            ErrorCode::AgentProfileUnavailable,
+        ),
+        ("capability_mismatch", ErrorCode::AgentCapabilityMismatch),
+        ("approval_expired", ErrorCode::ApprovalExpired),
+        ("attempt_active_exists", ErrorCode::Conflict),
         ("digest_drift", ErrorCode::Conflict),
         ("deployment", ErrorCode::Conflict),
         ("object_contains_secrets", ErrorCode::ObjectSecrets),
@@ -56,6 +72,101 @@ fn str_param(params: &Value, key: &str) -> Result<String, RpcError> {
 
 fn opt_str_param(params: &Value, key: &str) -> Option<String> {
     params.get(key).and_then(|v| v.as_str()).map(String::from)
+}
+
+/// 放行 digest 的 policy version 分量：当前权限快照的 canonical digest。
+fn release_policy_version(store: &Store) -> String {
+    let (snapshot, _) = assemble_policy_snapshot(store);
+    sg_policy::action_digest(&serde_json::to_value(&snapshot).unwrap_or_default())
+}
+
+/// M1 谱系新写开关（可回退点）：SIXGATES_TRACE_WRITES=0 关闭全部谱系写入/回填，保留表结构。
+pub(crate) fn trace_writes_enabled() -> bool {
+    std::env::var("SIXGATES_TRACE_WRITES")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+}
+
+fn workitem_gate(store: &Store, workitem_id: &str) -> String {
+    store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT current_gate FROM workitems WHERE id=?1",
+                [workitem_id],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(sg_store::Error::from)
+        })
+        .unwrap_or_default()
+}
+
+fn str_list_param(params: &Value, key: &str) -> Vec<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 产出入口的谱系接线（蓝图 §6.1 最小父边纪律，fail-closed）：
+/// 先解析需求 key → item id（缺修订/缺条目即 trace_incomplete），调用方确认无副作用后再建边。
+fn resolve_requirement_items(
+    store: &Store,
+    workitem_id: &str,
+    requirement_keys: &[String],
+) -> Result<Vec<String>, Error> {
+    if requirement_keys.is_empty() {
+        return Ok(vec![]);
+    }
+    let Some(revision_id) = sg_workitem::requirements::latest_revision_id(store, workitem_id)?
+    else {
+        return Err(Error::Message(format!(
+            "trace_incomplete: 工作项 {workitem_id} 尚无需求修订，无法建立谱系边"
+        )));
+    };
+    let mut item_ids = Vec::with_capacity(requirement_keys.len());
+    for key in requirement_keys {
+        item_ids.push(
+            sg_workitem::requirements::item_id_by_key(store, &revision_id, key)?.ok_or_else(
+                || {
+                    Error::Message(format!(
+                        "trace_incomplete: 修订 {revision_id} 中不存在需求项 {key}"
+                    ))
+                },
+            )?,
+        );
+    }
+    Ok(item_ids)
+}
+
+fn trace_link_items(
+    store: &Store,
+    workitem_id: &str,
+    from_node_type: &str,
+    from_entity_id: &str,
+    relation: &str,
+    item_ids: &[String],
+) -> Result<(), Error> {
+    for item_id in item_ids {
+        sg_provenance::add_edge(
+            store,
+            &sg_provenance::EdgeInput {
+                workitem_id,
+                from_node_type,
+                from_entity_id,
+                relation,
+                to_node_type: sg_provenance::node_type::REQUIREMENT_ITEM,
+                to_entity_id: item_id,
+                stage_attempt_id: "",
+                created_by_run_id: "",
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// 分发一个 RPC 请求（在 DB actor 线程上执行；store 由 actor 提供）。
@@ -321,28 +432,25 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 &labels,
             )
             .map_err(store_err)?;
-            // 需求文档落盘（工作目录 data/docs/）。
+            // 需求文档落盘（工作目录 data/docs/）+ 需求修订/条目/谱系节点（M1）。
             let doc = format!("# {}\n\n{}\n", wi.title, wi.description);
             let doc_path = sg_workitem::docs::save(store, &wi.id, "requirement.md", &doc)
                 .map_err(store_err)?;
+            if trace_writes_enabled() {
+                sg_workitem::requirements::import_revision(
+                    store,
+                    &wi.id,
+                    "requirement.md",
+                    &doc,
+                    "inline",
+                    "local-user",
+                    "verified",
+                )
+                .map_err(store_err)?;
+            }
             let mut value = serde_json::to_value(&wi).unwrap_or_default();
             value["requirementDoc"] = json!(doc_path);
             Ok(value)
-        }
-        "workitem.setStage" => {
-            let gate = sg_workitem::Gate::parse(&str_param(params, "gate")?)
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
-            let to = sg_workitem::StageState::parse(&str_param(params, "state")?)
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown state"))?;
-            sg_workitem::set_stage(
-                store,
-                &str_param(params, "workItemId")?,
-                gate,
-                to,
-                &opt_str_param(params, "inputBaselineSha").unwrap_or_default(),
-            )
-            .map_err(store_err)?;
-            Ok(json!({"status": "updated"}))
         }
         "workitem.progress" => {
             sg_workitem::progress::progress(store, &str_param(params, "workItemId")?)
@@ -382,6 +490,18 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             .map_err(store_err)?;
             let doc_path =
                 sg_workitem::docs::save(store, &wi.id, &filename, &content).map_err(store_err)?;
+            if trace_writes_enabled() {
+                sg_workitem::requirements::import_revision(
+                    store,
+                    &wi.id,
+                    &filename,
+                    &content,
+                    "document",
+                    "local-user",
+                    "verified",
+                )
+                .map_err(store_err)?;
+            }
             let mut value = serde_json::to_value(&wi).unwrap_or_default();
             value["requirementDoc"] = json!(doc_path);
             Ok(value)
@@ -415,9 +535,178 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let doc = format!("# {}\n\n{}\n", issue.title, issue.body);
             let doc_path =
                 sg_workitem::docs::save(store, &wi.id, "requirement.md", &doc).unwrap_or_default();
+            if trace_writes_enabled() {
+                sg_workitem::requirements::import_revision(
+                    store,
+                    &wi.id,
+                    "requirement.md",
+                    &doc,
+                    "issue",
+                    "local-user",
+                    "verified",
+                )
+                .map_err(store_err)?;
+            }
             let mut value = serde_json::to_value(&wi).unwrap_or_default();
             value["requirementDoc"] = json!(doc_path);
             Ok(value)
+        }
+
+        // --- 需求版本 / 追溯（ADR-030 M1）---
+        "requirement.importRevision" => {
+            let result = sg_workitem::requirements::import_revision(
+                store,
+                &str_param(params, "workItemId")?,
+                &str_param(params, "filename")?,
+                &str_param(params, "content")?,
+                &opt_str_param(params, "sourceKind").unwrap_or_else(|| "document".into()),
+                &opt_str_param(params, "createdBy").unwrap_or_else(|| "local-user".into()),
+                "verified",
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(result).unwrap_or_default())
+        }
+        "requirement.revisions" => {
+            let grouped =
+                sg_workitem::requirements::revisions(store, &str_param(params, "workItemId")?)
+                    .map_err(store_err)?;
+            Ok(json!({"items": grouped.iter().map(|(doc, revs)| json!({
+                "document": doc,
+                "revisions": revs,
+            })).collect::<Vec<_>>()}))
+        }
+        "requirement.items" => {
+            let items = sg_workitem::requirements::items(store, &str_param(params, "revisionId")?)
+                .map_err(store_err)?;
+            Ok(json!({"items": items}))
+        }
+        "requirement.get" => {
+            let revision_id = str_param(params, "revisionId")?;
+            let items = sg_workitem::requirements::items(store, &revision_id).map_err(store_err)?;
+            // 修订本体在 revisions 聚合中返回过；此处携带条目与谱系覆盖。
+            let workitem_id = store
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT d.workitem_id FROM requirement_revisions r
+                         JOIN requirement_documents d ON d.id = r.document_id WHERE r.id=?1",
+                        [&revision_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map_err(|_| Error::Message(format!("not_found: 修订 {revision_id}")))
+                })
+                .map_err(store_err)?;
+            let coverage =
+                sg_provenance::coverage(store, &workitem_id, &revision_id).map_err(store_err)?;
+            Ok(
+                json!({"revisionId": revision_id, "workItemId": workitem_id, "items": items, "coverage": coverage}),
+            )
+        }
+
+        // --- 谱系查询（只读）---
+        "trace.lineage" => {
+            let direction = opt_str_param(params, "direction").unwrap_or_else(|| "both".into());
+            if !matches!(direction.as_str(), "up" | "down" | "both") {
+                return Err(err(ErrorCode::InvalidParams, "direction 须为 up/down/both"));
+            }
+            let depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            let result =
+                sg_provenance::lineage(store, &str_param(params, "nodeId")?, &direction, depth)
+                    .map_err(store_err)?;
+            Ok(serde_json::to_value(result).unwrap_or_default())
+        }
+        "trace.coverage" => {
+            let workitem_id = str_param(params, "workItemId")?;
+            let revision_id = match opt_str_param(params, "revisionId") {
+                Some(id) => id,
+                None => sg_workitem::requirements::latest_revision_id(store, &workitem_id)
+                    .map_err(store_err)?
+                    .ok_or_else(|| {
+                        err(
+                            ErrorCode::NotFound,
+                            format!("工作项 {workitem_id} 尚无需求修订"),
+                        )
+                    })?,
+            };
+            sg_provenance::coverage(store, &workitem_id, &revision_id).map_err(store_err)
+        }
+        "trace.gaps" => {
+            sg_provenance::gaps(store, &str_param(params, "workItemId")?).map_err(store_err)
+        }
+
+        // --- 快照 / 回滚（ADR-030 M3）---
+        "snapshot.get" => {
+            let snap = sg_workitem::snapshot::get(store, &str_param(params, "snapshotId")?)
+                .map_err(store_err)?
+                .ok_or_else(|| err(ErrorCode::NotFound, "快照不存在"))?;
+            let mut v = serde_json::to_value(&snap).unwrap_or_default();
+            v["resources"] = serde_json::to_value(
+                sg_workitem::snapshot::resources(store, &snap.id).map_err(store_err)?,
+            )
+            .unwrap_or_default();
+            Ok(v)
+        }
+        "snapshot.list" => {
+            let items = sg_workitem::snapshot::list(store, &str_param(params, "workItemId")?)
+                .map_err(store_err)?;
+            Ok(json!({ "items": items }))
+        }
+        "rollback.preview" => {
+            let result = sg_workitem::rollback::preview(
+                store,
+                &str_param(params, "workItemId")?,
+                &str_param(params, "targetSnapshotId")?,
+                &release_policy_version(store),
+            )
+            .map_err(store_err)?;
+            Ok(result)
+        }
+        "rollback.request" => {
+            // E2E 钩子（仅显式设置生效）：SIXGATES_APPROVAL_TTL_SECS 覆盖回滚审批有效期。
+            let ttl = std::env::var("SIXGATES_APPROVAL_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or_else(|| assemble_policy_snapshot(store).0.approval_ttl_secs);
+            let result = sg_workitem::rollback::request(
+                store,
+                &str_param(params, "workItemId")?,
+                &str_param(params, "targetSnapshotId")?,
+                &opt_str_param(params, "requestedBy").unwrap_or_else(|| "local-user".into()),
+                &release_policy_version(store),
+                ttl,
+            )
+            .map_err(store_err)?;
+            Ok(result)
+        }
+        "rollback.decide" => {
+            let approval_id = str_param(params, "approvalId")?;
+            let decided_by = str_param(params, "decidedBy")?;
+            let result = sg_workitem::rollback::decide(
+                store,
+                &approval_id,
+                &str_param(params, "decision")?,
+                &decided_by,
+                &opt_str_param(params, "reason").unwrap_or_default(),
+                &release_policy_version(store),
+            )
+            .map_err(store_err)?;
+            sg_store::audit::append(
+                store,
+                &decided_by,
+                &format!("rollback.{}", str_param(params, "decision")?),
+                "approval",
+                &approval_id,
+                json!({}),
+            )
+            .map_err(store_err)?;
+            Ok(result)
+        }
+        "rollback.get" => {
+            sg_workitem::rollback::get(store, &str_param(params, "operationId")?).map_err(store_err)
+        }
+        "rollback.list" => {
+            let items = sg_workitem::rollback::list(store, &str_param(params, "workItemId")?)
+                .map_err(store_err)?;
+            Ok(json!({ "items": items }))
         }
 
         // --- 工件 ---
@@ -437,10 +726,53 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(serde_json::to_value(art).unwrap_or_default())
         }
         "artifact.createDraft" => {
-            let rev = sg_artifact::create_draft(
+            let artifact_id = str_param(params, "artifactId")?;
+            let requirement_keys = str_list_param(params, "requirementKeys");
+            // fail-closed：先解析需求 key 与工件归属，再落修订。
+            let workitem_id: String = store
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT workitem_id FROM artifacts WHERE id=?1",
+                        [&artifact_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map_err(|_| Error::Message(format!("not_found: 工件 {artifact_id}")))
+                })
+                .map_err(store_err)?;
+            let resolved_items = resolve_requirement_items(store, &workitem_id, &requirement_keys)
+                .map_err(store_err)?;
+            let rev =
+                sg_artifact::create_draft(store, &artifact_id, &str_param(params, "content")?)
+                    .map_err(store_err)?;
+            if trace_writes_enabled() {
+                sg_provenance::register_node(
+                    store,
+                    &sg_provenance::NodeInput {
+                        project_id: "",
+                        workitem_id: &workitem_id,
+                        node_type: sg_provenance::node_type::ARTIFACT_REVISION,
+                        entity_id: &rev.id,
+                        content_digest: &rev.content_sha256,
+                        verification_state: "verified",
+                    },
+                )
+                .map_err(store_err)?;
+                trace_link_items(
+                    store,
+                    &workitem_id,
+                    sg_provenance::node_type::ARTIFACT_REVISION,
+                    &rev.id,
+                    sg_provenance::relation::SATISFIES,
+                    &resolved_items,
+                )
+                .map_err(store_err)?;
+            }
+            // M2：修订即输出变化 → 该关 pending 放行失效（AC-SW-03 前置）。
+            sg_workitem::release::invalidate_pending_if_drift(
                 store,
-                &str_param(params, "artifactId")?,
-                &str_param(params, "content")?,
+                &workitem_id,
+                workitem_gate(store, &workitem_id).as_str(),
+                &release_policy_version(store),
             )
             .map_err(store_err)?;
             Ok(serde_json::to_value(rev).unwrap_or_default())
@@ -478,6 +810,10 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(json!({"status": "reviewed"}))
         }
         "artifact.freezeBaseline" => {
+            let workitem_id = str_param(params, "workItemId")?;
+            let gate_name = str_param(params, "gate")?;
+            let gate = sg_workitem::Gate::parse(&gate_name)
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
             let revision_ids: Vec<String> = params
                 .get("revisionIds")
                 .and_then(|v| v.as_array())
@@ -487,22 +823,32 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         .collect()
                 })
                 .ok_or_else(|| err(ErrorCode::InvalidParams, "revisionIds required"))?;
+            // M2：基线绑定到当前关活跃 attempt（冻结即执行中工作）。
+            let mut attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, gate)
+                .map_err(store_err)?;
+            if attempt.state == "prepared" {
+                attempt = sg_workitem::attempt::transition(store, &attempt.id, "running")
+                    .map_err(store_err)?;
+            }
             let base = sg_artifact::freeze(
                 store,
-                &str_param(params, "workItemId")?,
-                &str_param(params, "gate")?,
+                &workitem_id,
+                &gate_name,
                 &revision_ids,
                 &opt_str_param(params, "gitlabCommitSha").unwrap_or_default(),
+                &attempt.id,
             )
             .map_err(store_err)?;
-            // 新基线冻结 → 下游 stale 传播（core 编排）。
-            if let Some(gate) =
-                sg_workitem::Gate::parse(&str_param(params, "gate").unwrap_or_default())
-            {
-                let inputs = base.inputs_sha256.clone();
-                let wi = str_param(params, "workItemId")?;
-                let _ = sg_workitem::mark_stale_from(store, &wi, gate, &inputs);
-            }
+            // 新基线冻结 → 放行请求漂移失效（AC-SW-03）+ 下游 stale 传播（core 编排）。
+            sg_workitem::release::invalidate_pending_if_drift(
+                store,
+                &workitem_id,
+                &gate_name,
+                &release_policy_version(store),
+            )
+            .map_err(store_err)?;
+            let inputs = base.inputs_sha256.clone();
+            let _ = sg_workitem::mark_stale_from(store, &workitem_id, gate, &inputs);
             Ok(serde_json::to_value(base).unwrap_or_default())
         }
 
@@ -545,6 +891,20 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             };
             let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
             if created {
+                if trace_writes_enabled() {
+                    sg_provenance::register_node(
+                        store,
+                        &sg_provenance::NodeInput {
+                            project_id: "",
+                            workitem_id: &workitem_id,
+                            node_type: sg_provenance::node_type::AGENT_RUN,
+                            entity_id: &run.id,
+                            content_digest: "",
+                            verification_state: "verified",
+                        },
+                    )
+                    .map_err(store_err)?;
+                }
                 let instructions = spawn_run_task(state, store, &run.id)?;
                 return Ok(
                     json!({"runId": run.id, "status": run.status, "instructions": instructions}),
@@ -570,6 +930,40 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 })
                 .unwrap_or_default();
             v["policySnapshot"] = json!(snap_raw);
+            // M4：关卡绑定与选路记录透出（AC-SW-08 运行详情可见）。
+            let bindings: (String, String, String, String) = store
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT stage_attempt_id, stage_activity_id, agent_selection_id, input_snapshot_id FROM agent_runs WHERE id=?1",
+                        [&run_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .map_err(Error::from)
+                })
+                .unwrap_or_default();
+            v["stageAttemptId"] = json!(bindings.0);
+            v["stageActivityId"] = json!(bindings.1);
+            v["agentSelectionId"] = json!(bindings.2);
+            v["inputSnapshotId"] = json!(bindings.3);
+            if !bindings.2.is_empty() {
+                if let Ok(sel) = sg_agent::router::get(store, &bindings.2) {
+                    if let Ok(ver) =
+                        sg_agent::profile::get_version(store, &sel.resolved_profile_version_id)
+                    {
+                        v["agentSelection"] = json!({
+                            "selectionId": sel.id,
+                            "resolvedProfileVersionId": sel.resolved_profile_version_id,
+                            "profileId": ver.profile_id,
+                            "versionNo": ver.version_no,
+                            "contentDigest": ver.content_digest,
+                            "sourceScope": sel.source_scope,
+                            "fallbackUsed": sel.fallback_used,
+                            "reasonCode": sel.reason_code,
+                            "candidates": sel.candidate_report,
+                        });
+                    }
+                }
+            }
             // rollout 摘要（F04）：行数/字节/路径；全文查看走 logs.* 既有域。
             let path = sg_agent::rollout::Rollout::path_for(&store.data_dir, &run_id);
             v["rollout"] = match std::fs::read_to_string(&path) {
@@ -609,11 +1003,11 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(json!({"items": items}))
         }
 
-        // --- 门禁 ---
+        // --- 门禁（M2/ADR-030：evaluate 只计算，绝不推进；放行走 gate.decideRelease）---
         "gate.evaluate" => {
             let workitem_id = str_param(params, "workItemId")?;
             let gate_name = str_param(params, "gate")?;
-            sg_workitem::Gate::parse(&gate_name)
+            let gate = sg_workitem::Gate::parse(&gate_name)
                 .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
             let mut inputs = sg_workitem::EvaluateInputs {
                 workitem_id: workitem_id.clone(),
@@ -625,8 +1019,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 no_blocking_risk: sg_workitem::InputState::Pass,
                 inputs_current: sg_workitem::InputState::Unknown,
             };
-            if let Some(base) =
-                sg_artifact::latest_baseline(store, &workitem_id).map_err(store_err)?
+            // M2 per-gate baseline：各关基线独立 active（蓝图 §5.3）。
+            if let Some(base) = sg_artifact::latest_baseline(store, &workitem_id, gate.as_str())
+                .map_err(store_err)?
             {
                 if sg_artifact::is_baseline_current(store, &base.id).map_err(store_err)? {
                     inputs.required_artifacts_frozen = sg_workitem::InputState::Pass;
@@ -646,8 +1041,10 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 };
                 inputs.required_checks_passed = sg_workitem::InputState::Pass;
             }
-            let pending = sg_policy::pending(store, 100).map_err(store_err)?;
-            if pending.is_empty() {
+            // AC-SW-05：审批按 WorkItem 作用域；gate_release/rollback 不阻塞技术评估。
+            let blocking =
+                sg_policy::pending_blocking_count(store, &workitem_id).map_err(store_err)?;
+            if blocking == 0 {
                 inputs.approvals_valid = sg_workitem::InputState::Pass;
             } else {
                 inputs.no_blocking_risk = sg_workitem::InputState::Fail;
@@ -655,10 +1052,319 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let result =
                 sg_workitem::gate::evaluate_and_record(store, &inputs).map_err(store_err)?;
             if result.passed {
-                let gate = sg_workitem::Gate::parse(&gate_name).unwrap();
-                sg_workitem::pass_gate(store, &workitem_id, gate).map_err(store_err)?;
+                // attempt 投影推进（不碰 current_gate）。
+                sg_workitem::attempt::advance_to_review_ready(store, &workitem_id, gate)
+                    .map_err(store_err)?;
             }
             Ok(serde_json::to_value(result).unwrap_or_default())
+        }
+        "gate.requestRelease" => {
+            // E2E 钩子（仅显式设置时生效）：SIXGATES_APPROVAL_TTL_SECS 覆盖放行审批有效期。
+            let ttl = std::env::var("SIXGATES_APPROVAL_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or_else(|| assemble_policy_snapshot(store).0.approval_ttl_secs);
+            let result = sg_workitem::release::request_release(
+                store,
+                &str_param(params, "workItemId")?,
+                &str_param(params, "gate")?,
+                &release_policy_version(store),
+                ttl,
+            )
+            .map_err(store_err)?;
+            Ok(result)
+        }
+        "gate.decideRelease" => {
+            let result = sg_workitem::release::decide_release(
+                store,
+                &str_param(params, "approvalId")?,
+                &str_param(params, "decision")?,
+                &str_param(params, "decidedBy")?,
+                &opt_str_param(params, "reason").unwrap_or_default(),
+                &release_policy_version(store),
+            )
+            .map_err(store_err)?;
+            sg_store::audit::append(
+                store,
+                &str_param(params, "decidedBy")?,
+                &format!("gate.release.{}", str_param(params, "decision")?),
+                "approval",
+                &str_param(params, "approvalId")?,
+                json!({}),
+            )
+            .map_err(store_err)?;
+            Ok(result)
+        }
+        "gate.getRelease" => {
+            sg_workitem::release::get_release(store, &str_param(params, "releaseId")?)
+                .map_err(store_err)
+        }
+        "stage.attempts" => {
+            let workitem_id = str_param(params, "workItemId")?;
+            let attempts = sg_workitem::attempt::list(store, &workitem_id).map_err(store_err)?;
+            let items: Vec<Value> = attempts
+                .iter()
+                .map(|a| {
+                    let mut v = serde_json::to_value(a).unwrap_or_default();
+                    v["activities"] = serde_json::to_value(
+                        sg_workitem::attempt::activities(store, &a.id).unwrap_or_default(),
+                    )
+                    .unwrap_or_default();
+                    v
+                })
+                .collect();
+            Ok(json!({"items": items}))
+        }
+        "stage.startActivity" => {
+            // M4 唯一关卡执行入口（SG-AGT-007）：attempt/快照/活动/选路/清单全部服务端装配。
+            let workitem_id = str_param(params, "workItemId")?;
+            let gate_name = str_param(params, "gate")?;
+            let gate = sg_workitem::Gate::parse(&gate_name)
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
+            let goal = str_param(params, "goal")?;
+            let required_caps = str_list_param(params, "requiredCapabilities");
+            let task_override = opt_str_param(params, "profileVersionId");
+            let idem = opt_str_param(params, "idempotencyKey")
+                .unwrap_or_else(|| format!("sa-{}", sg_store::ids::new_id("idem")));
+            // 只能在当前关启动活动（其他关的活跃 attempt 会被单活跃约束拒绝）。
+            let wi_now = sg_workitem::get(store, &workitem_id).map_err(store_err)?;
+            if wi_now.current_gate != gate_name {
+                return Err(err(
+                    ErrorCode::Conflict,
+                    format!(
+                        "attempt_active_exists: 工作项当前关为 {}，不能在 {gate_name} 启动活动",
+                        wi_now.current_gate
+                    ),
+                ));
+            }
+            let attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, gate)
+                .map_err(store_err)?;
+            let activities =
+                sg_workitem::attempt::activities(store, &attempt.id).map_err(store_err)?;
+            let activity_key = match opt_str_param(params, "activityKey") {
+                Some(key) => activities
+                    .iter()
+                    .find(|a| a.activity_key == key)
+                    .ok_or_else(|| err(ErrorCode::InvalidParams, format!("未知活动 {key}")))?
+                    .activity_key
+                    .clone(),
+                None => activities
+                    .iter()
+                    .find(|a| a.state == "pending")
+                    .or_else(|| activities.first())
+                    .ok_or_else(|| err(ErrorCode::Conflict, "attempt 无可用活动"))?
+                    .activity_key
+                    .clone(),
+            };
+            let activity_id = activities
+                .iter()
+                .find(|a| a.activity_key == activity_key)
+                .map(|a| a.id.clone())
+                .unwrap_or_default();
+            let project_id: String = store
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT project_id FROM workitems WHERE id=?1",
+                        [&workitem_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map_err(|_| Error::Message("not_found: workitem".into()))
+                })
+                .map_err(store_err)?;
+            // 选路（四级优先 + 回退语义），先于运行创建（Run 必须绑定 selection）。
+            let selection = sg_agent::router::resolve(
+                store,
+                &sg_agent::router::ResolveContext {
+                    project_id: &project_id,
+                    gate: gate.as_str(),
+                    activity_key: &activity_key,
+                    stage_activity_id: &activity_id,
+                    task_override_version_id: task_override.as_deref(),
+                    required_capabilities: &required_caps,
+                    persist: true,
+                },
+            )
+            .map_err(store_err)?;
+            sg_workitem::attempt::set_activity_state(store, &attempt.id, &activity_key, "running")
+                .map_err(store_err)?;
+            // 服务端装配上下文清单（客户端不再自报关键绑定）。
+            let manifest = sg_knowledge::create_manifest(
+                store,
+                &project_id,
+                &workitem_id,
+                &goal.chars().take(80).collect::<String>(),
+                &[],
+            )
+            .map_err(store_err)?;
+            let manifest_id = manifest["id"].as_str().unwrap_or_default().to_string();
+            let allowlist: Vec<String> = params
+                .get("toolAllowlist")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["read_file".into()]);
+            let budget: sg_agent::RunBudget = params
+                .get("budget")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let config = sg_agent::RunConfig {
+                workitem_id: &workitem_id,
+                task_id: &activity_id,
+                goal: &goal,
+                manifest_id: &manifest_id,
+                tool_allowlist: &allowlist,
+                idempotency_key: &idem,
+                budget: &budget,
+                max_iterations: 20,
+            };
+            let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
+            if created {
+                store
+                    .with_conn(|conn| {
+                        conn.execute(
+                            "UPDATE agent_runs SET stage_attempt_id=?1, stage_activity_id=?2, agent_selection_id=?3, input_snapshot_id=?4 WHERE id=?5",
+                            rusqlite::params![attempt.id, activity_id, selection.id, attempt.entry_snapshot_id, run.id],
+                        )?;
+                        Ok(())
+                    })
+                    .map_err(store_err)?;
+                if trace_writes_enabled() {
+                    sg_provenance::register_node(
+                        store,
+                        &sg_provenance::NodeInput {
+                            project_id: "",
+                            workitem_id: &workitem_id,
+                            node_type: sg_provenance::node_type::AGENT_RUN,
+                            entity_id: &run.id,
+                            content_digest: "",
+                            verification_state: "verified",
+                        },
+                    )
+                    .map_err(store_err)?;
+                }
+                let instructions = spawn_run_task(state, store, &run.id)?;
+                return Ok(json!({
+                    "runId": run.id, "status": run.status, "instructions": instructions,
+                    "attemptId": attempt.id, "activityKey": activity_key,
+                    "selection": selection,
+                }));
+            }
+            Ok(json!({
+                "runId": run.id, "status": run.status,
+                "attemptId": attempt.id, "activityKey": activity_key,
+                "selection": serde_json::to_value(&selection).unwrap_or_default(),
+            }))
+        }
+        "agentProfile.list" => {
+            let project = opt_str_param(params, "projectId");
+            let profiles =
+                sg_agent::profile::list_profiles(store, project.as_deref()).map_err(store_err)?;
+            let items: Vec<Value> = profiles
+                .iter()
+                .map(|p| {
+                    let mut v = serde_json::to_value(p).unwrap_or_default();
+                    v["versions"] = serde_json::to_value(
+                        sg_agent::profile::versions(store, &p.id).unwrap_or_default(),
+                    )
+                    .unwrap_or_default();
+                    v
+                })
+                .collect();
+            Ok(json!({ "items": items }))
+        }
+        "agentProfile.create" => {
+            let profile = sg_agent::profile::create_profile(
+                store,
+                opt_str_param(params, "projectId").as_deref(),
+                &str_param(params, "name")?,
+                &str_param(params, "adapterKind")?,
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(profile).unwrap_or_default())
+        }
+        "agentProfile.createVersion" => {
+            let capabilities = str_list_param(params, "capabilities");
+            let version = sg_agent::profile::create_version(
+                store,
+                &str_param(params, "profileId")?,
+                &opt_str_param(params, "persona").unwrap_or_default(),
+                &opt_str_param(params, "sop").unwrap_or_default(),
+                &capabilities,
+                &opt_str_param(params, "outputSchema").unwrap_or_default(),
+                &opt_str_param(params, "modelRoute").unwrap_or_else(|| "{}".into()),
+                &opt_str_param(params, "budget").unwrap_or_else(|| "{}".into()),
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(version).unwrap_or_default())
+        }
+        "agentProfile.setEnabled" => {
+            sg_agent::profile::set_profile_enabled(
+                store,
+                &str_param(params, "profileId")?,
+                params
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+            )
+            .map_err(store_err)?;
+            Ok(json!({ "status": "updated" }))
+        }
+        "agentBinding.list" => {
+            let bindings = sg_agent::profile::list_bindings(
+                store,
+                opt_str_param(params, "projectId").as_deref(),
+            )
+            .map_err(store_err)?;
+            Ok(json!({ "items": bindings }))
+        }
+        "agentBinding.set" => {
+            sg_agent::profile::set_binding(
+                store,
+                opt_str_param(params, "projectId").as_deref(),
+                &str_param(params, "gate")?,
+                &str_param(params, "activityKey")?,
+                &str_param(params, "profileVersionId")?,
+                &opt_str_param(params, "fallbackMode").unwrap_or_else(|| "generic".into()),
+                params.get("priority").and_then(|v| v.as_i64()).unwrap_or(0),
+            )
+            .map_err(store_err)?;
+            Ok(json!({ "status": "bound" }))
+        }
+        "agentBinding.remove" => {
+            sg_agent::profile::remove_binding(store, &str_param(params, "bindingId")?)
+                .map_err(store_err)?;
+            Ok(json!({ "status": "removed" }))
+        }
+        "agentBinding.resolvePreview" => {
+            let preview = sg_agent::router::resolve_preview(
+                store,
+                &str_param(params, "projectId")?,
+                &str_param(params, "gate")?,
+                &str_param(params, "activityKey")?,
+                &str_list_param(params, "requiredCapabilities"),
+            )
+            .map_err(store_err)?;
+            Ok(preview)
+        }
+        "stage.package" => {
+            let workitem_id = str_param(params, "workItemId")?;
+            let gate_name = str_param(params, "gate")?;
+            let gate = sg_workitem::Gate::parse(&gate_name)
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
+            let latest = sg_workitem::attempt::latest_for_gate(store, &workitem_id, gate)
+                .map_err(store_err)?;
+            Ok(json!({
+                "workItemId": workitem_id,
+                "gate": gate_name,
+                "latestAttempt": latest,
+                "activeAttempt": sg_workitem::attempt::active_for_gate(store, &workitem_id, gate)
+                    .map_err(store_err)?,
+                "releaseRequests": sg_workitem::release::list_for_gate(store, &workitem_id, gate.as_str())
+                    .map_err(store_err)?,
+            }))
         }
 
         // --- 审批 ---
@@ -753,9 +1459,15 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let content = opt_str_param(params, "content");
             let payload = opt_str_param(params, "payload").unwrap_or_else(|| "{}".into());
             let source = opt_str_param(params, "source").unwrap_or_default();
+            let workitem_id = str_param(params, "workItemId")?;
+            let requirement_keys = str_list_param(params, "requirementKeys");
+            // fail-closed：需求 key 先解析（不命中即 trace_incomplete，不落任何事实）。
+            let resolved_items = resolve_requirement_items(store, &workitem_id, &requirement_keys)
+                .map_err(store_err)?;
+            let gate_param = str_param(params, "gate")?;
             let input = sg_evidence::RecordInput {
-                workitem_id: &str_param(params, "workItemId")?,
-                gate: &str_param(params, "gate")?,
+                workitem_id: &workitem_id,
+                gate: &gate_param,
                 kind: &str_param(params, "kind")?,
                 title: &title,
                 content: content.as_deref(),
@@ -763,15 +1475,52 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 source: &source,
             };
             let ev = sg_evidence::record(store, &input).map_err(store_err)?;
+            if trace_writes_enabled() {
+                sg_provenance::register_node(
+                    store,
+                    &sg_provenance::NodeInput {
+                        project_id: "",
+                        workitem_id: &workitem_id,
+                        node_type: sg_provenance::node_type::EVIDENCE,
+                        entity_id: &ev.id,
+                        content_digest: &ev.object_sha256,
+                        verification_state: "unverified",
+                    },
+                )
+                .map_err(store_err)?;
+                trace_link_items(
+                    store,
+                    &workitem_id,
+                    sg_provenance::node_type::EVIDENCE,
+                    &ev.id,
+                    sg_provenance::relation::VERIFIES,
+                    &resolved_items,
+                )
+                .map_err(store_err)?;
+            }
+            // M2：证据/核验态是放行包的一部分 → 漂移失效（AC-SW-03 前置）。
+            sg_workitem::release::invalidate_pending_if_drift(
+                store,
+                &workitem_id,
+                gate_param.as_str(),
+                &release_policy_version(store),
+            )
+            .map_err(store_err)?;
             Ok(serde_json::to_value(ev).unwrap_or_default())
         }
         "evidence.verify" => {
-            sg_evidence::verify(
-                store,
-                &str_param(params, "evidenceId")?,
-                &str_param(params, "verifiedBy")?,
-            )
-            .map_err(store_err)?;
+            let evidence_id = str_param(params, "evidenceId")?;
+            sg_evidence::verify(store, &evidence_id, &str_param(params, "verifiedBy")?)
+                .map_err(store_err)?;
+            if trace_writes_enabled() {
+                sg_provenance::set_verification(
+                    store,
+                    sg_provenance::node_type::EVIDENCE,
+                    &evidence_id,
+                    "verified",
+                )
+                .map_err(store_err)?;
+            }
             Ok(json!({"status": "verified"}))
         }
         "passport.issue" => {
@@ -1216,10 +1965,12 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
             .map_err(|_| sg_store::Error::Message("workitem_not_found".into()))
         })
         .map_err(store_err)?;
-    let work_dir = if local_root.is_empty() {
-        None
-    } else {
-        Some(std::path::PathBuf::from(&local_root))
+    // M3+：Agent 工具执行在 SixGates 隔离 worktree（SG-RBK-005）；不可用时诚实回退 local_root。
+    let worktree_info = sg_workitem::worktree::ensure(store, &workitem_id).ok();
+    let work_dir = match &worktree_info {
+        Some(info) => Some(std::path::PathBuf::from(&info.path)),
+        None if !local_root.is_empty() => Some(std::path::PathBuf::from(&local_root)),
+        _ => None,
     };
     // F10：权限快照与生效执行模式——已存快照（暂停恢复）原样复用（运行中不受设置变更影响），
     // 否则装配（注册表+toolPolicy 覆盖）并落库 policy_snapshot 列。
@@ -1337,7 +2088,47 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
             .map(|r| r.tool.clone())
             .collect(),
     };
-    let initial = sg_agent::prompt::assemble(&env, &allowlist, &knowledge, &goal);
+    // M4：AgentProfile developer 层（persona/SOP/输出契约；无 selection 时为 None）。
+    let profile_text: Option<String> = {
+        let sel_id: String = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT agent_selection_id FROM agent_runs WHERE id=?1",
+                    [run_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .map_err(Error::from)
+            })
+            .unwrap_or_default();
+        if sel_id.is_empty() {
+            None
+        } else {
+            sg_agent::router::get(store, &sel_id).ok().and_then(|sel| {
+                sg_agent::profile::get_version(store, &sel.resolved_profile_version_id)
+                    .ok()
+                    .and_then(|ver| {
+                        sg_agent::profile::version_texts(store, &ver)
+                            .ok()
+                            .map(|(persona, sop)| {
+                                format!(
+                                    "【Agent 角色档案】\n角色说明：{}\n标准作业流程：{}\n（profile v{} · digest {}）",
+                                    if persona.is_empty() { "（未配置）" } else { persona.trim() },
+                                    if sop.is_empty() { "（未配置）" } else { sop.trim() },
+                                    ver.version_no,
+                                    ver.content_digest
+                                )
+                            })
+                    })
+            })
+        }
+    };
+    let initial = sg_agent::prompt::assemble_with_profile(
+        &env,
+        &allowlist,
+        &knowledge,
+        &goal,
+        profile_text.as_deref(),
+    );
     let summary = json!({
         "instructionLayers": sg_agent::instructions::layers_json(&layers),
         "instructionBytes": instr_text.len(),

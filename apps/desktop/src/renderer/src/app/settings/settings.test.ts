@@ -12,10 +12,10 @@ import { redactSecrets, REDACTED } from '../../lib/redact';
 import type { DiagnosticsReport } from './types';
 
 describe('settings-routes', () => {
-  it('17 页路由全部注册且 id 唯一', () => {
+  it('18 页路由全部注册且 id 唯一', () => {
     const ids = SETTINGS_NAV.flatMap((g) => g.items.map((i) => i.id));
-    expect(ids.length).toBe(17);
-    expect(new Set(ids).size).toBe(17);
+    expect(ids.length).toBe(18);
+    expect(new Set(ids).size).toBe(18);
   });
 
   it('每页都有中文名与 S 编号，分组非空', () => {

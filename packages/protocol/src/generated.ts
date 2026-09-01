@@ -27,7 +27,6 @@ export type RpcMethodName =
   | 'workitem.list'
   | 'workitem.get'
   | 'workitem.create'
-  | 'workitem.setStage'
   | 'workitem.progress'
   | 'workitem.documents'
   | 'workitem.getDocument'
@@ -129,7 +128,35 @@ export type RpcMethodName =
   | 'audit.settings.get'
   | 'audit.settings.update'
   | 'tool.list'
-  | 'tool.test';
+  | 'tool.test'
+  | 'requirement.importRevision'
+  | 'requirement.revisions'
+  | 'requirement.items'
+  | 'requirement.get'
+  | 'trace.lineage'
+  | 'trace.coverage'
+  | 'trace.gaps'
+  | 'gate.requestRelease'
+  | 'gate.decideRelease'
+  | 'gate.getRelease'
+  | 'stage.attempts'
+  | 'stage.package'
+  | 'snapshot.get'
+  | 'snapshot.list'
+  | 'rollback.preview'
+  | 'rollback.request'
+  | 'rollback.decide'
+  | 'rollback.get'
+  | 'rollback.list'
+  | 'stage.startActivity'
+  | 'agentProfile.list'
+  | 'agentProfile.create'
+  | 'agentProfile.createVersion'
+  | 'agentProfile.setEnabled'
+  | 'agentBinding.list'
+  | 'agentBinding.set'
+  | 'agentBinding.remove'
+  | 'agentBinding.resolvePreview';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -156,7 +183,6 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'workitem.list',
   'workitem.get',
   'workitem.create',
-  'workitem.setStage',
   'workitem.progress',
   'workitem.documents',
   'workitem.getDocument',
@@ -259,10 +285,41 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'audit.settings.update',
   'tool.list',
   'tool.test',
+  'requirement.importRevision',
+  'requirement.revisions',
+  'requirement.items',
+  'requirement.get',
+  'trace.lineage',
+  'trace.coverage',
+  'trace.gaps',
+  'gate.requestRelease',
+  'gate.decideRelease',
+  'gate.getRelease',
+  'stage.attempts',
+  'stage.package',
+  'snapshot.get',
+  'snapshot.list',
+  'rollback.preview',
+  'rollback.request',
+  'rollback.decide',
+  'rollback.get',
+  'rollback.list',
+  'stage.startActivity',
+  'agentProfile.list',
+  'agentProfile.create',
+  'agentProfile.createVersion',
+  'agentProfile.setEnabled',
+  'agentBinding.list',
+  'agentBinding.set',
+  'agentBinding.remove',
+  'agentBinding.resolvePreview',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
+  'agent.fallback_used',
+  'agent.selection_resolved',
   'approval.approved',
+  'approval.changes_requested',
   'approval.rejected',
   'approval.requested',
   'artifact.reviewed',
@@ -284,7 +341,11 @@ export const EVENT_TYPES: readonly string[] = [
   'diagnostics.completed',
   'evidence.recorded',
   'executionProfile.changed',
+  'gate.changes_requested',
   'gate.evaluated',
+  'gate.release_approved',
+  'gate.release_rejected',
+  'gate.release_requested',
   'gitlabProfile.changed',
   'knowledge.scanned',
   'knowledge.settingsChanged',
@@ -295,6 +356,14 @@ export const EVENT_TYPES: readonly string[] = [
   'policy.changed',
   'project.changed',
   'project.created',
+  'requirement.revision_imported',
+  'rollback.blocked',
+  'rollback.cancelled',
+  'rollback.completed',
+  'rollback.failed',
+  'rollback.previewed',
+  'rollback.requested',
+  'rollback.started',
   'run.cancelled',
   'run.compacted',
   'run.completed_execution',
@@ -303,13 +372,26 @@ export const EVENT_TYPES: readonly string[] = [
   'run.started',
   'run.waiting_approval',
   'settings.changed',
+  'snapshot.created',
   'sshTarget.changed',
+  'stage.attempt_approved',
+  'stage.attempt_awaiting_user_approval',
+  'stage.attempt_cancelled',
+  'stage.attempt_changes_requested',
+  'stage.attempt_failed',
+  'stage.attempt_prepared',
+  'stage.attempt_rejected',
+  'stage.attempt_review_ready',
+  'stage.attempt_rolled_back',
+  'stage.attempt_running',
+  'stage.attempt_superseded',
   'stage.passed',
   'stage.running',
   'stage.stale',
   'tool.completed',
   'tool.proposed',
   'tool.started',
+  'trace.edge_created',
   'workitem.created',
 ] as const;
 
@@ -448,13 +530,6 @@ export interface WorkitemCreateParams {
   labels?: unknown[];
 }
 
-export interface WorkitemSetStageParams {
-  workItemId: string;
-  gate: string;
-  state: string;
-  inputBaselineSha?: string;
-}
-
 export interface WorkitemProgressParams {
   workItemId: string;
 }
@@ -493,6 +568,7 @@ export interface ArtifactCreateParams {
 export interface ArtifactCreateDraftParams {
   artifactId: string;
   content: string;
+  requirementKeys?: unknown[];
 }
 
 export interface ArtifactUpdateDraftParams {
@@ -579,6 +655,7 @@ export interface EvidenceRecordParams {
   content?: string;
   payload?: string;
   source?: string;
+  requirementKeys?: unknown[];
 }
 
 export interface EvidenceVerifyParams {
@@ -952,4 +1029,158 @@ export type ToolListParams = Record<string, never>;
 
 export interface ToolTestParams {
   toolId: string;
+}
+
+export interface RequirementImportRevisionParams {
+  workItemId: string;
+  filename: string;
+  content: string;
+  sourceKind?: string;
+  createdBy?: string;
+}
+
+export interface RequirementRevisionsParams {
+  workItemId: string;
+}
+
+export interface RequirementItemsParams {
+  revisionId: string;
+}
+
+export interface RequirementGetParams {
+  revisionId: string;
+}
+
+export interface TraceLineageParams {
+  nodeId: string;
+  direction?: string;
+  depth?: number;
+}
+
+export interface TraceCoverageParams {
+  workItemId: string;
+  revisionId?: string;
+}
+
+export interface TraceGapsParams {
+  workItemId: string;
+}
+
+export interface GateRequestReleaseParams {
+  workItemId: string;
+  gate: string;
+}
+
+export interface GateDecideReleaseParams {
+  approvalId: string;
+  decision: string;
+  decidedBy: string;
+  reason?: string;
+}
+
+export interface GateGetReleaseParams {
+  releaseId: string;
+}
+
+export interface StageAttemptsParams {
+  workItemId: string;
+}
+
+export interface StagePackageParams {
+  workItemId: string;
+  gate: string;
+}
+
+export interface SnapshotGetParams {
+  snapshotId: string;
+}
+
+export interface SnapshotListParams {
+  workItemId: string;
+}
+
+export interface RollbackPreviewParams {
+  workItemId: string;
+  targetSnapshotId: string;
+}
+
+export interface RollbackRequestParams {
+  workItemId: string;
+  targetSnapshotId: string;
+  requestedBy?: string;
+}
+
+export interface RollbackDecideParams {
+  approvalId: string;
+  decision: string;
+  decidedBy: string;
+  reason?: string;
+}
+
+export interface RollbackGetParams {
+  operationId: string;
+}
+
+export interface RollbackListParams {
+  workItemId: string;
+}
+
+export interface StageStartActivityParams {
+  workItemId: string;
+  gate: string;
+  goal: string;
+  activityKey?: string;
+  profileVersionId?: string;
+  requiredCapabilities?: unknown[];
+  toolAllowlist?: unknown[];
+  idempotencyKey?: string;
+}
+
+export interface AgentProfileListParams {
+  projectId?: string;
+}
+
+export interface AgentProfileCreateParams {
+  name: string;
+  adapterKind: string;
+  projectId?: string;
+}
+
+export interface AgentProfileCreateVersionParams {
+  profileId: string;
+  persona?: string;
+  sop?: string;
+  capabilities?: unknown[];
+  outputSchema?: string;
+  modelRoute?: string;
+  budget?: string;
+}
+
+export interface AgentProfileSetEnabledParams {
+  profileId: string;
+  enabled: boolean;
+}
+
+export interface AgentBindingListParams {
+  projectId?: string;
+}
+
+export interface AgentBindingSetParams {
+  gate: string;
+  activityKey: string;
+  profileVersionId: string;
+  projectId?: string;
+  fallbackMode?: string;
+  priority?: number;
+}
+
+export interface AgentBindingRemoveParams {
+  bindingId: string;
+}
+
+export interface AgentBindingResolvePreviewParams {
+  projectId: string;
+  gate: string;
+  activityKey: string;
+  requiredCapabilities?: unknown[];
 }

@@ -8,8 +8,10 @@ use sg_store::{ids, outbox, timefmt, Error, Store};
 
 pub mod instructions;
 pub mod modelgw;
+pub mod profile;
 pub mod prompt;
 pub mod rollout;
+pub mod router;
 pub mod schema;
 pub mod tools;
 pub use modelgw::{Budget, Gateway, Usage};
@@ -628,6 +630,8 @@ fn propose_and_execute(
             sg_policy::Risk::High,
             &format!("run {} tool {}", run.id, decision.action),
             3600,
+            Some(&run.workitem_id),
+            None,
         )?;
         // M1/F03：提案保持 proposed（不再记 rejected/approval_required），Run 挂起等待审批。
         log_rollout(

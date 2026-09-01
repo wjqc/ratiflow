@@ -11,7 +11,11 @@ interface Props {
 const DOC_GATES: Record<string, { kind: string; label: string }> = {
   requirements: { kind: 'prd', label: 'PRD' },
   design: { kind: 'tech_design', label: '技术方案' },
+  development: { kind: 'dev_notes', label: '开发说明' },
   testing: { kind: 'test_plan', label: '测试计划' },
+  // M2 per-gate 基线：部署/验证关也各自产出并冻结基线。
+  deployment: { kind: 'release_notes', label: '发布说明' },
+  verification: { kind: 'acceptance_notes', label: '验收说明' },
 };
 
 interface ArtifactInfo { id: string; kind: string; title: string }
@@ -207,26 +211,57 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
 
 export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId: string; gate: string; busy: boolean; onDone: () => void }) {
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [pendingRelease, setPendingRelease] = useState<{ id: string } | null>(null);
+
+  // M2：该关有待审批放行时不再重复评估——用户决定在审批中心完成。
+  const loadPending = useCallback(async () => {
+    try {
+      const pkg = await rpc<{ releaseRequests: { id: string; state: string }[] }>('stage.package', { workItemId, gate });
+      setPendingRelease(pkg.releaseRequests.find((r) => r.state === 'pending') ?? null);
+    } catch {
+      // 只读状态增强失败不阻塞主流程。
+    }
+  }, [workItemId, gate]);
+
+  useEffect(() => {
+    void loadPending();
+  }, [loadPending]);
+
+  const evaluateAndRequest = () => {
+    setError('');
+    setNotice('');
+    void (async () => {
+      try {
+        const result = await rpc<{ passed: boolean; failed_inputs: string[] }>('gate.evaluate', { workItemId, gate });
+        if (!result.passed) {
+          setError(`门禁未通过：${result.failed_inputs.join('、')}`);
+          return;
+        }
+        // evaluate 只计算；通过后冻结输出包并提交用户放行审批（AC-SW-02：current_gate 不变）。
+        await rpc('gate.requestRelease', { workItemId, gate });
+        setNotice('已冻结输出包并提交放行审批；请在审批中心「批准并进入下一关」。');
+        await loadPending();
+        onDone();
+      } catch (reason) {
+        setError(rpcErrorMessage(reason));
+      }
+    })();
+  };
+
   return (
     <>
       {error ? <div className="sg-banner sg-banner--error">{error}</div> : null}
-      <button
-        className="sg-button sg-button--primary"
-        disabled={busy}
-        onClick={() => {
-          setError('');
-          void rpc<{ passed: boolean; failed_inputs: string[] }>('gate.evaluate', { workItemId, gate })
-            .then((result) => {
-              onDone();
-              if (!result.passed) {
-                setError(`门禁未通过：${result.failed_inputs.join('、')}`);
-              }
-            })
-            .catch((reason) => setError(rpcErrorMessage(reason)));
-        }}
-      >
-        ⚖️ 评估{gateLabel(gate)}门禁
-      </button>
+      {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
+      {pendingRelease ? (
+        <span className="sg-chip" title="在审批中心完成批准 / 要求修改 / 拒绝">
+          ⏳ 放行审批等待用户决定
+        </span>
+      ) : (
+        <button className="sg-button sg-button--primary" disabled={busy} onClick={evaluateAndRequest}>
+          ⚖️ 评估{gateLabel(gate)}门禁并提交放行
+        </button>
+      )}
     </>
   );
 }

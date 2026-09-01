@@ -4,7 +4,14 @@ import { IconAlert, IconCheck, IconShield } from '../components/Icons';
 
 interface ApprovalInfo {
   id: string; subject_type: string; subject_id: string; risk: string;
-  status: string; reason: string; expires_at: string;
+  status: string; reason: string; expires_at: string; action_digest?: string;
+}
+
+interface ReleaseDetail {
+  releaseRequest: { id: string; release_digest: string; state: string };
+  attempt?: { gate: string; attempt_no: number; state: string };
+  package?: { digest: string; packageNo: number; coverage?: { totalItems: number; coveredCount: number; verifiedCount: number } };
+  items?: { role: string; nodeType: string; entityId: string }[];
 }
 
 interface Props { onDecided: () => void }
@@ -46,7 +53,7 @@ export default function ApprovalsPage({ onDecided }: Props) {
   }, [reload]);
 
   const bucketOf = useCallback((a: ApprovalInfo): Tab => {
-    if (a.status === 'approved' || a.status === 'rejected') return 'decided';
+    if (a.status === 'approved' || a.status === 'rejected' || a.status === 'changes_requested') return 'decided';
     if (a.status === 'expired' || (a.expires_at && new Date(a.expires_at).getTime() < Date.now())) return 'expired';
     return 'pending';
   }, []);
@@ -60,7 +67,18 @@ export default function ApprovalsPage({ onDecided }: Props) {
   const visible = items.filter((a) => bucketOf(a) === tab);
   const selected = visible.find((a) => a.id === selectedId) ?? visible[0] ?? null;
 
-  const decide = async (approvalId: string, decision: 'approved' | 'rejected') => {
+  const [releaseDetail, setReleaseDetail] = useState<ReleaseDetail | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setReleaseDetail(null);
+    if (selected?.subject_type !== 'gate_release') return;
+    void rpc<ReleaseDetail>('gate.getRelease', { releaseId: selected.subject_id })
+      .then((d) => { if (alive) setReleaseDetail(d); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [selected]);
+
+  const decide = async (approvalId: string, decision: 'approved' | 'rejected' | 'changes_requested') => {
     if (!actor.trim()) {
       setError('请先填写审批人标识');
       return;
@@ -71,7 +89,12 @@ export default function ApprovalsPage({ onDecided }: Props) {
     }
     setError('');
     try {
-      await rpc('approval.decide', { approvalId, decision, decidedBy: actor.trim(), reason: reason.trim() });
+      if (selected?.subject_type === 'gate_release') {
+        // M2：关卡放行经独立放行事务（evaluate 只计算，推进只在这里原子发生）。
+        await rpc('gate.decideRelease', { approvalId, decision, decidedBy: actor.trim(), reason: reason.trim() });
+      } else {
+        await rpc('approval.decide', { approvalId, decision, decidedBy: actor.trim(), reason: reason.trim() });
+      }
       setReason('');
       setConfirmed(false);
       await reload();
@@ -169,9 +192,30 @@ export default function ApprovalsPage({ onDecided }: Props) {
               <div className="sg-ap-block">
                 <div className="sg-ap-block-label">ActionDigest</div>
                 <div className="sg-code sg-muted" style={{ wordBreak: 'break-all' }}>
-                  {selected.subject_id}
+                  {selected.action_digest || selected.subject_id}
                 </div>
               </div>
+
+              {selected.subject_type === 'gate_release' && releaseDetail ? (
+                <div className="sg-ap-block">
+                  <div className="sg-ap-block-label">放行详情</div>
+                  <dl className="sg-kv">
+                    <dt>关卡</dt>
+                    <dd>{releaseDetail.attempt?.gate ?? '—'}（第 {releaseDetail.attempt?.attempt_no ?? '—'} 次尝试）</dd>
+                    <dt>输出包 digest</dt>
+                    <dd className="sg-code">{releaseDetail.package?.digest ?? releaseDetail.releaseRequest.release_digest}</dd>
+                    <dt>需求覆盖</dt>
+                    <dd>
+                      {releaseDetail.package?.coverage
+                        ? `${releaseDetail.package.coverage.coveredCount}/${releaseDetail.package.coverage.totalItems} 已实现 · ${releaseDetail.package.coverage.verifiedCount}/${releaseDetail.package.coverage.totalItems} 有测试证据`
+                        : '—'}
+                    </dd>
+                  </dl>
+                  <p className="sg-muted" style={{ margin: '6px 0 0', fontSize: 12 }}>
+                    批准后当前关标记通过并进入下一关；输出在此期间变化会使本审批自动失效。
+                  </p>
+                </div>
+              ) : null}
 
               {selected.reason ? (
                 <div className="sg-ap-block">
@@ -215,13 +259,22 @@ export default function ApprovalsPage({ onDecided }: Props) {
                     >
                       拒绝
                     </button>
+                    {selected.subject_type === 'gate_release' ? (
+                      <button
+                        className="sg-btn"
+                        disabled={!confirmed}
+                        onClick={() => void decide(selected.id, 'changes_requested')}
+                      >
+                        要求修改
+                      </button>
+                    ) : null}
                     <button
                       className="sg-btn sg-btn--primary"
                       disabled={!confirmed}
                       onClick={() => void decide(selected.id, 'approved')}
                     >
                       <IconCheck size={13} />
-                      批准
+                      {selected.subject_type === 'gate_release' ? '批准并进入下一关' : '批准'}
                     </button>
                   </div>
                 </>
@@ -237,6 +290,10 @@ export default function ApprovalsPage({ onDecided }: Props) {
 function subjectLabel(type: string): string {
   if (type === 'deployment') return '部署';
   if (type === 'tool_proposal') return '工具提案';
+  if (type === 'gate_release') return '关卡放行';
+  if (type === 'rollback') return '回滚';
+  if (type === 'baseline') return '基线';
+  if (type === 'risk') return '风险';
   return type;
 }
 
@@ -244,5 +301,6 @@ function statusLabel(status: string): string {
   if (status === 'approved') return '已批准';
   if (status === 'rejected') return '已拒绝';
   if (status === 'expired') return '已过期';
+  if (status === 'changes_requested') return '已要求修改';
   return '等待审批';
 }

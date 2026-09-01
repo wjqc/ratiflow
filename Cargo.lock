@@ -684,6 +684,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sg-provenance"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sg-store",
+ "sha2",
+]
+
+[[package]]
 name = "sg-settings"
 version = "0.1.0"
 dependencies = [
@@ -738,7 +749,12 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sg-artifact",
+ "sg-evidence",
+ "sg-policy",
+ "sg-provenance",
  "sg-store",
+ "sha2",
  "thiserror",
 ]
 
@@ -792,6 +808,7 @@ dependencies = [
  "sg-policy",
  "sg-project",
  "sg-protocol",
+ "sg-provenance",
  "sg-settings",
  "sg-store",
  "sg-timeline",

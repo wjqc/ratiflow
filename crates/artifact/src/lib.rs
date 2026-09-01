@@ -276,7 +276,12 @@ pub fn add_review(
     Ok(())
 }
 
-pub fn latest_baseline(store: &Store, workitem_id: &str) -> Result<Option<Baseline>, Error> {
+/// M2 per-gate 修正：基线按 (workitem, gate) 各自独立 active（蓝图 §5.3）。
+pub fn latest_baseline(
+    store: &Store,
+    workitem_id: &str,
+    gate: &str,
+) -> Result<Option<Baseline>, Error> {
     type BaselineRow = (
         String,
         String,
@@ -289,9 +294,9 @@ pub fn latest_baseline(store: &Store, workitem_id: &str) -> Result<Option<Baseli
     let row: Option<BaselineRow> = store.with_conn(|conn| {
         conn.query_row(
             "SELECT id, gate, revision_map, inputs_sha256, COALESCE(gitlab_commit_sha,''), frozen_at, superseded_by
-             FROM baselines WHERE workitem_id=?1 AND superseded_by IS NULL
+             FROM baselines WHERE workitem_id=?1 AND gate=?2 AND superseded_by IS NULL
              ORDER BY frozen_at DESC LIMIT 1",
-            [workitem_id],
+            [workitem_id, gate],
             |r| {
                 Ok((
                     r.get(0)?, r.get(1)?, r.get::<_, String>(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
@@ -316,13 +321,15 @@ pub fn latest_baseline(store: &Store, workitem_id: &str) -> Result<Option<Baseli
     )
 }
 
-/// 冻结基线：目标修订必须 in_review；旧基线 superseded（历史保留）。
+/// 冻结基线：目标修订必须 in_review；只 supersede 同一 (workitem, gate) 的旧基线（M2 P0 修正，
+/// 不再全局 supersede 其他关的 active 基线）；历史保留。
 pub fn freeze(
     store: &Store,
     workitem_id: &str,
     gate: &str,
     revision_ids: &[String],
     gitlab_commit_sha: &str,
+    stage_attempt_id: &str,
 ) -> Result<Baseline, Error> {
     if revision_ids.is_empty() {
         return Err(Error::Message("revision ids required".into()));
@@ -351,25 +358,26 @@ pub fn freeze(
 
     store.with_conn(|conn| {
         conn.execute(
-            "UPDATE baselines SET superseded_by='pending' WHERE workitem_id=?1 AND superseded_by IS NULL",
-            [workitem_id],
+            "UPDATE baselines SET superseded_by='pending' WHERE workitem_id=?1 AND gate=?2 AND superseded_by IS NULL",
+            rusqlite::params![workitem_id, gate],
         )?;
         Ok(())
     })?;
     let id = ids::new_id("base");
     let frozen_at = store.with_conn(|conn| {
         conn.execute(
-            "INSERT INTO baselines(id, workitem_id, gate, revision_map, inputs_sha256, gitlab_commit_sha, frozen_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT INTO baselines(id, workitem_id, gate, revision_map, inputs_sha256, gitlab_commit_sha, frozen_at, stage_attempt_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             rusqlite::params![
                 id, workitem_id, gate,
                 serde_json::to_string(&serde_json::Value::Object(revision_map.clone())).unwrap_or_else(|_| "{}".into()),
-                inputs_sha, gitlab_commit_sha, timefmt::now()
+                inputs_sha, gitlab_commit_sha, timefmt::now(),
+                if stage_attempt_id.is_empty() { None } else { Some(stage_attempt_id) }
             ],
         )?;
         conn.execute(
-            "UPDATE baselines SET superseded_by=?1 WHERE workitem_id=?2 AND superseded_by='pending' AND id<>?1",
-            rusqlite::params![id, workitem_id],
+            "UPDATE baselines SET superseded_by=?1 WHERE workitem_id=?2 AND gate=?3 AND superseded_by='pending' AND id<>?1",
+            rusqlite::params![id, workitem_id, gate],
         )?;
         let frozen: String = conn.query_row("SELECT frozen_at FROM baselines WHERE id=?1", [&id], |r| r.get(0))?;
         Ok(frozen)
@@ -470,7 +478,15 @@ mod tests {
         let rev2 = update_draft(&s, &rev.id, &rev.etag, "# PRD v2 内容").unwrap();
         assert_eq!(rev2.rev_no, 2);
 
-        assert!(freeze(&s, "wi", "requirements", std::slice::from_ref(&rev2.id), "").is_err());
+        assert!(freeze(
+            &s,
+            "wi",
+            "requirements",
+            std::slice::from_ref(&rev2.id),
+            "",
+            ""
+        )
+        .is_err());
         add_review(&s, &rev2.id, "pm", "approved", "LGTM", Some("7")).unwrap();
         let base = freeze(
             &s,
@@ -478,6 +494,7 @@ mod tests {
             "requirements",
             std::slice::from_ref(&rev2.id),
             "sha-c",
+            "",
         )
         .unwrap();
         assert_eq!(base.revision_map.as_object().unwrap().len(), 1);
@@ -502,6 +519,7 @@ mod tests {
             "requirements",
             std::slice::from_ref(&r1.id),
             "sha-1",
+            "",
         )
         .unwrap();
 
@@ -513,11 +531,34 @@ mod tests {
             "requirements",
             std::slice::from_ref(&r2.id),
             "sha-2",
+            "",
         )
         .unwrap();
         assert_ne!(b1.id, b2.id);
-        let latest = latest_baseline(&s, "wi").unwrap().unwrap();
+        let latest = latest_baseline(&s, "wi", "requirements").unwrap().unwrap();
         assert_eq!(latest.id, b2.id);
         assert!(!is_baseline_current(&s, &b1.id).unwrap(), "旧基线必须过期");
+    }
+
+    /// M2 蓝图 §5.3：per-gate 基线——三关 active 基线可同时存在，互不 supersede。
+    #[test]
+    fn per_gate_baselines_coexist() {
+        let s = setup();
+        let mut bases = Vec::new();
+        for (kind, gate) in [
+            ("prd", "requirements"),
+            ("tech_design", "design"),
+            ("test_plan", "testing"),
+        ] {
+            let art = create_artifact(&s, "wi", kind, kind).unwrap();
+            let rev = create_draft(&s, &art.id, "内容").unwrap();
+            add_review(&s, &rev.id, "r", "approved", "", None).unwrap();
+            bases.push(freeze(&s, "wi", gate, std::slice::from_ref(&rev.id), "", "").unwrap());
+        }
+        for (i, gate) in ["requirements", "design", "testing"].iter().enumerate() {
+            let latest = latest_baseline(&s, "wi", gate).unwrap().unwrap();
+            assert_eq!(latest.id, bases[i].id, "{gate} 关基线保持 active");
+            assert!(is_baseline_current(&s, &bases[i].id).unwrap());
+        }
     }
 }

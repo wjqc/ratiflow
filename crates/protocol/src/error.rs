@@ -32,6 +32,12 @@ pub enum ErrorCode {
     ObjectSecrets,
     VisionUnsupported,
     PathOutsideProject,
+    TraceIncomplete,
+    SnapshotFailed,
+    RollbackDrift,
+    RollbackManualActionRequired,
+    AgentProfileUnavailable,
+    AgentCapabilityMismatch,
     CoreUnavailable,
 }
 
@@ -66,6 +72,12 @@ impl ErrorCode {
             ErrorCode::ObjectSecrets => 1503,
             ErrorCode::VisionUnsupported => 1504,
             ErrorCode::PathOutsideProject => 1505,
+            ErrorCode::TraceIncomplete => 1601,
+            ErrorCode::SnapshotFailed => 1701,
+            ErrorCode::RollbackDrift => 1702,
+            ErrorCode::RollbackManualActionRequired => 1703,
+            ErrorCode::AgentProfileUnavailable => 1801,
+            ErrorCode::AgentCapabilityMismatch => 1802,
             ErrorCode::CoreUnavailable => -32000,
         }
     }
@@ -100,6 +112,12 @@ impl ErrorCode {
             ErrorCode::ObjectSecrets => "object_contains_secrets",
             ErrorCode::VisionUnsupported => "vision_unsupported",
             ErrorCode::PathOutsideProject => "path_outside_project",
+            ErrorCode::TraceIncomplete => "trace_incomplete",
+            ErrorCode::SnapshotFailed => "snapshot_failed",
+            ErrorCode::RollbackDrift => "rollback_drift",
+            ErrorCode::RollbackManualActionRequired => "rollback_manual_action_required",
+            ErrorCode::AgentProfileUnavailable => "agent_profile_unavailable",
+            ErrorCode::AgentCapabilityMismatch => "agent_capability_mismatch",
             ErrorCode::CoreUnavailable => "core_unavailable",
         }
     }

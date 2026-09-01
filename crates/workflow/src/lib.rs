@@ -192,6 +192,8 @@ pub fn submit_for_approval(store: &Store, id: &str) -> Result<sg_policy::Approva
             id, deployment.target, deployment.image_digest
         ),
         3600,
+        Some(&deployment.workitem_id),
+        None,
     )
 }
 

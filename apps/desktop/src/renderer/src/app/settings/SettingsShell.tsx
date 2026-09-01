@@ -22,6 +22,7 @@ import { AppearancePage } from './pages/AppearancePage';
 import { KnowledgeDefaultsPage } from './pages/KnowledgeDefaultsPage';
 import { ModelsPage } from './pages/ModelsPage';
 import { ToolsPage } from './pages/ToolsPage';
+import { AgentCenterPage } from './pages/AgentCenterPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { GitlabPage } from './pages/GitlabPage';
 import { SshPage } from './pages/SshPage';
@@ -81,6 +82,8 @@ export default function SettingsShell({ section }: { section?: string }) {
         return <ModelsPage />;
       case 'tools':
         return <ToolsPage />;
+      case 'agent-center':
+        return <AgentCenterPage />;
       case 'execution':
         return <ExecutionPage />;
       case 'gitlab':

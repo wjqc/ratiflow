@@ -58,8 +58,8 @@ const GATE_LABELS: Record<string, string> = {
   design: '方案关',
   development: '开发关',
   testing: '测试关',
-  deployment: '发布关',
-  verification: '验收关',
+  deployment: '部署关',
+  verification: '验证关',
 };
 
 export function gateLabel(gate: string | undefined): string {

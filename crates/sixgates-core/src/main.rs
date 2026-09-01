@@ -85,9 +85,59 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
     if let Err(e) = store.quick_check() {
         eprintln!("{{\"level\":\"error\",\"msg\":\"quick_check: {e}\"}}");
     }
+    // M1 谱系底座：legacy docs → synthetic requirement revision（unverified）。
+    // 幂等回填；失败不阻断启动（表为 additive，仅告警）。
+    if crate::dispatch::trace_writes_enabled() {
+        match sg_workitem::requirements::backfill_legacy(&store) {
+            Ok(n) if n > 0 => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"msg\":\"legacy requirement backfill: {n} workitems\"}}"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"msg\":\"legacy requirement backfill failed: {e}\"}}"
+                );
+            }
+        }
+        match sg_workitem::attempt::backfill_legacy(&store) {
+            Ok(n) if n > 0 => {
+                eprintln!("{{\"level\":\"info\",\"msg\":\"legacy stage attempt backfill: {n}\"}}");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{{\"level\":\"warn\",\"msg\":\"legacy attempt backfill failed: {e}\"}}");
+            }
+        }
+    }
+    // 放行崩溃恢复：审批已决但推进未完成的请求补完（蓝图 §4.2 原子语义补偿）。
+    match sg_workitem::release::resume_pending(&store) {
+        Ok(n) if n > 0 => {
+            eprintln!("{{\"level\":\"info\",\"msg\":\"release resume: {n} completed\"}}");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("{{\"level\":\"warn\",\"msg\":\"release resume failed: {e}\"}}");
+        }
+    }
+    // 回滚崩溃恢复（AC-SW-12）：executing 中断的回滚幂等补完，快照 digest 不变。
+    match sg_workitem::rollback::resume(&store) {
+        Ok(n) if n > 0 => {
+            eprintln!("{{\"level\":\"info\",\"msg\":\"rollback resume: {n} completed\"}}");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("{{\"level\":\"warn\",\"msg\":\"rollback resume failed: {e}\"}}");
+        }
+    }
     let schema_version = store.schema_version().unwrap_or(0);
     let initial_seq = outbox::latest_sequence(&store).unwrap_or(0);
 
+    // M4：内置通用 AgentProfile（固定版本与 digest，幂等）。
+    if let Err(e) = sg_agent::profile::ensure_builtin_generic(&store) {
+        eprintln!("{{\"level\":\"warn\",\"msg\":\"builtin generic profile init failed: {e}\"}}");
+    }
     // F11/M4：工具注册表过 tool-definition 契约校验（违例 fail-fast，不带着非法注册表服务）。
     if let Err(e) = sg_agent::schema::validate_registry(&sg_agent::tools::registry()) {
         eprintln!("{{\"level\":\"fatal\",\"msg\":\"tool registry schema violation: {e}\"}}");

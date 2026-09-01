@@ -1,7 +1,7 @@
 // S10 项目与目录：真实 project.list/create/update/archive；目录选择走主进程窄 IPC。
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { rpc } from '../../rpc/client';
-import type { ProjectListResult, ProjectRow } from './types';
+import type { InspectRootResult, ProjectListResult, ProjectRow } from './types';
 import { SettingsPageHeader } from './components/SettingsPageHeader';
 import { SettingsSection } from './components/SettingsSection';
 import { StatusPill } from './components/StatusPill';
@@ -31,6 +31,34 @@ function ProjectFormFields({
     const dir = await window.sixgates.selectDirectory();
     if (dir) onChange({ localRoot: dir });
   };
+
+  const [inspect, setInspect] = useState<InspectRootResult | null>(null);
+  const [inspecting, setInspecting] = useState(false);
+  const [inspectError, setInspectError] = useState<string | null>(null);
+
+  const checkDir = async () => {
+    const path = form.localRoot.trim();
+    if (!path) {
+      setInspectError('请先填写或选择目录');
+      setInspect(null);
+      return;
+    }
+    setInspecting(true);
+    setInspectError(null);
+    try {
+      const res = await rpc<InspectRootResult>('project.inspectRoot', { path });
+      setInspect(res);
+    } catch (e) {
+      setInspect(null);
+      setInspectError(e instanceof Error ? e.message : '目录检查失败');
+    } finally {
+      setInspecting(false);
+    }
+  };
+
+  const blocking = (inspect?.blockers ?? []).filter((b) => b.severity === 'blocking');
+  const warnings = (inspect?.blockers ?? []).filter((b) => b.severity === 'warning');
+
   return (
     <>
       <div className="sg-field">
@@ -44,17 +72,50 @@ function ProjectFormFields({
             onChange={(e) => onChange({ localRoot: e.target.value })}
             placeholder="/Users/you/projects/demo"
           />
-          <button
-            type="button"
-            className="sg-btn"
-            onClick={() => void pickDir()}
-            title="选择目录"
-          >
+          <button type="button" className="sg-btn" onClick={() => void pickDir()} title="选择目录">
             <IconFolder size={14} />
             选择目录
           </button>
+          <button
+            type="button"
+            className="sg-btn"
+            onClick={() => void checkDir()}
+            disabled={inspecting || !form.localRoot.trim()}
+            title="project.inspectRoot"
+          >
+            {inspecting ? '检查中…' : '检查目录'}
+          </button>
         </div>
-        <p className="sg-hint">目录存在性/嵌套检测待 project.inspectRoot 契约；当前创建前请先确认路径正确。</p>
+        {inspectError ? (
+          <p className="sg-hint" style={{ color: 'var(--sg-status-error)' }}>{inspectError}</p>
+        ) : null}
+        {inspect ? (
+          <div className="sg-stack" style={{ gap: 4, marginTop: 6 }}>
+            <div className="sg-row" style={{ gap: 6 }}>
+              <StatusPill kind={inspect.isGitRepo ? 'ready' : 'pending'} label={inspect.isGitRepo ? 'Git 仓库' : '非 Git 目录'} />
+              <StatusPill kind={inspect.readable ? 'ready' : 'error'} label={inspect.readable ? '可读' : '不可读'} />
+              <StatusPill kind={inspect.writable ? 'ready' : 'error'} label={inspect.writable ? '可写' : '不可写'} />
+              {inspect.hasSixgatesDir ? <StatusPill kind="readonly" label="含 .sixgates" /> : null}
+            </div>
+            {inspect.stacks.length > 0 ? (
+              <div className="sg-row" style={{ gap: 6 }}>
+                {inspect.stacks.map((s) => (
+                  <span key={s} className="sg-chip">{s}</span>
+                ))}
+              </div>
+            ) : null}
+            {warnings.map((b) => (
+              <p key={b.id} className="sg-hint" style={{ margin: 0 }}>提示：{b.detail ?? b.id}</p>
+            ))}
+            {blocking.map((b) => (
+              <p key={b.id} className="sg-hint" style={{ margin: 0, color: 'var(--sg-status-error)' }}>
+                阻塞：{b.detail ?? b.id}
+              </p>
+            ))}
+          </div>
+        ) : (
+          <p className="sg-hint">可点「检查目录」校验 git 状态、权限与技术栈；创建前建议先确认路径。</p>
+        )}
       </div>
       <div className="sg-field">
         <label htmlFor="pj-name">显示名</label>

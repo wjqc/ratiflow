@@ -111,6 +111,20 @@ pub fn evaluate_and_record(store: &Store, inputs: &EvaluateInputs) -> Result<Gat
     Ok(result)
 }
 
+/// 最近一次计算的 gate_results 行 id（放行事务绑定 GateEvaluation 用）。
+pub fn latest_id(store: &Store, workitem_id: &str, gate: &str) -> Result<Option<String>, Error> {
+    store.with_conn(|conn| {
+        let id = conn
+            .query_row(
+                "SELECT id FROM gate_results WHERE workitem_id=?1 AND gate=?2 ORDER BY computed_at DESC LIMIT 1",
+                [workitem_id, gate],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        Ok(id)
+    })
+}
+
 /// 最近一次计算。
 pub fn latest(store: &Store, workitem_id: &str, gate: &str) -> Result<Option<GateResult>, Error> {
     store.with_conn(|conn| {

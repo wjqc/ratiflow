@@ -25,6 +25,7 @@ sg-workflow = { workspace = true }
 sg-agent = { workspace = true }
 sg-policy = { workspace = true }
 sg-evidence = { workspace = true }
+sg-provenance = { workspace = true }
 sg-executor = { workspace = true }
 sg-integrations = { workspace = true }
 sg-timeline = { workspace = true }

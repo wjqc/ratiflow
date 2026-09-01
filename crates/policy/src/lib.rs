@@ -127,6 +127,11 @@ pub struct Approval {
     pub id: String,
     pub subject_type: String,
     pub subject_id: String,
+    /// M2 作用域列（AC-SW-05：跨任务待审批互不阻塞）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workitem_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_attempt_id: Option<String>,
     pub action_digest: String,
     pub risk: String,
     pub status: String,
@@ -136,6 +141,7 @@ pub struct Approval {
     pub created_at: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn request_approval(
     store: &Store,
     subject_type: &str,
@@ -144,6 +150,8 @@ pub fn request_approval(
     risk: Risk,
     reason: &str,
     ttl_secs: i64,
+    workitem_id: Option<&str>,
+    stage_attempt_id: Option<&str>,
 ) -> Result<Approval, Error> {
     let id = ids::new_id("appr");
     let now = timefmt::now();
@@ -153,13 +161,15 @@ pub fn request_approval(
     .unwrap_or(now.clone());
     store.with_conn(|conn| {
         conn.execute(
-            "INSERT INTO approvals(id, subject_type, subject_id, action_digest, risk, status,
+            "INSERT INTO approvals(id, subject_type, subject_id, workitem_id, stage_attempt_id, action_digest, risk, status,
                 requested_by, expires_at, reason, created_at)
-             VALUES (?1,?2,?3,?4,?5,'requested','local',?6,?7,?8)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,'requested','local',?8,?9,?10)",
             rusqlite::params![
                 id,
                 subject_type,
                 subject_id,
+                workitem_id,
+                stage_attempt_id,
                 digest,
                 risk.as_str(),
                 expires,
@@ -180,6 +190,8 @@ pub fn request_approval(
         id,
         subject_type: subject_type.into(),
         subject_id: subject_id.into(),
+        workitem_id: workitem_id.map(String::from),
+        stage_attempt_id: stage_attempt_id.map(String::from),
         action_digest: digest.into(),
         risk: risk.as_str().into(),
         status: "requested".into(),
@@ -198,8 +210,10 @@ pub fn decide(
     decided_by: &str,
     reason: &str,
 ) -> Result<Approval, Error> {
-    if decision != "approved" && decision != "rejected" {
-        return Err(Error::Message("decision must be approved|rejected".into()));
+    if !matches!(decision, "approved" | "rejected" | "changes_requested") {
+        return Err(Error::Message(
+            "decision must be approved|rejected|changes_requested".into(),
+        ));
     }
     let now = timefmt::now();
     let updated = store.with_conn(|conn| {
@@ -225,28 +239,68 @@ pub fn decide(
     get(store, approval_id)
 }
 
+const APPROVAL_COLUMNS: &str = "id, subject_type, subject_id, workitem_id, stage_attempt_id, action_digest, risk, status, requested_by, expires_at, reason, created_at";
+
+fn row_approval(r: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
+    Ok(Approval {
+        id: r.get(0)?,
+        subject_type: r.get(1)?,
+        subject_id: r.get(2)?,
+        workitem_id: r.get(3)?,
+        stage_attempt_id: r.get(4)?,
+        action_digest: r.get(5)?,
+        risk: r.get(6)?,
+        status: r.get(7)?,
+        requested_by: r.get(8)?,
+        expires_at: r.get(9)?,
+        reason: r.get(10)?,
+        created_at: r.get(11)?,
+    })
+}
+
 pub fn get(store: &Store, approval_id: &str) -> Result<Approval, Error> {
     store.with_conn(|conn| {
         conn.query_row(
-            "SELECT id, subject_type, subject_id, action_digest, risk, status, requested_by, expires_at, reason, created_at
-             FROM approvals WHERE id = ?1",
+            &format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE id = ?1"),
             [approval_id],
-            |r| {
-                Ok(Approval {
-                    id: r.get(0)?,
-                    subject_type: r.get(1)?,
-                    subject_id: r.get(2)?,
-                    action_digest: r.get(3)?,
-                    risk: r.get(4)?,
-                    status: r.get(5)?,
-                    requested_by: r.get(6)?,
-                    expires_at: r.get(7)?,
-                    reason: r.get(8)?,
-                    created_at: r.get(9)?,
-                })
-            },
+            row_approval,
         )
         .map_err(|_| Error::Message("approval_not_found".into()))
+    })
+}
+
+/// 单条审批主动作废（放行 digest 漂移等）。
+pub fn expire(store: &Store, approval_id: &str, reason: &str) -> Result<(), Error> {
+    let updated = store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE approvals SET status='expired', reason=?1 WHERE id=?2 AND status='requested'",
+            rusqlite::params![reason, approval_id],
+        )?;
+        Ok(conn.changes())
+    })?;
+    if updated == 0 {
+        return Err(Error::Message(format!(
+            "approval {approval_id} not in requested state"
+        )));
+    }
+    Ok(())
+}
+
+/// 指定任务的未决"风险类"审批计数（AC-SW-05）：gate_release/rollback 不阻塞门禁评估；
+/// legacy 行 workitem_id 为 NULL 视为全局（保守 fail-closed）。
+pub fn pending_blocking_count(store: &Store, workitem_id: &str) -> Result<i64, Error> {
+    store.with_conn(|conn| {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM approvals
+             WHERE status='requested'
+               AND (workitem_id = ?1 OR workitem_id IS NULL)
+               AND subject_type NOT IN ('gate_release','rollback')",
+                [workitem_id],
+                |r| r.get(0),
+            )
+            .map_err(Error::from)?;
+        Ok(count)
     })
 }
 
@@ -297,17 +351,11 @@ pub fn validate_for(
 
 pub fn pending(store: &Store, limit: i64) -> Result<Vec<Approval>, Error> {
     store.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, subject_type, subject_id, action_digest, risk, status, requested_by, expires_at, reason, created_at
-             FROM approvals WHERE status='requested' ORDER BY created_at LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([limit], |r| {
-            Ok(Approval {
-                id: r.get(0)?, subject_type: r.get(1)?, subject_id: r.get(2)?,
-                action_digest: r.get(3)?, risk: r.get(4)?, status: r.get(5)?,
-                requested_by: r.get(6)?, expires_at: r.get(7)?, reason: r.get(8)?, created_at: r.get(9)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {APPROVAL_COLUMNS}
+             FROM approvals WHERE status='requested' ORDER BY created_at LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map([limit], row_approval)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -322,17 +370,11 @@ pub fn list_by_subject(
     subject_id: &str,
 ) -> Result<Vec<Approval>, Error> {
     store.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, subject_type, subject_id, action_digest, risk, status, requested_by, expires_at, reason, created_at
-             FROM approvals WHERE subject_type=?1 AND subject_id=?2 ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([subject_type, subject_id], |r| {
-            Ok(Approval {
-                id: r.get(0)?, subject_type: r.get(1)?, subject_id: r.get(2)?,
-                action_digest: r.get(3)?, risk: r.get(4)?, status: r.get(5)?,
-                requested_by: r.get(6)?, expires_at: r.get(7)?, reason: r.get(8)?, created_at: r.get(9)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {APPROVAL_COLUMNS}
+             FROM approvals WHERE subject_type=?1 AND subject_id=?2 ORDER BY created_at DESC"
+        ))?;
+        let rows = stmt.query_map([subject_type, subject_id], row_approval)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -405,8 +447,18 @@ mod tests {
     fn approval_lifecycle_digest_binding() {
         let s = store();
         let digest = action_digest(&json!({"tool": "deploy"}));
-        let appr =
-            request_approval(&s, "deployment", "dp_1", &digest, Risk::High, "首次", 60).unwrap();
+        let appr = request_approval(
+            &s,
+            "deployment",
+            "dp_1",
+            &digest,
+            Risk::High,
+            "首次",
+            60,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             validate_for(&s, "deployment", "dp_1", &digest),
             Err(PolicyError::ApprovalRequired)

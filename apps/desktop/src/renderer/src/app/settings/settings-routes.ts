@@ -29,6 +29,7 @@ export type SettingsRouteId =
   | 'models'
   | 'tools'
   | 'execution'
+  | 'agent-center'
   | 'gitlab'
   | 'ssh'
   | 'editors'
@@ -65,39 +66,40 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
   {
     label: '应用',
     items: [
-      { id: 'app-general', code: 'S01', name: '常规', availability: 'pending', icon: IconGear },
-      { id: 'appearance', code: 'S02', name: '外观', availability: 'pending', icon: IconLayers },
-      { id: 'updates', code: 'S03', name: '更新与关于', availability: 'partial', icon: IconDownload },
+      { id: 'app-general', code: 'S01', name: '常规', availability: 'real', icon: IconGear },
+      { id: 'appearance', code: 'S02', name: '外观', availability: 'real', icon: IconLayers },
+      { id: 'updates', code: 'S03', name: '更新与关于', availability: 'real', icon: IconDownload },
     ],
   },
   {
     label: '工作区',
     items: [
       { id: 'projects', code: 'S10', name: '项目与目录', availability: 'real', icon: IconFolder },
-      { id: 'knowledge-defaults', code: 'S11', name: '知识库默认策略', availability: 'pending', icon: IconBook },
+      { id: 'knowledge-defaults', code: 'S11', name: '知识库默认策略', availability: 'real', icon: IconBook },
     ],
   },
   {
     label: 'Agent',
     items: [
-      { id: 'models', code: 'S20', name: '模型与路由', availability: 'pending', icon: IconCpu },
-      { id: 'tools', code: 'S21', name: '工具与审批', availability: 'pending', icon: IconCode },
-      { id: 'execution', code: 'S22', name: '执行与沙箱', availability: 'pending', icon: IconZap },
+      { id: 'models', code: 'S20', name: '模型与路由', availability: 'real', icon: IconCpu },
+      { id: 'tools', code: 'S21', name: '工具与审批', availability: 'real', icon: IconCode },
+      { id: 'execution', code: 'S22', name: '执行与沙箱', availability: 'real', icon: IconZap },
+      { id: 'agent-center', code: 'S23', name: 'Agent 中心', availability: 'real', icon: IconTarget },
     ],
   },
   {
     label: '集成',
     items: [
-      { id: 'gitlab', code: 'S30', name: 'GitLab', availability: 'pending', icon: IconLink },
-      { id: 'ssh', code: 'S31', name: 'SSH 目标机', availability: 'pending', icon: IconServer },
+      { id: 'gitlab', code: 'S30', name: 'GitLab', availability: 'real', icon: IconLink },
+      { id: 'ssh', code: 'S31', name: 'SSH 目标机', availability: 'real', icon: IconServer },
       { id: 'editors', code: 'S32', name: '编辑器', availability: 'pending', icon: IconDoc },
     ],
   },
   {
     label: '数据与安全',
     items: [
-      { id: 'credentials', code: 'S40', name: '凭据引用', availability: 'pending', icon: IconShield },
-      { id: 'backup', code: 'S41', name: '备份与恢复', availability: 'partial', icon: IconDb },
+      { id: 'credentials', code: 'S40', name: '凭据引用', availability: 'real', icon: IconShield },
+      { id: 'backup', code: 'S41', name: '备份与恢复', availability: 'real', icon: IconDb },
       { id: 'audit', code: 'S42', name: '审计日志', availability: 'real', icon: IconDoc },
     ],
   },
@@ -105,7 +107,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     label: '支持',
     items: [
       { id: 'diagnostics', code: 'S50', name: '运行与集成诊断', availability: 'real', icon: IconZap },
-      { id: 'logs', code: 'S51', name: '日志与故障报告', availability: 'partial', icon: IconCloud },
+      { id: 'logs', code: 'S51', name: '日志与故障报告', availability: 'real', icon: IconCloud },
     ],
   },
 ];
