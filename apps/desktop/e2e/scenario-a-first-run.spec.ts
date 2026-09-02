@@ -12,9 +12,10 @@ test.afterEach(async () => {
 
 test('A1 概览按影响展示阻塞（模型/GitLab 阻断 Agent Run）', async () => {
   e2e = await launchApp();
-  // 直接 RPC（不经 UI）
 
-  // 等待 settings.summary 数据加载
+  // 等待 settings.summary 数据加载（概览页按影响展示阻塞；默认落地页是需求入口，
+  // 须显式导航到概览——A1 的被测对象是概览的阻塞呈现，不是默认路由）。
+  await e2e.gotoSettings('overview');
   await e2e.window.waitForSelector('text=模型', { timeout: 15000 });
 
   const summary = await e2e.rpc<{ overallStatus: string; blockers: Array<{ id: string; capabilities: string[] }> }>('settings.summary');

@@ -66,6 +66,7 @@ export type RpcMethodName =
   | 'settings.get'
   | 'settings.update'
   | 'settings.effective'
+  | 'modelProvider.presets'
   | 'modelProfile.list'
   | 'modelProfile.get'
   | 'modelProfile.create'
@@ -222,6 +223,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'settings.get',
   'settings.update',
   'settings.effective',
+  'modelProvider.presets',
   'modelProfile.list',
   'modelProfile.get',
   'modelProfile.create',
@@ -729,6 +731,8 @@ export interface SettingsEffectiveParams {
   keys?: unknown[];
 }
 
+export type ModelProviderPresetsParams = Record<string, never>;
+
 export type ModelProfileListParams = Record<string, never>;
 
 export interface ModelProfileGetParams {
@@ -740,6 +744,7 @@ export interface ModelProfileCreateParams {
   providerKind: string;
   baseUrl?: string;
   credentialRefId?: string;
+  apiKey?: string;
   defaultModel?: string;
   capabilities?: unknown;
   limits?: unknown;

@@ -68,6 +68,12 @@ impl AppState {
                 true,
             ),
         };
+        let credentials: std::sync::Arc<dyn sg_settings::credentials::CredentialStore> =
+            if cfg!(target_os = "macos") {
+                std::sync::Arc::new(sg_settings::credentials::MacKeychain)
+            } else {
+                std::sync::Arc::new(sg_settings::credentials::InMemoryCredentials::default())
+            };
         let model = match (
             std::env::var("SIXGATES_MODEL_BASE_URL"),
             std::env::var("SIXGATES_MODEL_API_KEY"),
@@ -97,17 +103,17 @@ impl AppState {
                         }
                     }
                 }
-                Gateway::new(Box::new(fake))
+                // 设置域 Profile 优先（model_routes 主档 → 最早可用档案），
+                // 无可用 Profile 时回落 fake 脚本。
+                Gateway::new(Box::new(crate::model_source::ProfileModel::new(
+                    run_store.clone(),
+                    credentials.clone(),
+                    Box::new(fake),
+                )))
             }
         };
         let ssh: Arc<dyn sg_integrations::SSHAdapter> = Arc::new(FakeSSH::default());
         let _ = gitlab_fake;
-        let credentials: std::sync::Arc<dyn sg_settings::credentials::CredentialStore> =
-            if cfg!(target_os = "macos") {
-                std::sync::Arc::new(sg_settings::credentials::MacKeychain)
-            } else {
-                std::sync::Arc::new(sg_settings::credentials::InMemoryCredentials::default())
-            };
         // 执行模式：SIXGATES_EXEC_MODE 显式覆盖（开发/E2E 用），否则按 Docker 可用性探测
         // （不静默降级，ADR-024）。设置域 executionProfile 接线在 M3/F10 重排来源优先级。
         let executor_mode = std::env::var("SIXGATES_EXEC_MODE")

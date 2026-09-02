@@ -64,15 +64,21 @@ export function AgentCenterPage() {
   const [fallbackMode, setFallbackMode] = useState('generic');
   // 路由预览。
   const [preview, setPreview] = useState<string>('');
+  // 项目级绑定作用域（P0 审计修复：绑定与预览不再隐式取第一个项目）。
+  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
+  const [projectId, setProjectId] = useState('');
 
   const reload = useCallback(async () => {
     try {
-      const [p, b] = await Promise.all([
+      const [p, b, pr] = await Promise.all([
         rpc<{ items: AgentProfile[] }>('agentProfile.list', {}),
         rpc<{ items: Binding[] }>('agentBinding.list', {}),
+        rpc<{ items: { id: string; name: string }[] }>('project.list', {}),
       ]);
       setProfiles(p.items);
       setBindings(b.items);
+      setProjects(pr.items);
+      setProjectId((prev) => prev || pr.items[0]?.id || '');
     } catch (e) {
       setError(rpcErrorMessage(e));
     }
@@ -118,6 +124,7 @@ export function AgentCenterPage() {
     setNotice('');
     try {
       await rpc('agentBinding.set', {
+        projectId: projectId || undefined,
         gate: bindGate,
         activityKey: bindActivity,
         profileVersionId: bindVersion,
@@ -143,8 +150,7 @@ export function AgentCenterPage() {
     setError('');
     setPreview('');
     try {
-      const project = await rpc<{ items: { id: string }[] }>('project.list', {});
-      const projectId = project.items[0]?.id ?? '';
+      if (!projectId) throw new Error('无可用项目，无法预览');
       const view = await rpc<Record<string, unknown>>('agentBinding.resolvePreview', {
         projectId,
         gate,
@@ -272,6 +278,19 @@ export function AgentCenterPage() {
         </div>
 
         <div className="sg-row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
+          <select
+            className="sg-input"
+            style={{ width: 150 }}
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+            title="绑定作用域项目"
+          >
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name || p.id}
+              </option>
+            ))}
+          </select>
           <select
             className="sg-input"
             style={{ width: 110 }}

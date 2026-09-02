@@ -58,12 +58,17 @@ function assert(condition, label) {
   console.log(`  ✓ ${label}`);
 }
 
+async function activeKeys(client, workItemId) {
+  const cov = await client.call('trace.coverage', { workItemId });
+  return (cov.items ?? []).filter((i) => i.status === 'active').map((i) => i.requirementKey);
+}
+
 async function releaseGate(client, workItemId, gate) {
   const art = await client.call('artifact.create', { workItemId, kind: 'doc', title: gate });
-  const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${gate} 产物` });
+  const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${gate} 产物`, requirementKeys: await activeKeys(client, workItemId) });
   await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'tech', verdict: 'approved' });
   await client.call('artifact.freezeBaseline', { workItemId, gate, revisionIds: [rev.id] });
-  const ev = await client.call('evidence.record', { workItemId, gate, kind: 'review', title: `${gate} 评审`, source: 'local' });
+  const ev = await client.call('evidence.record', { workItemId, gate, kind: 'review', title: `${gate} 评审`, source: 'local', requirementKeys: await activeKeys(client, workItemId) });
   await client.call('evidence.verify', { evidenceId: ev.id, verifiedBy: 'qa' });
   const result = await client.call('gate.evaluate', { workItemId, gate });
   assert(result.passed === true, `${gate} 门禁通过`);
@@ -99,10 +104,10 @@ async function main() {
     // 1. 两关放行 → 尝试放行 design（pending）→ 挂起待审。
     await releaseGate(client, wi.id, 'requirements');
     const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'tech_design', title: '设计' });
-    const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 设计文档' });
+    const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 设计文档', requirementKeys: await activeKeys(client, wi.id) });
     await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'tech', verdict: 'approved' });
     await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'design', revisionIds: [rev.id] });
-    const ev2 = await client.call('evidence.record', { workItemId: wi.id, gate: 'design', kind: 'review', title: '设计评审', source: 'local' });
+    const ev2 = await client.call('evidence.record', { workItemId: wi.id, gate: 'design', kind: 'review', title: '设计评审', source: 'local', requirementKeys: await activeKeys(client, wi.id) });
     await client.call('evidence.verify', { evidenceId: ev2.id, verifiedBy: 'qa' });
     await client.call('gate.evaluate', { workItemId: wi.id, gate: 'design' });
     const pendingRr = await client.call('gate.requestRelease', { workItemId: wi.id, gate: 'design' });

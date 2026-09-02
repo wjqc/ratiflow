@@ -57,13 +57,18 @@ function assert(condition, label) {
   console.log(`  ✓ ${label}`);
 }
 
+async function activeKeys(client, workItemId) {
+  const cov = await client.call('trace.coverage', { workItemId });
+  return (cov.items ?? []).filter((i) => i.status === 'active').map((i) => i.requirementKey);
+}
+
 async function prepareReleasableWorkitem(client, project, title) {
   const wi = await client.call('workitem.create', { projectId: project.id, title, description: `${title} 描述` });
   const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'prd', title: 'PRD' });
-  const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${title}\n验收：可放行。` });
+  const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${title}\n验收：可放行。`, requirementKeys: await activeKeys(client, wi.id) });
   await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'pm', verdict: 'approved' });
   await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'requirements', revisionIds: [rev.id] });
-  const ev = await client.call('evidence.record', { workItemId: wi.id, gate: 'requirements', kind: 'review', title: '评审', source: 'local' });
+  const ev = await client.call('evidence.record', { workItemId: wi.id, gate: 'requirements', kind: 'review', title: '评审', source: 'local', requirementKeys: await activeKeys(client, wi.id) });
   await client.call('evidence.verify', { evidenceId: ev.id, verifiedBy: 'pm' });
   const result = await client.call('gate.evaluate', { workItemId: wi.id, gate: 'requirements' });
   assert(result.passed === true, `${title} 技术门禁通过`);
@@ -129,6 +134,43 @@ async function main() {
       const rr2 = await client.call('gate.requestRelease', { workItemId: wi.id, gate: 'requirements' });
       await client.call('gate.decideRelease', { approvalId: rr2.approval_id, decision: 'approved', decidedBy: 'owner', reason: '新包批准' });
       assert((await client.call('workitem.get', { workItemId: wi.id })).workItem.current_gate === 'design', '新输出包批准后推进');
+    }
+
+    // P0-2 负例：评估通过后新增未核验证据 → 旧评估过期，requestRelease 被拒。
+    {
+      const wi = await prepareReleasableWorkitem(client, project, '过期评估');
+      const ev2 = await client.call('evidence.record', {
+        workItemId: wi.id, gate: 'requirements', kind: 'manual', title: '迟到的未核验证据', source: 'local',
+      });
+      assert(!!ev2.id, '新增未核验证据落库');
+      const err = await client.call('gate.requestRelease', { workItemId: wi.id, gate: 'requirements' }).catch((e) => e);
+      assert(
+        /gate_release_required/.test(err.message ?? '') && /过期/.test(err.message ?? ''),
+        `P0-2：评估过期后放行申请被拒（${err.message}）`,
+      );
+      // 重新评估（仍未核验 → 不通过）→ 补核验 → 再评估 → 放行成功。
+      const r1 = await client.call('gate.evaluate', { workItemId: wi.id, gate: 'requirements' });
+      assert(r1.passed === false && r1.failed_inputs.includes('evidence_complete'), '重新评估正确失败（evidence_complete）');
+      await client.call('evidence.verify', { evidenceId: ev2.id, verifiedBy: 'qa' });
+      const r2 = await client.call('gate.evaluate', { workItemId: wi.id, gate: 'requirements' });
+      assert(r2.passed === true, '补核验后重新评估通过');
+      const rr = await client.call('gate.requestRelease', { workItemId: wi.id, gate: 'requirements' });
+      assert(rr.state === 'pending', '重新评估后放行申请成功');
+    }
+
+    // P0-1 负例：零覆盖（产物不关联需求项）→ 放行被拒。
+    {
+      const wi = await client.call('workitem.create', { projectId: project.id, title: '零覆盖', description: '零覆盖 描述' });
+      const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'prd', title: 'PRD' });
+      const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 零覆盖 PRD（不传 keys）' });
+      await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'pm', verdict: 'approved' });
+      await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'requirements', revisionIds: [rev.id] });
+      const ev = await client.call('evidence.record', { workItemId: wi.id, gate: 'requirements', kind: 'review', title: '评审', source: 'local' });
+      await client.call('evidence.verify', { evidenceId: ev.id, verifiedBy: 'pm' });
+      const r = await client.call('gate.evaluate', { workItemId: wi.id, gate: 'requirements' });
+      assert(r.passed === true, '零覆盖任务技术评估通过');
+      const err = await client.call('gate.requestRelease', { workItemId: wi.id, gate: 'requirements' }).catch((e) => e);
+      assert(/trace_incomplete/.test(err.code ?? err.message), 'P0-1：零覆盖放行被拒（trace_incomplete）');
     }
 
     // ④ 跨任务待审批互不阻塞（AC-SW-05）。

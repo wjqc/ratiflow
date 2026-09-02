@@ -59,6 +59,12 @@ class CoreClient {
   }
 }
 
+// P0-1：正常用户路径必须建立需求覆盖链（对齐 UI activeRequirementKeys）。
+async function activeKeys(client, workItemId) {
+  const cov = await client.call('trace.coverage', { workItemId });
+  return (cov.items ?? []).filter((i) => i.status === 'active').map((i) => i.requirementKey);
+}
+
 function assert(condition, label) {
   if (!condition) {
     throw new Error(`E2E 断言失败：${label}`);
@@ -101,7 +107,7 @@ async function main() {
     assert(setStageGone.code === 'method_not_found', 'workitem.setStage 已移除（method_not_found）');
 
     const artifact = await client.call('artifact.create', { workItemId: wi.id, kind: 'prd', title: 'PRD' });
-    const draft = await client.call('artifact.createDraft', { artifactId: artifact.id, content: '# PRD\n范围：OIDC 登录。\n验收：回调建立会话。' });
+    const draft = await client.call('artifact.createDraft', { artifactId: artifact.id, content: '# PRD\n范围：OIDC 登录。\n验收：回调建立会话。', requirementKeys: await activeKeys(client, wi.id) });
     assert(draft.status === 'draft' && !!draft.etag, 'PRD 草稿 + ETag');
 
     const badUpdate = await client.call('artifact.updateDraft', { revisionId: draft.id, etag: '"wrong"', content: 'x' }).catch((e) => e);
@@ -111,7 +117,7 @@ async function main() {
     const baseline = await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'requirements', revisionIds: [draft.id] });
     assert(!!baseline.inputs_sha256, '基线冻结（含 inputs SHA）');
 
-    const evidence = await client.call('evidence.record', { workItemId: wi.id, gate: 'requirements', kind: 'review', title: 'PRD 评审', source: 'local' });
+    const evidence = await client.call('evidence.record', { workItemId: wi.id, gate: 'requirements', kind: 'review', title: 'PRD 评审', source: 'local', requirementKeys: await activeKeys(client, wi.id) });
     await client.call('evidence.verify', { evidenceId: evidence.id, verifiedBy: 'pm' });
     assert(evidence.id.length > 0, '证据记录与复验');
 
@@ -142,11 +148,12 @@ async function main() {
     for (const gate of ['design', 'development', 'testing']) {
       await passGate(gate, gate === 'testing' ? 'deployment' : gate === 'development' ? 'testing' : 'development', async () => {
         const kind = gate === 'design' ? 'tech_design' : gate === 'testing' ? 'test_plan' : 'dev_notes';
+        const keys = await activeKeys(client, wi.id);
         const art = await client.call('artifact.create', { workItemId: wi.id, kind, title: gate });
-        const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${gate}\n验收映射…` });
+        const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${gate}\n验收映射…`, requirementKeys: keys });
         await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'tech', verdict: 'approved' });
         await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate, revisionIds: [rev.id] });
-        const ev = await client.call('evidence.record', { workItemId: wi.id, gate, kind: 'manual', title: `${gate} 核验`, source: 'local' });
+        const ev = await client.call('evidence.record', { workItemId: wi.id, gate, kind: 'manual', title: `${gate} 核验`, source: 'local', requirementKeys: keys });
         await client.call('evidence.verify', { evidenceId: ev.id, verifiedBy: 'qa' });
       });
     }
@@ -179,21 +186,23 @@ async function main() {
 
     await passGate('deployment', 'verification', async () => {
       // per-gate 基线（蓝图 §5.3）：每关独立产出并冻结自己的基线。
+      const keys = await activeKeys(client, wi.id);
       const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'release_notes', title: '发布说明' });
-      const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 发布说明\n镜像 sha256:e2eabc123 → deploy.test' });
+      const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 发布说明\n镜像 sha256:e2eabc123 → deploy.test', requirementKeys: keys });
       await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'ops', verdict: 'approved' });
       await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'deployment', revisionIds: [rev.id] });
-      const ev = await client.call('evidence.record', { workItemId: wi.id, gate: 'deployment', kind: 'deployment', title: '部署验证通过', source: 'local' });
+      const ev = await client.call('evidence.record', { workItemId: wi.id, gate: 'deployment', kind: 'deployment', title: '部署验证通过', source: 'local', requirementKeys: keys });
       await client.call('evidence.verify', { evidenceId: ev.id, verifiedBy: 'ops' });
     });
 
     // 验证关。
     await passGate('verification', 'verification', async () => {
+      const keys = await activeKeys(client, wi.id);
       const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'acceptance_notes', title: '验收说明' });
-      const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 验收说明\n冒烟与验收全部通过。' });
+      const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 验收说明\n冒烟与验收全部通过。', requirementKeys: keys });
       await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'qa', verdict: 'approved' });
       await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'verification', revisionIds: [rev.id] });
-      const ev = await client.call('evidence.record', { workItemId: wi.id, gate: 'verification', kind: 'smoke', title: '冒烟通过', source: 'local' });
+      const ev = await client.call('evidence.record', { workItemId: wi.id, gate: 'verification', kind: 'smoke', title: '冒烟通过', source: 'local', requirementKeys: keys });
       await client.call('evidence.verify', { evidenceId: ev.id, verifiedBy: 'qa' });
     });
 
@@ -219,6 +228,19 @@ async function main() {
     assert(gateEmpty.passed === false, '无证据任务门禁必须失败');
     const releaseEmpty = await client.call('gate.requestRelease', { workItemId: wi2.id, gate: 'requirements' }).catch((e) => e);
     assert(/gate_release_required/.test(releaseEmpty.message), '未通过评估不可请求放行');
+    // P0-1：零覆盖放行被拒——产出齐备但需求项未关联任何产物。
+    {
+      const art = await client.call('artifact.create', { workItemId: wi2.id, kind: 'prd', title: '无键 PRD' });
+      const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# PRD（未关联需求）' });
+      await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 't', verdict: 'approved' });
+      await client.call('artifact.freezeBaseline', { workItemId: wi2.id, gate: 'requirements', revisionIds: [rev.id] });
+      const ev = await client.call('evidence.record', { workItemId: wi2.id, gate: 'requirements', kind: 'review', title: '评审', source: 'local' });
+      await client.call('evidence.verify', { evidenceId: ev.id, verifiedBy: 'q' });
+      const r2 = await client.call('gate.evaluate', { workItemId: wi2.id, gate: 'requirements' });
+      assert(r2.passed === true, '零覆盖任务技术评估通过');
+      const rr = await client.call('gate.requestRelease', { workItemId: wi2.id, gate: 'requirements' }).catch((e) => e);
+      assert(/trace_incomplete/.test(rr.code ?? rr.message), 'P0-1：零覆盖放行被拒（trace_incomplete）');
+    }
     const rejectedPassport = await client.call('passport.issue', { workItemId: wi2.id }).catch((e) => e);
     assert(/incomplete/.test(rejectedPassport.message), '六关未全过时文牒签发被拒');
 

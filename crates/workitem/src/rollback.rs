@@ -760,6 +760,35 @@ mod tests {
 
     /// 放行一关（评估 → 请求 → 批准）。
     fn release_gate(store: &Store, workitem_id: &str, gate: &str) {
+        let rr = prepare_release(store, workitem_id, gate);
+        crate::release::decide_release(
+            store,
+            rr["approval_id"].as_str().unwrap(),
+            "approved",
+            "owner",
+            "",
+            "pol",
+        )
+        .unwrap();
+    }
+
+    /// 产出齐备 + 评估 + 挂起放行请求（不批准）。
+    fn prepare_release(store: &Store, workitem_id: &str, gate: &str) -> serde_json::Value {
+        if crate::requirements::latest_revision_id(store, workitem_id)
+            .unwrap()
+            .is_none()
+        {
+            crate::requirements::import_revision(
+                store,
+                workitem_id,
+                "requirement.md",
+                "# 需求\n\n- 需求项一\n",
+                "inline",
+                "t",
+                "verified",
+            )
+            .unwrap();
+        }
         let art = sg_artifact::create_artifact(store, workitem_id, "doc", gate).unwrap();
         let rev = sg_artifact::create_draft(store, &art.id, "内容").unwrap();
         sg_artifact::add_review(store, &rev.id, "r", "approved", "", None).unwrap();
@@ -772,6 +801,41 @@ mod tests {
             "",
         )
         .unwrap();
+        // P0-1 覆盖链（对齐 dispatch requirementKeys 行为）。
+        sg_provenance::register_node(
+            store,
+            &sg_provenance::NodeInput {
+                project_id: "",
+                workitem_id,
+                node_type: sg_provenance::node_type::ARTIFACT_REVISION,
+                entity_id: &rev.id,
+                content_digest: "test",
+                verification_state: "verified",
+            },
+        )
+        .unwrap();
+        let req_rev = crate::requirements::latest_revision_id(store, workitem_id)
+            .unwrap()
+            .unwrap();
+        for item in crate::requirements::items(store, &req_rev).unwrap() {
+            if item.status != "active" {
+                continue;
+            }
+            sg_provenance::add_edge(
+                store,
+                &sg_provenance::EdgeInput {
+                    workitem_id,
+                    from_node_type: sg_provenance::node_type::ARTIFACT_REVISION,
+                    from_entity_id: &rev.id,
+                    relation: sg_provenance::relation::SATISFIES,
+                    to_node_type: sg_provenance::node_type::REQUIREMENT_ITEM,
+                    to_entity_id: &item.id,
+                    stage_attempt_id: "",
+                    created_by_run_id: "",
+                },
+            )
+            .unwrap();
+        }
         let ev = sg_evidence::record(
             store,
             &sg_evidence::RecordInput {
@@ -787,16 +851,7 @@ mod tests {
         .unwrap();
         sg_evidence::verify(store, &ev.id, "r").unwrap();
         crate::gate::evaluate_and_record(store, &pass_inputs(workitem_id, gate)).unwrap();
-        let rr = crate::release::request_release(store, workitem_id, gate, "pol", 3600).unwrap();
-        crate::release::decide_release(
-            store,
-            rr["approval_id"].as_str().unwrap(),
-            "approved",
-            "owner",
-            "",
-            "pol",
-        )
-        .unwrap();
+        crate::release::request_release(store, workitem_id, gate, "pol", 3600).unwrap()
     }
 
     fn entry_snapshot_id(store: &Store, workitem_id: &str, gate: Gate) -> Option<String> {
@@ -812,10 +867,8 @@ mod tests {
         let wi = crate::create(&s, "pj", "回滚", "", None, &[]).unwrap();
         release_gate(&s, &wi.id, "requirements");
         assert_eq!(crate::get(&s, &wi.id).unwrap().current_gate, "design");
-        // 挂一个未决定的 design 放行请求（回滚后其审批必须失效）。
-        crate::gate::evaluate_and_record(&s, &pass_inputs(&wi.id, "design")).unwrap();
-        let _pending_rr =
-            crate::release::request_release(&s, &wi.id, "design", "pol", 3600).unwrap();
+        // 挂一个未决定的 design 放行请求（产出齐备真实评估；回滚后其审批必须失效）。
+        let _pending_rr = prepare_release(&s, &wi.id, "design");
 
         // 目标：回到方案关前的快照（requirements attempt 的关前快照是回到需求关；
         // 这里选择 design attempt 的 entry snapshot → 回滚到方案关执行前）。

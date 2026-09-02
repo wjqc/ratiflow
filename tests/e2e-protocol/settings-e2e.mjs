@@ -71,6 +71,24 @@ async function main() {
     const summary2 = await c.call('settings.summary');
     assert(!summary2.blockers.some((b) => b.id === 'model_not_configured'), '配置后模型阻塞解除');
 
+    // 4a. 供应商预设：智谱 GLM / DeepSeek 内置端点。
+    const presets = await c.call('modelProvider.presets', {});
+    const zhipu = (presets.items ?? []).find((p) => p.id === 'zhipu');
+    const deepseek = (presets.items ?? []).find((p) => p.id === 'deepseek');
+    assert(zhipu?.baseUrl === 'https://open.bigmodel.cn/api/paas/v4', '智谱 GLM 预设端点');
+    assert(deepseek?.baseUrl === 'https://api.deepseek.com/v1', 'DeepSeek 预设端点');
+    assert((zhipu?.models ?? []).some((m) => m.id === 'glm-5.3'), '智谱预设含 glm-5.3');
+
+    // 4b. GLM 预设直填 apiKey 创建：默认端点回填 + 凭据自动落 Keychain（DB 无明文）。
+    const glm = await c.call('modelProfile.create', { name: 'GLM 主力', providerKind: 'zhipu', apiKey: 'zhipu-e2e-secret-123', defaultModel: 'glm-5.3' });
+    assert(glm.base_url === 'https://open.bigmodel.cn/api/paas/v4', 'GLM Profile 回填预设端点');
+    assert(!!glm.credential_ref_id, 'apiKey 直填自动绑定凭据引用');
+    assert(!JSON.stringify(glm).includes('zhipu-e2e-secret'), 'Profile DTO 无明文密钥');
+    const credList = await c.call('credentialRef.list', {});
+    assert((credList.items ?? []).some((cr) => cr.id === glm.credential_ref_id), '凭据引用已登记');
+    const badKind = await c.call('modelProfile.create', { name: 'X', providerKind: 'anthropic' }).catch((e) => e);
+    assert(`${badKind.code}: ${badKind.message}`.includes('不受支持'), '未知 providerKind 拒绝');
+
     // 5. 备份 create → verify → 篡改 → corrupt 拒绝恢复。
     const bk = await c.call('backup.create');
     assert(bk.id && bk.status === 'created', '备份创建');

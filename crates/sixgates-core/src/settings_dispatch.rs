@@ -22,8 +22,17 @@ fn serr(e: settings::SettingsError) -> RpcError {
         "INVALID_PARAMS" => ErrorCode::InvalidParams,
         _ => ErrorCode::InternalError,
     };
-    let mut err = RpcError::new(kind, e.message);
-    err.data = e.details.or(Some(json!({"fieldErrors": e.field_errors})));
+    let mut err = RpcError::new(kind, e.message.clone());
+    // data.detail 携带人类可读原因（RPC 协议约定）；details/fieldErrors 并存时合入同一对象。
+    err.data = Some(match e.details {
+        Some(mut d) => {
+            if let Some(obj) = d.as_object_mut() {
+                obj.insert("detail".into(), json!(e.message));
+            }
+            d
+        }
+        None => json!({"detail": e.message, "fieldErrors": e.field_errors}),
+    });
     err.retryable = false;
     err
 }
@@ -52,8 +61,9 @@ fn changed(store: &Store, resource: &str, id: &str) {
     );
 }
 
-const PREFIXES: [&str; 27] = [
+const PREFIXES: [&str; 28] = [
     "settings.",
+    "modelProvider.",
     "modelProfile.",
     "modelRoute.",
     "toolPolicy.",
@@ -144,6 +154,9 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
         }
 
         // --- 模型 ---
+        "modelProvider.presets" => {
+            Ok(json!({"items": settings::profiles::provider_presets_json()}))
+        }
         "modelProfile.list" => {
             let v = settings::profiles::model_list(store).map_err(serr)?;
             Ok(json!({"items": v}))
@@ -153,7 +166,40 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "modelProfile.create" => {
-            let v = settings::profiles::model_create(store, p).map_err(serr)?;
+            // apiKey 直填：先落 Keychain（kind=model_api_key），DB 只存凭据引用 ID。
+            let mut params = p.clone();
+            let inline_key = opt_s(p, "apiKey").map(str::trim).filter(|k| !k.is_empty());
+            let has_ref = opt_s(p, "credentialRefId")
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .is_some();
+            if let Some(key) = inline_key {
+                if has_ref {
+                    return Err(RpcError::new(
+                        ErrorCode::InvalidParams,
+                        "apiKey 与 credentialRefId 二选一，不可同时提供",
+                    ));
+                }
+                let cred = settings::credentials::create(
+                    store,
+                    state.credentials.as_ref(),
+                    &format!(
+                        "{} API Key",
+                        opt_s(p, "name").unwrap_or("模型供应商").trim()
+                    ),
+                    "model_api_key",
+                    opt_s(p, "providerKind").unwrap_or("openai_compatible"),
+                    key,
+                    None,
+                )
+                .map_err(serr)?;
+                params["credentialRefId"] = json!(cred.id);
+                changed(store, "credentialRef", &cred.id);
+            }
+            if let Some(obj) = params.as_object_mut() {
+                obj.remove("apiKey");
+            }
+            let v = settings::profiles::model_create(store, &params).map_err(serr)?;
             changed(store, "modelProfile", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
@@ -197,7 +243,28 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             Ok(serde_json::to_value(&report).unwrap_or_default())
         }
         "modelProfile.syncModels" => {
-            Ok(json!({"models": [], "note": "syncModels 留待 provider 模型列表接入（P1）"}))
+            let profile = settings::profiles::model_get(store, s(p, "profileId")?).map_err(serr)?;
+            let api_key = match &profile.credential_ref_id {
+                Some(rid) => Some(
+                    settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
+                        .map_err(serr)?,
+                ),
+                None => std::env::var("SIXGATES_MODEL_API_KEY").ok(),
+            };
+            let api_key = api_key
+                .filter(|k| !k.is_empty())
+                .ok_or_else(|| RpcError::new(ErrorCode::Unauthorized, "未配置 API Key"))?;
+            let base =
+                settings::profiles::resolve_base_url(&profile.provider_kind, &profile.base_url);
+            if base.is_empty() {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidParams,
+                    "Profile 未配置 Base URL，无法同步模型列表",
+                ));
+            }
+            let models = sg_integrations::list_models(&base, &api_key)
+                .map_err(|e| RpcError::new(ErrorCode::InternalError, e))?;
+            Ok(json!({"models": models}))
         }
         "modelRoute.get" => settings::profiles::route_get(store).map_err(serr),
         "modelRoute.update" => {

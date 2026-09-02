@@ -1009,46 +1009,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let gate_name = str_param(params, "gate")?;
             let gate = sg_workitem::Gate::parse(&gate_name)
                 .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
-            let mut inputs = sg_workitem::EvaluateInputs {
-                workitem_id: workitem_id.clone(),
-                gate: gate_name.clone(),
-                required_artifacts_frozen: sg_workitem::InputState::Unknown,
-                required_checks_passed: sg_workitem::InputState::Unknown,
-                approvals_valid: sg_workitem::InputState::Unknown,
-                evidence_complete: sg_workitem::InputState::Unknown,
-                no_blocking_risk: sg_workitem::InputState::Pass,
-                inputs_current: sg_workitem::InputState::Unknown,
-            };
-            // M2 per-gate baseline：各关基线独立 active（蓝图 §5.3）。
-            if let Some(base) = sg_artifact::latest_baseline(store, &workitem_id, gate.as_str())
-                .map_err(store_err)?
-            {
-                if sg_artifact::is_baseline_current(store, &base.id).map_err(store_err)? {
-                    inputs.required_artifacts_frozen = sg_workitem::InputState::Pass;
-                    inputs.inputs_current = sg_workitem::InputState::Pass;
-                } else {
-                    inputs.required_artifacts_frozen = sg_workitem::InputState::Fail;
-                    inputs.inputs_current = sg_workitem::InputState::Fail;
-                }
-            }
-            let evidences = sg_evidence::list(store, &workitem_id, Some(gate_name.as_str()))
+            // 评估输入单一事实源（与放行的新鲜度重查共用 build_inputs，P0-2）。
+            let inputs = sg_workitem::gate::build_inputs(store, &workitem_id, &gate_name)
                 .map_err(store_err)?;
-            if !evidences.is_empty() {
-                inputs.evidence_complete = if evidences.iter().all(|e| e.verified) {
-                    sg_workitem::InputState::Pass
-                } else {
-                    sg_workitem::InputState::Fail
-                };
-                inputs.required_checks_passed = sg_workitem::InputState::Pass;
-            }
-            // AC-SW-05：审批按 WorkItem 作用域；gate_release/rollback 不阻塞技术评估。
-            let blocking =
-                sg_policy::pending_blocking_count(store, &workitem_id).map_err(store_err)?;
-            if blocking == 0 {
-                inputs.approvals_valid = sg_workitem::InputState::Pass;
-            } else {
-                inputs.no_blocking_risk = sg_workitem::InputState::Fail;
-            }
             let result =
                 sg_workitem::gate::evaluate_and_record(store, &inputs).map_err(store_err)?;
             if result.passed {
@@ -2037,6 +2000,8 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         mode,
         work_dir: work_dir.clone(),
         artifacts_dir: store.data_dir.join("artifacts").join(run_id),
+        // P0-4：回退到主工作区 = 只读模式（run_command 被拒绝），可写执行必须发生在受管 worktree。
+        read_only: worktree_info.is_none() && !local_root.is_empty(),
     };
     let executor =
         crate::tool_exec::make_executor(ctx, state.run_store.clone(), project_id.clone());
@@ -2227,6 +2192,35 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         }
         // 终态/事件已由 execute_run 写库（失败也含在 result 中）；此处只做注册表清理。
         let _ = result;
+        // P0-3：活动终态回写——Run 结束时其绑定的 stage activity 不得停留在 running。
+        if let Ok(run_row) = sg_agent::get_run(&audit_store, &run_id_owned) {
+            let activity_state = match run_row.status.as_str() {
+                "completed_execution" => Some("done"),
+                "failed" | "cancelled" => Some("failed"),
+                _ => None,
+            };
+            if let Some(state) = activity_state {
+                let activity_id: String = audit_store
+                    .with_conn(|conn| {
+                        conn.query_row(
+                            "SELECT stage_activity_id FROM agent_runs WHERE id=?1",
+                            [&run_id_owned],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .map_err(sg_store::Error::from)
+                    })
+                    .unwrap_or_default();
+                if !activity_id.is_empty() {
+                    let _ = audit_store.with_conn(|conn| {
+                        conn.execute(
+                            "UPDATE stage_activities SET state=?1, updated_at=?2 WHERE id=?3 AND state='running'",
+                            rusqlite::params![state, sg_store::timefmt::now(), activity_id],
+                        )?;
+                        Ok(())
+                    });
+                }
+            }
+        }
         registry.unregister(&run_id_owned);
     });
     Ok(summary.as_ref().clone())

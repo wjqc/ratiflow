@@ -73,6 +73,75 @@ fn opt(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(String::from)
 }
 
+/// 内置模型供应商预设：全部走 OpenAI 兼容协议（ModelHttp）。
+/// 新增供应商只需扩展此表；kind 同时是 provider_kind 的合法值。
+pub struct ProviderPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub base_url: &'static str,
+    pub default_model: &'static str,
+    /// (模型 ID, 说明)
+    pub models: &'static [(&'static str, &'static str)],
+}
+
+pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
+    ProviderPreset {
+        id: "zhipu",
+        label: "智谱 BigModel（GLM）",
+        base_url: "https://open.bigmodel.cn/api/paas/v4",
+        default_model: "glm-5.3",
+        models: &[
+            ("glm-5.3", "旗舰：复杂软件工程与 Agent 任务"),
+            ("glm-5.3-flash", "低价多模态"),
+            ("glm-5-turbo", "高速"),
+        ],
+    },
+    ProviderPreset {
+        id: "deepseek",
+        label: "DeepSeek",
+        base_url: "https://api.deepseek.com/v1",
+        default_model: "deepseek-chat",
+        models: &[
+            ("deepseek-chat", "通用对话"),
+            ("deepseek-reasoner", "深度推理"),
+        ],
+    },
+];
+
+pub fn preset_by_kind(kind: &str) -> Option<&'static ProviderPreset> {
+    PROVIDER_PRESETS.iter().find(|p| p.id == kind)
+}
+
+/// 供应商 kind 是否可用于运行时（fake 只用于设置域测试）。
+pub fn kind_runtime_usable(kind: &str) -> bool {
+    kind != "fake"
+}
+
+/// kind 缺省端点：预设供应商 baseUrl 留空时回填。
+pub fn resolve_base_url(kind: &str, base_url: &str) -> String {
+    let trimmed = base_url.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    preset_by_kind(kind)
+        .map(|p| p.base_url.to_string())
+        .unwrap_or_default()
+}
+
+pub fn provider_presets_json() -> Value {
+    json!(PROVIDER_PRESETS
+        .iter()
+        .map(|p| json!({
+            "id": p.id,
+            "label": p.label,
+            "providerKind": p.id,
+            "baseUrl": p.base_url,
+            "defaultModel": p.default_model,
+            "models": p.models.iter().map(|(id, note)| json!({"id": id, "note": note})).collect::<Vec<_>>(),
+        }))
+        .collect::<Vec<_>>())
+}
+
 /// 可选外键：空串 → NULL（FK 列传 "" 会触发引用校验）。
 fn fk_opt(v: &Value, key: &str) -> Option<String> {
     match opt(v, key) {
@@ -149,14 +218,20 @@ pub fn model_create(store: &Store, p: &Value) -> SettingsResult<ModelProfile> {
             .with_fields(serde_json::json!({"name":"必填"}))
     })?;
     let kind = opt(p, "providerKind").unwrap_or_else(|| "openai_compatible".into());
-    if !matches!(kind.as_str(), "openai_compatible" | "fake") {
+    if !matches!(
+        kind.as_str(),
+        "openai_compatible" | "zhipu" | "deepseek" | "fake"
+    ) {
         return Err(SettingsError::new(
             "INVALID_PARAMS",
-            format!("providerKind {kind} 不受支持"),
+            format!(
+                "providerKind {kind} 不受支持（可选 openai_compatible / zhipu / deepseek / fake）"
+            ),
         ));
     }
     let id = ids::new_id("mp");
     let now = timefmt::now();
+    let base_url = resolve_base_url(&kind, opt(p, "baseUrl").unwrap_or_default().as_str());
     store.with_conn(|conn| {
         conn.execute(
             "INSERT INTO model_profiles(id, name, provider_kind, base_url, credential_ref_id, default_model,
@@ -164,7 +239,7 @@ pub fn model_create(store: &Store, p: &Value) -> SettingsResult<ModelProfile> {
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'configured',1,?10,?10)",
             rusqlite::params![
                 id, name, kind,
-                opt(p, "baseUrl").unwrap_or_default(),
+                base_url,
                 fk_opt(p, "credentialRefId"),
                 opt(p, "defaultModel").unwrap_or_default(),
                 p.get("capabilities").unwrap_or(&Value::Null).to_string(),

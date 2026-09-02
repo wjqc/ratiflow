@@ -112,13 +112,11 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
               disabled={busy}
               onClick={() => {
                 void run(async () => {
-                  const manifest = await rpc<{ id: string }>('context.create', {
-                    projectId: '', workItemId, query: draft.slice(0, 100) || workItemId, selectedSources: [],
-                  }).catch(() => null);
-                  const started = await rpc<{ runId: string }>('agent.start', {
+                  // M4：唯一关卡执行入口——服务端装配选路/快照/清单（客户端不自报绑定）。
+                  const started = await rpc<{ runId: string; selection: { source_scope: string; fallback_used: boolean } }>('stage.startActivity', {
                     workItemId,
+                    gate,
                     goal: `${draftGoal(gate, draft)}`,
-                    contextManifestId: manifest?.id ?? 'ctx-any',
                     toolAllowlist: ['read_file'],
                     idempotencyKey: `draft-${Date.now()}`,
                   }).catch((reason) => {
@@ -140,13 +138,14 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
               disabled={busy || draft.trim() === ''}
               onClick={() => {
                 void run(async () => {
+                  const keys = await activeRequirementKeys(workItemId);
                   if (revision) {
                     const updated = await rpc<RevisionInfo>('artifact.updateDraft', {
                       revisionId: revision.id, etag: revision.etag, content: draft,
                     });
                     setRevision(updated);
                   } else {
-                    await rpc('artifact.createDraft', { artifactId: artifact.id, content: draft });
+                    await rpc('artifact.createDraft', { artifactId: artifact.id, content: draft, requirementKeys: keys });
                   }
                   return '草稿已保存（不可变修订）。';
                 });
@@ -191,8 +190,10 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
             <div className="sg-row">
               <button className="sg-button sg-button--primary" disabled={busy} onClick={() => {
                 void run(async () => {
+                  const keys = await activeRequirementKeys(workItemId);
                   const evidence = await rpc<{ id: string }>('evidence.record', {
                     workItemId, gate, kind: 'review', title: `${config.label}评审与冻结记录`, source: 'local',
+                    requirementKeys: keys,
                   });
                   await rpc('evidence.verify', { evidenceId: evidence.id, verifiedBy: reviewer });
                   return '证据已记录并复验；点击评估门禁。';
@@ -264,6 +265,16 @@ export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId:
       )}
     </>
   );
+}
+
+/** 当前修订全部 active 需求 key（P0-1：正常用户路径必须建立覆盖链）。 */
+export async function activeRequirementKeys(workItemId: string): Promise<string[]> {
+  try {
+    const cov = await rpc<{ items: { requirementKey: string; status: string }[] }>('trace.coverage', { workItemId });
+    return cov.items.filter((i) => i.status === 'active').map((i) => i.requirementKey);
+  } catch {
+    return [];
+  }
 }
 
 function draftGoal(gate: string, draft: string): string {

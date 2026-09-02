@@ -4,6 +4,7 @@
 
 mod db;
 mod dispatch;
+mod model_source;
 
 extern "C" {
     fn getppid() -> i32;

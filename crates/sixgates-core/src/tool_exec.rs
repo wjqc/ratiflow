@@ -32,6 +32,12 @@ pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> Sha
                 serde_json::to_string(&hits).map_err(|e| e.to_string())?
             }
             _ => {
+                // P0-4：隔离执行域不可用时拒绝可写命令（read_file/search_knowledge 只读放行）。
+                if ctx.read_only && p.tool == "run_command" {
+                    return Err(
+                        "action_denied: 隔离 worktree 不可用，拒绝在用户主工作区执行命令".into(),
+                    );
+                }
                 let manifest = tools::build_manifest(def, &args, &ctx)?;
                 let result =
                     sg_executor::execute(ctx.mode, &manifest).map_err(|e| e.to_string())?;

@@ -118,6 +118,43 @@ impl ModelProvider for ModelHttp {
     }
 }
 
+/// OpenAI 兼容 GET /models（modelProfile.syncModels 用）；返回模型 ID 列表（排序去重）。
+pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    if api_key.is_empty() {
+        return Err("model_unavailable: api key missing".into());
+    }
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let response = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {}", api_key))
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .map_err(|e| format!("model_unavailable: {e}"))?;
+    if response.status() == 429 {
+        return Err("model_rate_limited".into());
+    }
+    if response.status() >= 400 {
+        return Err(format!("model_unavailable: HTTP {}", response.status()));
+    }
+    let parsed: serde_json::Value = response
+        .into_json()
+        .map_err(|e| format!("model_invalid_json: {e}"))?;
+    let mut ids: Vec<String> = parsed["data"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return Err("model_invalid_json: empty models list".into());
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 /// 脚本化 fake（内部队列加锁，complete 经 &self 调用）。
 #[derive(Default)]
 pub struct FakeModel {

@@ -189,6 +189,58 @@ fn model_profile_managed_readonly_and_route_reference() {
 }
 
 #[test]
+fn model_provider_presets_and_default_base_url() {
+    let s = open();
+
+    // 预设：智谱 GLM + DeepSeek（OpenAI 兼容端点 + 推荐模型）。
+    let presets = profiles::provider_presets_json();
+    let list = presets.as_array().unwrap();
+    assert!(list
+        .iter()
+        .any(|p| p["id"] == "zhipu" && p["baseUrl"] != ""));
+    assert!(list
+        .iter()
+        .any(|p| p["id"] == "deepseek" && p["baseUrl"] != ""));
+    let zhipu = list.iter().find(|p| p["id"] == "zhipu").unwrap();
+    assert!(zhipu["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"] == "glm-5.3"));
+
+    // 预设供应商 baseUrl 留空 → 回填预设端点；defaultModel 透传。
+    let z = profiles::model_create(
+        &s,
+        &json!({"name":"GLM","providerKind":"zhipu","defaultModel":"glm-5.3"}),
+    )
+    .unwrap();
+    assert_eq!(z.provider_kind, "zhipu");
+    assert_eq!(z.base_url, "https://open.bigmodel.cn/api/paas/v4");
+    let d = profiles::model_create(&s, &json!({"name":"DS","providerKind":"deepseek"})).unwrap();
+    assert_eq!(d.base_url, "https://api.deepseek.com/v1");
+
+    // 显式 baseUrl 覆盖预设端点；resolve_base_url 与存储行为一致。
+    let custom = profiles::model_create(
+        &s,
+        &json!({"name":"代理","providerKind":"zhipu","baseUrl":"https://proxy.example.com/v4"}),
+    )
+    .unwrap();
+    assert_eq!(custom.base_url, "https://proxy.example.com/v4");
+    assert_eq!(
+        profiles::resolve_base_url("zhipu", ""),
+        "https://open.bigmodel.cn/api/paas/v4"
+    );
+    assert_eq!(profiles::resolve_base_url("openai_compatible", ""), "");
+
+    // 未知 kind 拒绝；fake 不可运行时。
+    let bad =
+        profiles::model_create(&s, &json!({"name":"X","providerKind":"anthropic"})).unwrap_err();
+    assert_eq!(bad.code, "INVALID_PARAMS");
+    assert!(!profiles::kind_runtime_usable("fake"));
+    assert!(profiles::kind_runtime_usable("zhipu"));
+}
+
+#[test]
 fn ssh_host_key_accept_flow() {
     let s = open();
     let t = profiles::ssh_create(

@@ -1085,6 +1085,11 @@
       "result": "value"
     },
     {
+      "name": "modelProvider.presets",
+      "params": [],
+      "result": "value"
+    },
+    {
       "name": "modelProfile.list",
       "params": [],
       "result": "value"
@@ -1120,6 +1125,11 @@
         },
         {
           "name": "credentialRefId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "apiKey",
           "type": "string",
           "required": false
         },

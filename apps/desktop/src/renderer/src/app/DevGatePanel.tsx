@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { rpc, rpcErrorMessage, waitForRunTerminal } from '../rpc/client';
-import { EvaluateButton } from './DocGatePanel';
+import { EvaluateButton, activeRequirementKeys } from './DocGatePanel';
 
 interface Props {
   workItemId: string;
@@ -94,6 +94,7 @@ export default function DevGatePanel({ workItemId, onDone }: Props) {
               const evidence = await rpc<{ id: string }>('evidence.record', {
                 workItemId, gate: 'development', kind: 'ci_pipeline',
                 title: `MR !${mrIid || '—'} Pipeline ${pipelineId}`, source: 'gitlab',
+                requirementKeys: await activeRequirementKeys(workItemId),
               });
               await rpc('evidence.verify', { evidenceId: evidence.id, verifiedBy: 'local-user' });
               return 'CI 证据已记录；开发关只接受当前 MR head SHA 的证据。';

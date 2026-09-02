@@ -1,6 +1,6 @@
 // M0-② 协议级 Agent 生命周期 E2E：agent.start 唯一入口、非阻塞、事件推送、终态与幂等。
 // 前置：cargo build --release -p sixgates-core；无模型环境变量（FakeModel 脚本耗尽 → model_unavailable）。
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -150,6 +150,13 @@ try {
   // ===== 工具执行场景（F05/M0-③）：脚本模型 + safe_restricted + 真实项目根 =====
   const projDir = mkdtempSync(join(tmpdir(), 'sg-agent-e2e-proj-'));
   writeFileSync(join(projDir, 'NOTES.md'), 'hello-m03');
+  // P0-4：可写执行必须在受管 worktree 内——夹具项目需为 git 仓库（否则 run_command 被正确拒绝）。
+  execSync(`git -C "${projDir}" init -b main`, { stdio: 'ignore' });
+  execSync(`git -C "${projDir}" config user.email e2e@sixgates.local`, { stdio: 'ignore' });
+  execSync(`git -C "${projDir}" config user.name e2e`, { stdio: 'ignore' });
+  writeFileSync(join(projDir, 'AGENTS.md'), '项目约定：注释使用中文（M2-PROJECT-MARK）。');
+  execSync(`git -C "${projDir}" add .`, { stdio: 'ignore' });
+  execSync(`git -C "${projDir}" commit -m init`, { stdio: 'ignore' });
   const script = [
     { content: '{"action":"read_file","arguments":{"path":"NOTES.md"},"summary":"读取"}', tokensIn: 10, tokensOut: 5 },
     { content: '{"action":"search_knowledge","arguments":{"query":"hello","limit":3},"summary":"检索"}', tokensIn: 10, tokensOut: 5 },
@@ -184,8 +191,7 @@ try {
     const manifest = await toolClient.rpc('context.create', {
       projectId: project.id, workItemId: wi.id, query: 'hello', selectedSources: [source.id],
     });
-    // F07：项目指令层（扫描后写入——指令文件实时读盘，不入知识索引）。
-    writeFileSync(join(projDir, 'AGENTS.md'), '项目约定：注释使用中文（M2-PROJECT-MARK）。');
+    // F07：项目指令层（P0-4 后 Agent 读 worktree——AGENTS.md 须在基线提交内，见上方 git init）。
 
     // F07：context.instructions 分层预览（全局→项目根）。
     const instrPreview = await toolClient.rpc('context.instructions', { projectId: project.id });

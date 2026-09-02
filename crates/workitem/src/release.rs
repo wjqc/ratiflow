@@ -291,13 +291,56 @@ pub fn request_release(
             gate.as_str()
         )));
     }
-    // 1. 最新 GateEvaluation 必须全 Pass（evaluate 只计算，放行独立于计算）。
-    let evaluation = gate::latest(store, workitem_id, gate.as_str())?;
-    let passed = matches!(&evaluation, Some(r) if r.passed);
-    if !passed {
+    // 1. 最新 GateEvaluation 必须全 Pass，且其评估输入与当前状态逐字节一致
+    //    （P0-2：评估通过后输出/证据/审批变化 → 旧评估过期，必须重新评估）。
+    let (_, stored_inputs, evaluation) = gate::latest_full(store, workitem_id, gate.as_str())?
+        .ok_or_else(|| {
+            Error::Message("gate_release_required: 需先通过技术门禁评估（gate.evaluate）".into())
+        })?;
+    if !evaluation.passed {
         return Err(Error::Message(
             "gate_release_required: 需先通过技术门禁评估（gate.evaluate）".into(),
         ));
+    }
+    let fresh_inputs = gate::build_inputs(store, workitem_id, gate.as_str())?;
+    let fresh_json = serde_json::to_string(&fresh_inputs).unwrap_or_else(|_| "{}".into());
+    if fresh_json != stored_inputs {
+        return Err(Error::Message(
+            "gate_release_required: 门禁评估已过期（评估输入已变化），请重新评估".into(),
+        ));
+    }
+    // P0-1：需求覆盖强制——任一 active 需求项未被任何产物 satisfies/implements
+    // 即拒绝放行（蓝图完成检查表：断链 fail-closed）。
+    match crate::requirements::latest_revision_id(store, workitem_id)? {
+        Some(rev) => {
+            let cov = sg_provenance::coverage(store, workitem_id, &rev)?;
+            let uncovered: Vec<String> = cov["items"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter(|i| {
+                    i["status"].as_str() == Some("active") && i["covered"].as_bool() == Some(false)
+                })
+                .filter_map(|i| i["requirementKey"].as_str().map(String::from))
+                .collect();
+            if cov["totalItems"].as_u64().unwrap_or(0) == 0 {
+                return Err(Error::Message(
+                    "trace_incomplete: 需求修订无可追溯条目，无法放行".into(),
+                ));
+            }
+            if !uncovered.is_empty() {
+                return Err(Error::Message(format!(
+                    "trace_incomplete: 需求覆盖不足，未关联任何产物的需求项：{}",
+                    uncovered.join("、")
+                )));
+            }
+        }
+        None => {
+            return Err(Error::Message(
+                "trace_incomplete: 工作项尚无需求修订，无法放行".into(),
+            ));
+        }
     }
     let attempt = attempt::advance_to_review_ready(store, workitem_id, gate)?;
     if attempt.state == "awaiting_user_approval" {
@@ -340,6 +383,7 @@ pub fn request_release(
             let pid = ids::new_id("pkg");
             let evaluation_id = gate::latest_id(store, workitem_id, gate.as_str())?
                 .ok_or_else(|| Error::Message("gate_release_required: 门禁评估记录缺失".into()))?;
+            // 评估行 id 即 latest_full 校验过的那行（新鲜度已确认）。
             store.with_conn(|conn| {
                 conn.execute(
                     "INSERT INTO stage_output_packages(id, stage_attempt_id, package_no, manifest_object_sha256, digest, gate_evaluation_id, trace_coverage_json, created_at)
@@ -911,7 +955,55 @@ mod tests {
     }
 
     /// 需求关走到“可请求放行”的前置：评估通过（输出包需要有基线与证据）。
+    /// P0-1：把工件修订链接到全部 active 需求项（对齐 dispatch requirementKeys 行为）。
+    fn link_coverage(store: &Store, workitem_id: &str, artifact_revision_id: &str) {
+        sg_provenance::register_node(
+            store,
+            &sg_provenance::NodeInput {
+                project_id: "",
+                workitem_id,
+                node_type: sg_provenance::node_type::ARTIFACT_REVISION,
+                entity_id: artifact_revision_id,
+                content_digest: "test",
+                verification_state: "verified",
+            },
+        )
+        .unwrap();
+        let req_rev = crate::requirements::latest_revision_id(store, workitem_id)
+            .unwrap()
+            .expect("需求修订存在");
+        for item in crate::requirements::items(store, &req_rev).unwrap() {
+            if item.status != "active" {
+                continue;
+            }
+            sg_provenance::add_edge(
+                store,
+                &sg_provenance::EdgeInput {
+                    workitem_id,
+                    from_node_type: sg_provenance::node_type::ARTIFACT_REVISION,
+                    from_entity_id: artifact_revision_id,
+                    relation: sg_provenance::relation::SATISFIES,
+                    to_node_type: sg_provenance::node_type::REQUIREMENT_ITEM,
+                    to_entity_id: &item.id,
+                    stage_attempt_id: "",
+                    created_by_run_id: "",
+                },
+            )
+            .unwrap();
+        }
+    }
+
     fn prepare_gate(store: &Store, workitem_id: &str, gate: &str) {
+        crate::requirements::import_revision(
+            store,
+            workitem_id,
+            "requirement.md",
+            "# 需求\n\n- 需求项一\n",
+            "inline",
+            "t",
+            "verified",
+        )
+        .unwrap();
         let art = sg_artifact::create_artifact(store, workitem_id, "prd", "PRD").unwrap();
         let rev = sg_artifact::create_draft(store, &art.id, "PRD 内容").unwrap();
         sg_artifact::add_review(store, &rev.id, "pm", "approved", "", None).unwrap();
@@ -924,6 +1016,7 @@ mod tests {
             "",
         )
         .unwrap();
+        link_coverage(store, workitem_id, &rev.id);
         let ev = sg_evidence::record(
             store,
             &sg_evidence::RecordInput {

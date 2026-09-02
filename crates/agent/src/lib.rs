@@ -697,8 +697,9 @@ fn set_status(store: &Store, run: &mut AgentRun, to: &str, event: &str) -> Resul
     run.status = to.into();
     store.with_conn(|conn| {
         conn.execute(
-            "UPDATE agent_runs SET status=?1, updated_at=?2 WHERE id=?3",
-            rusqlite::params![to, timefmt::now(), run.id],
+            // status 与 result 同语句原子写：终态轮询方不可见"failed 而 result 未落"的中间窗口。
+            "UPDATE agent_runs SET status=?1, result=?2, updated_at=?3 WHERE id=?4",
+            rusqlite::params![to, run.result, timefmt::now(), run.id],
         )?;
         Ok(())
     })?;

@@ -79,6 +79,89 @@ mod tests {
     }
 
     #[test]
+    fn migration_0020_rebuild_preserves_profiles_and_routes() {
+        let dir = tempdir::make("sg-migration-0020");
+        // 构造 0015–0019 版老库：带 CHECK 旧约束的 model_profiles + 种子数据。
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );",
+            )
+            .unwrap();
+            for (version, body) in migration::MIGRATIONS {
+                if *version > 19 {
+                    break;
+                }
+                conn.execute_batch(body).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_migrations(version) VALUES (?1)",
+                    [version],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO credential_refs(id, name, kind, keychain_service, keychain_account, created_at, updated_at)
+                 VALUES ('cr_seed','seed','model_api_key','svc','acc','2026-01-01','2026-01-01')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO model_profiles(id, name, provider_kind, base_url, credential_ref_id, default_model, created_at, updated_at)
+                 VALUES ('mp_seed','seed','openai_compatible','https://old.example.com/v1','cr_seed','m1','2026-01-01','2026-01-01')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO model_routes(id, scope, task_kind, primary_profile_id, revision, updated_at)
+                 VALUES ('mr_seed','global','default','mp_seed',1,'2026-01-01')",
+                [],
+            )
+            .unwrap();
+        }
+        // 打开即续跑 0020（表重建）。
+        let store = Store::open(dir.path(), "test").unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            migration::MIGRATIONS.last().unwrap().0
+        );
+        let name: String = store
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT default_model FROM model_profiles WHERE id='mp_seed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(name, "m1");
+        let primary: String = store
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT primary_profile_id FROM model_routes WHERE id='mr_seed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(primary, "mp_seed");
+        // 新 kind 可写（旧 CHECK 会拒绝）。
+        let inserted = store
+            .with_conn(|conn| {
+                Ok(conn.execute(
+                    "INSERT INTO model_profiles(id, name, provider_kind, base_url, created_at, updated_at)
+                     VALUES ('mp_zhipu','zhipu','zhipu','https://open.bigmodel.cn/api/paas/v4','2026-01-02','2026-01-02')",
+                    [],
+                )?)
+            })
+            .unwrap();
+        assert_eq!(inserted, 1);
+    }
+
+    #[test]
     fn objects_put_idempotent_and_secret_rejected() {
         let (store, _guard) = open();
         let info = objects::put(

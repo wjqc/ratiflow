@@ -111,12 +111,89 @@ pub fn evaluate_and_record(store: &Store, inputs: &EvaluateInputs) -> Result<Gat
     Ok(result)
 }
 
+/// 评估输入构建（单一事实源）：dispatch 的 evaluate 与放行的"评估新鲜度重查"
+/// 必须用同一函数，否则存储的 inputs 与重算结果不可比。
+pub fn build_inputs(store: &Store, workitem_id: &str, gate: &str) -> Result<EvaluateInputs, Error> {
+    let g = crate::Gate::parse(gate).ok_or_else(|| Error::Message("unknown gate".into()))?;
+    let mut inputs = EvaluateInputs {
+        workitem_id: workitem_id.into(),
+        gate: gate.into(),
+        required_artifacts_frozen: InputState::Unknown,
+        required_checks_passed: InputState::Unknown,
+        approvals_valid: InputState::Unknown,
+        evidence_complete: InputState::Unknown,
+        no_blocking_risk: InputState::Pass,
+        inputs_current: InputState::Unknown,
+    };
+    // M2 per-gate baseline：各关基线独立 active（蓝图 §5.3）。
+    if let Some(base) = sg_artifact::latest_baseline(store, workitem_id, g.as_str())? {
+        if sg_artifact::is_baseline_current(store, &base.id)? {
+            inputs.required_artifacts_frozen = InputState::Pass;
+            inputs.inputs_current = InputState::Pass;
+        } else {
+            inputs.required_artifacts_frozen = InputState::Fail;
+            inputs.inputs_current = InputState::Fail;
+        }
+    }
+    let evidences = sg_evidence::list(store, workitem_id, Some(g.as_str()))?;
+    if !evidences.is_empty() {
+        inputs.evidence_complete = if evidences.iter().all(|e| e.verified) {
+            InputState::Pass
+        } else {
+            InputState::Fail
+        };
+        inputs.required_checks_passed = InputState::Pass;
+    }
+    // AC-SW-05：审批按 WorkItem 作用域；gate_release/rollback 不阻塞技术评估。
+    if sg_policy::pending_blocking_count(store, workitem_id)? == 0 {
+        inputs.approvals_valid = InputState::Pass;
+    } else {
+        inputs.no_blocking_risk = InputState::Fail;
+    }
+    Ok(inputs)
+}
+
+/// 最近一次计算的完整行：行 id + 存储 inputs（canonical JSON）+ 结果。
+pub fn latest_full(
+    store: &Store,
+    workitem_id: &str,
+    gate: &str,
+) -> Result<Option<(String, String, GateResult)>, Error> {
+    store.with_conn(|conn| {
+        let row = conn
+            .query_row(
+                "SELECT id, inputs, result FROM gate_results
+                 WHERE workitem_id=?1 AND gate=?2
+                 ORDER BY computed_at DESC, rowid DESC LIMIT 1",
+                [workitem_id, gate],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        Ok(row.map(|(id, inputs, result)| {
+            let parsed: GateResult = serde_json::from_str(&result).unwrap_or(GateResult {
+                gate: gate.into(),
+                passed: false,
+                failed_inputs: vec![],
+                computed_at: String::new(),
+            });
+            (id, inputs, parsed)
+        }))
+    })
+}
+
 /// 最近一次计算的 gate_results 行 id（放行事务绑定 GateEvaluation 用）。
 pub fn latest_id(store: &Store, workitem_id: &str, gate: &str) -> Result<Option<String>, Error> {
     store.with_conn(|conn| {
         let id = conn
             .query_row(
-                "SELECT id FROM gate_results WHERE workitem_id=?1 AND gate=?2 ORDER BY computed_at DESC LIMIT 1",
+                "SELECT id FROM gate_results WHERE workitem_id=?1 AND gate=?2
+                 ORDER BY computed_at DESC, rowid DESC LIMIT 1",
                 [workitem_id, gate],
                 |r| r.get::<_, String>(0),
             )
@@ -130,7 +207,8 @@ pub fn latest(store: &Store, workitem_id: &str, gate: &str) -> Result<Option<Gat
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT result, computed_at FROM gate_results
-             WHERE workitem_id=?1 AND gate=?2 ORDER BY computed_at DESC LIMIT 1",
+             WHERE workitem_id=?1 AND gate=?2
+             ORDER BY computed_at DESC, rowid DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([workitem_id, gate], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))

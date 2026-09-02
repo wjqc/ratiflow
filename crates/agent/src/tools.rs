@@ -108,6 +108,9 @@ pub struct ToolCtx {
     pub work_dir: Option<PathBuf>,
     /// 工件草稿区（<dataDir>/artifacts/<runId>/）。
     pub artifacts_dir: PathBuf,
+    /// P0-4：隔离 worktree 不可用且回退到用户 local_root 时置位——
+    /// run_command 等可写工具被拒绝（蓝图 SG-RBK-005：可写执行必须在受管域内）。
+    pub read_only: bool,
 }
 
 /// 提案参数 → 受约束 ExecutionManifest（read_file / run_command）。
@@ -279,6 +282,7 @@ mod tests {
             mode: sg_executor::Mode::SafeRestricted,
             work_dir: Some(root.clone()),
             artifacts_dir: root.join("artifacts"),
+            read_only: false,
         }
     }
 

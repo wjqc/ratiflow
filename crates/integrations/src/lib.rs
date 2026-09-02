@@ -7,7 +7,7 @@ pub mod ssh;
 pub mod testflows;
 
 pub use gitlab::{FakeGitLab, GitLabClient, GitLabHttp, GitLabIssue, GitLabMR, GitLabPipeline};
-pub use model::{FakeModel, ModelHttp, ModelProvider};
+pub use model::{list_models, FakeModel, ModelHttp, ModelProvider};
 pub use ssh::{FakeSSH, SSHAdapter, SSHTarget};
 pub use testflows::{
     gitlab_test, model_test, ssh_target_test, HostKeyOutcome, StepResult, TestReport,
