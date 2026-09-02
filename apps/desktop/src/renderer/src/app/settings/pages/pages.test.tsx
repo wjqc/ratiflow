@@ -26,6 +26,7 @@ describe('设置页接线', () => {
         case 'knowledge.settings.get': return ok({ revision: 0 });
         case 'modelProfile.list': case 'gitlabProfile.list': case 'sshTarget.list':
         case 'credentialRef.list': case 'tool.list': case 'executionProfile.list':
+        case 'modelProvider.presets':
           return ok({ items: [] });
         case 'executor.settings.get': return ok({ revision: 0 });
         default: return ok({});
@@ -44,7 +45,7 @@ describe('设置页接线', () => {
     ['常规', GeneralPage, '此处不登记 GitLab 项目'],
     ['外观', AppearancePage, '深色'],
     ['知识默认', KnowledgeDefaultsPage, '不添加项目来源'],
-    ['模型', ModelsPage, '密钥经凭据引用存'],
+    ['模型', ModelsPage, 'Keychain'],
     ['工具', ToolsPage, 'ActionDigest 绑定'],
     ['执行', ExecutionPage, '显式不安全'],
     ['GitLab', GitlabPage, '令牌经凭据引用'],
