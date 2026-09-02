@@ -34,6 +34,37 @@ pub trait ModelProvider: Send + Sync {
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, String>;
 }
 
+/// ureq 2.x 对 HTTP 4xx/5xx 一律返回 Err(Error::Status)——必须先解包再按状态码分类，
+/// 否则限流/服务端错误全被误报成 model_timeout（前端文案随之失真）。
+fn classify_ureq(
+    transport_code: &str,
+    result: Result<ureq::Response, ureq::Error>,
+) -> Result<ureq::Response, String> {
+    match result {
+        Ok(response) => Ok(response),
+        Err(ureq::Error::Status(code, response)) => {
+            if code == 429 {
+                return Err("model_rate_limited".into());
+            }
+            let detail = response.into_string().unwrap_or_default();
+            let detail = detail.chars().take(200).collect::<String>();
+            if detail.is_empty() {
+                Err(format!("{transport_code}: HTTP {code}"))
+            } else {
+                Err(format!("{transport_code}: HTTP {code}: {detail}"))
+            }
+        }
+        Err(e) => {
+            let text = e.to_string();
+            if text.contains("timed out") || text.contains("TimedOut") {
+                Err(format!("model_timeout: {text}"))
+            } else {
+                Err(format!("{transport_code}: {text}"))
+            }
+        }
+    }
+}
+
 /// OpenAI 兼容 /chat/completions（BYOK；密钥只在内存）。
 pub struct ModelHttp {
     pub name_value: String,
@@ -55,14 +86,9 @@ impl ModelProvider for ModelHttp {
         let response = ureq::get(&url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .timeout(std::time::Duration::from_secs(10))
-            .call()
-            .map_err(|e| format!("model_unavailable: {e}"))?;
-        if response.status() == 429 {
-            return Err("model_rate_limited".into());
-        }
-        if response.status() >= 400 {
-            return Err(format!("model_unavailable: HTTP {}", response.status()));
-        }
+            .call();
+        let response = classify_ureq("model_unavailable", response)?;
+        let _ = response;
         Ok(())
     }
 
@@ -85,16 +111,20 @@ impl ModelProvider for ModelHttp {
         let body =
             serde_json::json!({"model": model, "messages": messages, "max_tokens": req.max_tokens});
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let response = ureq::post(&url)
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .timeout(std::time::Duration::from_secs(120))
-            .send_json(body)
-            .map_err(|e| format!("model_timeout: {e}"))?;
+        // 限流是长任务（如 PRD 起草）最常撞上的瞬态错误：429 退避后重试一次。
+        let send = |body: &serde_json::Value| {
+            classify_ureq(
+                "model_unavailable",
+                ureq::post(&url)
+                    .set("Authorization", &format!("Bearer {}", self.api_key))
+                    .timeout(std::time::Duration::from_secs(120))
+                    .send_json(body.clone()),
+            )
+        };
+        let mut response = send(&body)?;
         if response.status() == 429 {
-            return Err("model_rate_limited".into());
-        }
-        if response.status() >= 400 {
-            return Err(format!("model_unavailable: HTTP {}", response.status()));
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            response = send(&body)?;
         }
         let parsed: serde_json::Value = response
             .into_json()
@@ -124,17 +154,13 @@ pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String>
         return Err("model_unavailable: api key missing".into());
     }
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let response = ureq::get(&url)
-        .set("Authorization", &format!("Bearer {}", api_key))
-        .timeout(std::time::Duration::from_secs(15))
-        .call()
-        .map_err(|e| format!("model_unavailable: {e}"))?;
-    if response.status() == 429 {
-        return Err("model_rate_limited".into());
-    }
-    if response.status() >= 400 {
-        return Err(format!("model_unavailable: HTTP {}", response.status()));
-    }
+    let response = classify_ureq(
+        "model_unavailable",
+        ureq::get(&url)
+            .set("Authorization", &format!("Bearer {}", api_key))
+            .timeout(std::time::Duration::from_secs(15))
+            .call(),
+    )?;
     let parsed: serde_json::Value = response
         .into_json()
         .map_err(|e| format!("model_invalid_json: {e}"))?;

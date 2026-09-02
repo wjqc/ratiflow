@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Route } from './AppShell';
 import { relativeTime } from '../lib/format';
 import {
@@ -13,6 +13,7 @@ import {
   IconPlus,
   IconSearch,
   IconShield,
+  IconX,
 } from '../components/Icons';
 
 export interface Project {
@@ -24,6 +25,7 @@ export interface Project {
 export interface WorkItemSummary {
   id: string;
   title: string;
+  project_id?: string;
   current_gate?: string;
   currentGate?: string;
   updated_at?: string;
@@ -43,12 +45,19 @@ export interface KnowledgeSourceInfo {
 interface Props {
   projects: Project[];
   activeProjectId: string | null;
-  workItems: WorkItemSummary[];
+  /** 各项目任务缓存（展开时经 onExpandProject 懒加载）。 */
+  tasksByProject: Record<string, WorkItemSummary[]>;
   activeWorkItemId: string | null;
   coreReady: boolean | null;
   route: Route;
+  /** 活动项目知识来源（「本次上下文」卡片用）。 */
   knowledgeSources: KnowledgeSourceInfo[];
+  /** 各项目知识来源数缓存（树节点计数；仅加载过的项目有值）。 */
+  knowledgeCounts: Record<string, number>;
   onProjectChange: (projectId: string) => void;
+  onExpandProject: (projectId: string) => void;
+  onProjectRemove: (project: Project) => void;
+  onTaskRemove: (task: WorkItemSummary) => void;
   onTaskOpen: (workItemId: string) => void;
   onNavigate: (route: Route) => void;
 }
@@ -83,26 +92,79 @@ function kindTag(kind: string): string {
 export function ProjectSidebar({
   projects,
   activeProjectId,
-  workItems,
+  tasksByProject,
   activeWorkItemId,
   coreReady,
   route,
   knowledgeSources,
+  knowledgeCounts,
   onProjectChange,
+  onExpandProject,
+  onProjectRemove,
+  onTaskRemove,
   onTaskOpen,
   onNavigate,
 }: Props) {
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
+  // 展开状态独立于选中：chevron 只切换展开，不切换工作区。
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(activeProjectId ? [activeProjectId] : []),
+  );
+
+  // 选中/切换项目时自动展开（收起后不再被强制展开）。
+  useEffect(() => {
+    if (!activeProjectId) return;
+    setExpanded((prev) => {
+      if (prev.has(activeProjectId)) return prev;
+      const next = new Set(prev);
+      next.add(activeProjectId);
+      return next;
+    });
+  }, [activeProjectId]);
+
+  const toggleExpanded = (projectId: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) {
+        next.delete(projectId);
+      } else {
+        next.add(projectId);
+        onExpandProject(projectId);
+      }
+      return next;
+    });
+  };
+
+  // 移除采用行内两步确认（不依赖原生 confirm 对话框）：第一次点变「确认」，3 秒内再点执行。
+  const [pendingRemove, setPendingRemove] = useState<{ kind: 'project' | 'task'; id: string } | null>(
+    null,
+  );
+  const pendingTimer = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (pendingTimer.current !== null) window.clearTimeout(pendingTimer.current);
+    };
+  }, []);
+  const requestRemove = (kind: 'project' | 'task', id: string, execute: () => void) => {
+    if (pendingRemove?.kind === kind && pendingRemove.id === id) {
+      if (pendingTimer.current !== null) window.clearTimeout(pendingTimer.current);
+      setPendingRemove(null);
+      execute();
+      return;
+    }
+    setPendingRemove({ kind, id });
+    if (pendingTimer.current !== null) window.clearTimeout(pendingTimer.current);
+    pendingTimer.current = window.setTimeout(() => setPendingRemove(null), 3000);
+  };
 
   const filteredProjects = useMemo(
     () => (q ? projects.filter((p) => p.name.toLowerCase().includes(q)) : projects),
     [projects, q],
   );
-  const filteredTasks = useMemo(
-    () => (q ? workItems.filter((t) => t.title.toLowerCase().includes(q)) : workItems),
-    [workItems, q],
-  );
+
+  const filterTasks = (items: WorkItemSummary[] | undefined) =>
+    q ? (items ?? []).filter((t) => t.title.toLowerCase().includes(q)) : (items ?? []);
 
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const enabledSources = knowledgeSources.filter((s) => s.enabled !== false);
@@ -168,56 +230,123 @@ export function ProjectSidebar({
       <div style={{ paddingBottom: 4 }}>
         {filteredProjects.map((p) => {
           const active = p.id === activeProjectId;
+          const isOpen = expanded.has(p.id);
+          const tasks = filterTasks(tasksByProject[p.id]);
+          const knowledgeCount = knowledgeCounts[p.id];
           return (
             <div key={p.id}>
-              <button
-                className="sg-tree-project"
-                onClick={() => onProjectChange(p.id)}
-                aria-expanded={active}
-              >
-                {active ? (
-                  <IconChevronDown size={12} style={{ color: 'var(--sg-text-secondary)' }} />
-                ) : (
-                  <IconChevronRight size={12} style={{ color: 'var(--sg-text-secondary)' }} />
-                )}
-                <IconFolder size={15} style={{ color: 'var(--sg-text-secondary)' }} />
-                <span className="sg-tree-name">{p.name}</span>
-              </button>
-              {active && (
+              <div className={`sg-tree-row ${active ? 'sg-tree-row--active' : ''}`}>
+                <button
+                  className="sg-tree-toggle"
+                  onClick={() => toggleExpanded(p.id)}
+                  aria-expanded={isOpen}
+                  aria-label={isOpen ? `收起 ${p.name}` : `展开 ${p.name}`}
+                >
+                  {isOpen ? (
+                    <IconChevronDown size={12} style={{ color: 'var(--sg-text-secondary)' }} />
+                  ) : (
+                    <IconChevronRight size={12} style={{ color: 'var(--sg-text-secondary)' }} />
+                  )}
+                </button>
+                <button
+                  className="sg-tree-project"
+                  onClick={() => onProjectChange(p.id)}
+                  title={p.name}
+                >
+                  <IconFolder size={15} style={{ color: 'var(--sg-text-secondary)' }} />
+                  <span className="sg-tree-name">{p.name}</span>
+                </button>
+                <button
+                  className={`sg-tree-remove ${
+                    pendingRemove?.kind === 'project' && pendingRemove.id === p.id
+                      ? 'sg-tree-remove--confirm'
+                      : ''
+                  }`}
+                  onClick={() => requestRemove('project', p.id, () => onProjectRemove(p))}
+                  title={
+                    pendingRemove?.kind === 'project' && pendingRemove.id === p.id
+                      ? '再次点击确认移除'
+                      : `移除「${p.name}」（归档，可在设置中恢复）`
+                  }
+                  aria-label={
+                    pendingRemove?.kind === 'project' && pendingRemove.id === p.id
+                      ? `确认移除项目 ${p.name}`
+                      : `移除项目 ${p.name}`
+                  }
+                >
+                  {pendingRemove?.kind === 'project' && pendingRemove.id === p.id ? (
+                    '确认'
+                  ) : (
+                    <IconX size={12} />
+                  )}
+                </button>
+              </div>
+              {isOpen && (
                 <div>
                   <button
-                    className={`sg-tree-sub ${route.page === 'knowledge' ? 'sg-tree-sub--active' : ''}`}
+                    className={`sg-tree-sub ${route.page === 'knowledge' && route.projectId === p.id ? 'sg-tree-sub--active' : ''}`}
                     onClick={() => onNavigate({ page: 'knowledge', projectId: p.id })}
                   >
                     <IconBook size={13} style={{ color: 'var(--sg-text-secondary)' }} />
                     <span className="sg-tree-name">知识库</span>
                     <span className="sg-tree-time">
-                      {knowledgeSources.length > 0 ? `${knowledgeSources.length} 个来源` : ''}
+                      {knowledgeCount !== undefined && knowledgeCount > 0
+                        ? `${knowledgeCount} 个来源`
+                        : ''}
                     </span>
                   </button>
-                  {filteredTasks.map((t) => (
-                    <button
-                      key={t.id}
-                      className={`sg-tree-sub ${
-                        route.page === 'task' && route.workItemId === t.id ? 'sg-tree-sub--active' : ''
-                      }`}
-                      onClick={() => onTaskOpen(t.id)}
-                      title={`${t.title} · ${gateLabel(workItemGate(t))}`}
-                    >
-                      <span
-                        className={`sg-tree-dot ${
-                          route.page === 'task' && route.workItemId === t.id
-                            ? 'sg-tree-dot--active'
-                            : workItemGate(t) === 'verification'
-                              ? 'sg-tree-dot--done'
+                  {tasks.map((t) => {
+                    const selected = route.page === 'task' && route.workItemId === t.id;
+                    return (
+                      <div
+                        key={t.id}
+                        className={`sg-tree-row sg-tree-row--sub ${selected ? 'sg-tree-row--active' : ''}`}
+                      >
+                        <button
+                          className={`sg-tree-sub ${selected ? 'sg-tree-sub--active' : ''}`}
+                          onClick={() => onTaskOpen(t.id)}
+                          title={`${t.title} · ${gateLabel(workItemGate(t))}`}
+                        >
+                          <span
+                            className={`sg-tree-dot ${
+                              selected
+                                ? 'sg-tree-dot--active'
+                                : workItemGate(t) === 'verification'
+                                  ? 'sg-tree-dot--done'
+                                  : ''
+                            }`}
+                          />
+                          <span className="sg-tree-name">{t.title}</span>
+                          <span className="sg-tree-time">{relativeTime(t.updated_at)}</span>
+                        </button>
+                        <button
+                          className={`sg-tree-remove ${
+                            pendingRemove?.kind === 'task' && pendingRemove.id === t.id
+                              ? 'sg-tree-remove--confirm'
                               : ''
-                        }`}
-                      />
-                      <span className="sg-tree-name">{t.title}</span>
-                      <span className="sg-tree-time">{relativeTime(t.updated_at)}</span>
-                    </button>
-                  ))}
-                  {filteredTasks.length === 0 && (
+                          }`}
+                          onClick={() => requestRemove('task', t.id, () => onTaskRemove(t))}
+                          title={
+                            pendingRemove?.kind === 'task' && pendingRemove.id === t.id
+                              ? '再次点击确认移除'
+                              : `移除任务「${t.title}」（归档）`
+                          }
+                          aria-label={
+                            pendingRemove?.kind === 'task' && pendingRemove.id === t.id
+                              ? `确认移除任务 ${t.title}`
+                              : `移除任务 ${t.title}`
+                          }
+                        >
+                          {pendingRemove?.kind === 'task' && pendingRemove.id === t.id ? (
+                            '确认'
+                          ) : (
+                            <IconX size={12} />
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {tasks.length === 0 && tasksByProject[p.id] !== undefined && (
                     <div className="sg-sub" style={{ padding: '4px 12px 6px 30px' }}>
                       {q ? '无匹配任务' : '还没有任务，从「新建任务」开始'}
                     </div>
@@ -288,6 +417,7 @@ export function ProjectSidebar({
   );
 }
 
+/** 知识来源列表仅活动项目有缓存；本组件只用于「本次上下文」卡片。 */
 function IconCheckMark() {
   return (
     <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden>

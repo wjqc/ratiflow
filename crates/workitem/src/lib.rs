@@ -253,26 +253,30 @@ pub fn list(
     project_id: &str,
     cursor: &str,
     limit: i64,
+    include_archived: bool,
 ) -> Result<(Vec<WorkItem>, String), Error> {
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, gitlab_issue_iid, title, labels, current_gate, created_at, (created_at || id) AS ck
-             FROM workitems WHERE project_id = ?1 AND (?2 = '' OR ck < ?2)
+            "SELECT id, project_id, gitlab_issue_iid, title, labels, current_gate, created_at, updated_at, (created_at || id) AS ck
+             FROM workitems WHERE project_id = ?1 AND (?4 OR archived_at IS NULL) AND (?2 = '' OR ck < ?2)
              ORDER BY created_at DESC, id DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![project_id, cursor, limit], |r| {
-            Ok(WorkItem {
-                id: r.get(0)?,
-                project_id: r.get(1)?,
-                gitlab_issue_iid: flexible_opt_string(&r.get::<_, rusqlite::types::Value>(2)?),
-                title: r.get(3)?,
-                description: String::new(),
-                labels: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-                current_gate: r.get(5)?,
-                created_at: r.get(6)?,
-                updated_at: String::new(),
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![project_id, cursor, limit, include_archived],
+            |r| {
+                Ok(WorkItem {
+                    id: r.get(0)?,
+                    project_id: r.get(1)?,
+                    gitlab_issue_iid: flexible_opt_string(&r.get::<_, rusqlite::types::Value>(2)?),
+                    title: r.get(3)?,
+                    description: String::new(),
+                    labels: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                    current_gate: r.get(5)?,
+                    created_at: r.get(6)?,
+                    updated_at: r.get(7)?,
+                })
+            },
+        )?;
         let mut items = Vec::new();
         for row in rows {
             items.push(row?);
@@ -285,6 +289,22 @@ pub fn list(
         };
         Ok((items, next))
     })
+}
+
+/// 归档/恢复（移除语义，非删除）：archived_at 非空即从默认列表隐藏，子表不受影响。
+pub fn archive(store: &Store, id: &str, archived: bool) -> Result<(), Error> {
+    let now = timefmt::now();
+    let changed = store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE workitems SET archived_at = CASE WHEN ?1 THEN ?2 ELSE NULL END, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![archived, now, id],
+        )?;
+        Ok(conn.changes())
+    })?;
+    if changed == 0 {
+        return Err(Error::Message(format!("workitem {id} not found")));
+    }
+    Ok(())
 }
 
 pub fn stages(store: &Store, workitem_id: &str) -> Result<Vec<Stage>, Error> {

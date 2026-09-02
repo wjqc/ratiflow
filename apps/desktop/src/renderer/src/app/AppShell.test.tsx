@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import AppShell from './AppShell';
@@ -60,5 +60,83 @@ describe('AppShell', () => {
     };
     render(<AppShell />);
     await waitFor(() => expect(screen.getByTitle('Rust core 不可用')).toBeInTheDocument());
+  });
+
+  it('项目树可独立展开/收起（chevron 不切换项目）', async () => {
+    rpcMock.mockImplementation((method: string, params: Record<string, unknown>) => {
+      switch (method) {
+        case 'project.list':
+          return ok({
+            items: [
+              { id: 'pj_1', name: '演示项目', status: 'ready' },
+              { id: 'pj_2', name: '第二项目', status: 'ready' },
+            ],
+          });
+        case 'workitem.list':
+          return ok({
+            items:
+              params.projectId === 'pj_2'
+                ? [{ id: 'wi_2', title: '第二项目任务', currentGate: 'requirements' }]
+                : [{ id: 'wi_1', title: '支持 SSO 登录', currentGate: 'requirements' }],
+          });
+        default:
+          return ok({});
+      }
+    });
+    render(<AppShell />);
+    await waitFor(() => expect(screen.getAllByText('演示项目').length).toBeGreaterThan(0));
+    // 初始：活动项目自动展开（effect 异步提交，需等待），第二项目收起。
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '收起 演示项目' })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole('button', { name: '展开 第二项目' })).toBeInTheDocument();
+    // 展开第二项目：懒加载其任务，但不切换活动项目。
+    fireEvent.click(screen.getByRole('button', { name: '展开 第二项目' }));
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith(
+        'workitem.list',
+        expect.objectContaining({ projectId: 'pj_2' }),
+      ),
+    );
+    await waitFor(() => expect(screen.getAllByText('第二项目任务').length).toBe(2));
+    expect(screen.getByRole('button', { name: '收起 第二项目' })).toBeInTheDocument();
+    // 收起后树节点隐藏（仅剩首页「最近任务」表格一处）。
+    fireEvent.click(screen.getByRole('button', { name: '收起 第二项目' }));
+    expect(screen.getAllByText('第二项目任务').length).toBe(1);
+  });
+
+  it('移除项目两步确认后走归档并从侧栏消失', async () => {
+    render(<AppShell />);
+    await waitFor(() => expect(screen.getAllByText('演示项目').length).toBeGreaterThan(0));
+    // 第一步：进入确认态（按钮变「确认移除」）。
+    fireEvent.click(screen.getByRole('button', { name: '移除项目 演示项目' }));
+    // 第二步：3 秒内再点执行归档。
+    fireEvent.click(screen.getByRole('button', { name: '确认移除项目 演示项目' }));
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith('project.archive', {
+        projectId: 'pj_1',
+        archived: true,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText('演示项目')).not.toBeInTheDocument());
+  });
+
+  it('移除任务两步确认后走归档并刷新列表', async () => {
+    render(<AppShell />);
+    await waitFor(() => expect(screen.getAllByText('支持 SSO 登录').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole('button', { name: '移除任务 支持 SSO 登录' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认移除任务 支持 SSO 登录' }));
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith('workitem.archive', {
+        workItemId: 'wi_1',
+        archived: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith(
+        'workitem.list',
+        expect.objectContaining({ projectId: 'pj_1' }),
+      ),
+    );
   });
 });

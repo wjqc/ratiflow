@@ -31,6 +31,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         20,
         include_str!("../migrations/0020_model_provider_presets.sql"),
     ),
+    (21, include_str!("../migrations/0021_workitem_archive.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

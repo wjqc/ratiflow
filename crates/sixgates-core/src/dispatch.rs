@@ -403,6 +403,10 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 &str_param(params, "projectId")?,
                 &opt_str_param(params, "cursor").unwrap_or_default(),
                 params.get("limit").and_then(|v| v.as_i64()).unwrap_or(20),
+                params
+                    .get("includeArchived")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             )
             .map_err(store_err)?;
             Ok(json!({"items": items, "nextCursor": next}))
@@ -455,6 +459,15 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "workitem.progress" => {
             sg_workitem::progress::progress(store, &str_param(params, "workItemId")?)
                 .map_err(store_err)
+        }
+        "workitem.archive" => {
+            let id = str_param(params, "workItemId")?;
+            let archived = params
+                .get("archived")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            sg_workitem::archive(store, &id, archived).map_err(store_err)?;
+            Ok(json!({"status": if archived { "archived" } else { "active" }}))
         }
         "workitem.documents" => {
             let names = sg_workitem::docs::list(store, &str_param(params, "workItemId")?)

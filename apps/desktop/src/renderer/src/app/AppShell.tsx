@@ -62,8 +62,11 @@ export default function AppShell() {
   const [route, setRoute] = useState<Route>(() => loadStoredRoute() ?? { page: 'home' });
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-  const [workItems, setWorkItems] = useState<WorkItemSummary[]>([]);
+  const [tasksByProject, setTasksByProject] = useState<Record<string, WorkItemSummary[]>>({});
   const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSourceInfo[]>([]);
+  const [knowledgeCounts, setKnowledgeCounts] = useState<Record<string, number>>({});
+  // 归档/移除后递增，驱动「最近任务」等派生列表重载。
+  const [listVersion, setListVersion] = useState(0);
   const [coreReady, setCoreReady] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -85,20 +88,39 @@ export default function AppShell() {
     })();
   }, []);
 
-  const loadProjectData = useCallback(async (projectId: string) => {
+  const loadTasks = useCallback(async (projectId: string) => {
     try {
       const r = await rpc<{ items: WorkItemSummary[] }>('workitem.list', { projectId, limit: 50 });
-      setWorkItems(r.items ?? []);
+      setTasksByProject((prev) => ({ ...prev, [projectId]: r.items ?? [] }));
     } catch {
-      setWorkItems([]);
-    }
-    try {
-      const r = await rpc<{ items: KnowledgeSourceInfo[] }>('knowledge.list', { projectId });
-      setKnowledgeSources(r.items ?? []);
-    } catch {
-      setKnowledgeSources([]);
+      setTasksByProject((prev) => ({ ...prev, [projectId]: [] }));
     }
   }, []);
+
+  const loadProjectData = useCallback(
+    async (projectId: string) => {
+      void loadTasks(projectId);
+      try {
+        const r = await rpc<{ items: KnowledgeSourceInfo[] }>('knowledge.list', { projectId });
+        setKnowledgeSources(r.items ?? []);
+        setKnowledgeCounts((prev) => ({ ...prev, [projectId]: (r.items ?? []).length }));
+      } catch {
+        setKnowledgeSources([]);
+      }
+    },
+    [loadTasks],
+  );
+
+  // 树节点展开时懒加载该项目任务（已缓存则跳过）。
+  const expandProject = useCallback(
+    (projectId: string) => {
+      setTasksByProject((prev) => {
+        if (prev[projectId] === undefined) void loadTasks(projectId);
+        return prev;
+      });
+    },
+    [loadTasks],
+  );
 
   useEffect(() => {
     if (activeProjectId) void loadProjectData(activeProjectId);
@@ -151,6 +173,51 @@ export default function AppShell() {
     setActiveProjectId(project.id);
   }, []);
 
+  // 移除 = 归档（可恢复）：侧栏已做行内两步确认，这里直接执行；
+  // 移除的是活动项目时，切到剩余第一个项目（无则回首页）。
+  const removeProject = useCallback(
+    async (project: Project) => {
+      try {
+        await rpc('project.archive', { projectId: project.id, archived: true });
+      } catch (reason) {
+        window.alert(`移除失败：${reason instanceof Error ? reason.message : String(reason)}`);
+        return;
+      }
+      setProjects((prev) => prev.filter((p) => p.id !== project.id));
+      setListVersion((v) => v + 1);
+      if (activeProjectId === project.id) {
+        const rest = projects.filter((p) => p.id !== project.id);
+        if (rest.length > 0) {
+          setActiveProjectId(rest[0].id);
+        } else {
+          setActiveProjectId(null);
+          setRoute({ page: 'home' });
+        }
+      }
+      if (route.page === 'knowledge' && route.projectId === project.id) setRoute({ page: 'home' });
+    },
+    [activeProjectId, projects, route],
+  );
+
+  const removeTask = useCallback(
+    async (task: WorkItemSummary) => {
+      try {
+        await rpc('workitem.archive', { workItemId: task.id, archived: true });
+      } catch (reason) {
+        window.alert(`移除失败：${reason instanceof Error ? reason.message : String(reason)}`);
+        return;
+      }
+      if (activeProjectId) void loadTasks(activeProjectId);
+      // 被移除的任务可能属于非活动项目（树可多开展开），按其所属项目精准刷新。
+      if (task.project_id && task.project_id !== activeProjectId) {
+        void loadTasks(task.project_id);
+      }
+      setListVersion((v) => v + 1);
+      if (route.page === 'task' && route.workItemId === task.id) setRoute({ page: 'home' });
+    },
+    [activeProjectId, loadTasks, route],
+  );
+
   const activeProject = useMemo(
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
@@ -173,17 +240,23 @@ export default function AppShell() {
       <ProjectSidebar
         projects={projects}
         activeProjectId={activeProjectId}
-        workItems={workItems}
+        tasksByProject={tasksByProject}
         activeWorkItemId={route.page === 'task' ? route.workItemId : null}
         coreReady={coreReady}
         route={route}
         knowledgeSources={knowledgeSources}
+        knowledgeCounts={knowledgeCounts}
         onProjectChange={switchProject}
+        onExpandProject={expandProject}
+        onProjectRemove={(project) => void removeProject(project)}
+        onTaskRemove={(task) => void removeTask(task)}
         onTaskOpen={(workItemId) => activeProjectId && openTask(activeProjectId, workItemId)}
         onNavigate={navigate}
       />
       <main className="sg-main">
-        {route.page === 'home' && <HomePage projects={projects} onNavigate={navigate} />}
+        {route.page === 'home' && (
+          <HomePage projects={projects} onNavigate={navigate} refreshKey={listVersion} />
+        )}
         {route.page === 'new' && (
           <NewTaskPage
             projectId={route.projectId}
@@ -222,9 +295,11 @@ export default function AppShell() {
 function HomePage({
   projects,
   onNavigate,
+  refreshKey,
 }: {
   projects: Project[];
   onNavigate: (r: Route) => void;
+  refreshKey: number;
 }) {
   if (projects.length === 0) {
     return (
@@ -273,7 +348,7 @@ function HomePage({
             文字描述、需求文档、GitLab Issue 或界面截图，选择一种方式开始。Agent
             将带着任务依次通过需求、方案、开发、测试、发布、验收六关。
           </p>
-          <RecentTasks projects={projects} onNavigate={onNavigate} />
+          <RecentTasks projects={projects} onNavigate={onNavigate} refreshKey={refreshKey} />
         </div>
       </div>
     </>
@@ -283,9 +358,11 @@ function HomePage({
 function RecentTasks({
   projects,
   onNavigate,
+  refreshKey,
 }: {
   projects: Project[];
   onNavigate: (r: Route) => void;
+  refreshKey: number;
 }) {
   const [rows, setRows] = useState<{ project: Project; task: WorkItemSummary }[]>([]);
 
@@ -309,7 +386,7 @@ function RecentTasks({
     return () => {
       cancelled = true;
     };
-  }, [projects]);
+  }, [projects, refreshKey]);
 
   return (
     <div className="sg-card" style={{ marginTop: 20 }}>
