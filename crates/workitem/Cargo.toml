@@ -12,6 +12,7 @@ sg-store = { workspace = true }
 sg-provenance = { workspace = true }
 sg-artifact = { workspace = true }
 sg-evidence = { workspace = true }
+sg-eventlog = { workspace = true }
 sg-policy = { workspace = true }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }

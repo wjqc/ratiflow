@@ -13,6 +13,7 @@ members = [
     "crates/agent",
     "crates/policy",
     "crates/evidence",
+    "crates/eventlog",
     "crates/provenance",
     "crates/executor",
     "crates/integrations",
@@ -50,6 +51,7 @@ sg-workflow = { path = "crates/workflow" }
 sg-agent = { path = "crates/agent" }
 sg-policy = { path = "crates/policy" }
 sg-evidence = { path = "crates/evidence" }
+sg-eventlog = { path = "crates/eventlog" }
 sg-provenance = { path = "crates/provenance" }
 sg-executor = { path = "crates/executor" }
 sg-integrations = { path = "crates/integrations" }

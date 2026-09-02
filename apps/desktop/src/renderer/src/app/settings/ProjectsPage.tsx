@@ -1,199 +1,43 @@
-// S10 项目与目录：真实 project.list/create/update/archive；目录选择走主进程窄 IPC。
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { rpc } from '../../rpc/client';
-import type { InspectRootResult, ProjectListResult, ProjectRow } from './types';
+import type { ProjectListResult, ProjectRow } from './types';
 import { SettingsPageHeader } from './components/SettingsPageHeader';
-import { SettingsSection } from './components/SettingsSection';
 import { StatusPill } from './components/StatusPill';
-import { IconFolder, IconPlus, IconRefresh } from '../../components/Icons';
+import {
+  IconCheck,
+  IconCloud,
+  IconFolder,
+  IconPlus,
+  IconRefresh,
+} from '../../components/Icons';
 
-const EMPTY_FORM = {
+const EMPTY_REMOTE = {
   name: '',
-  localRoot: '',
   gitlabInstance: '',
   namespace: '',
   project: '',
   defaultBranch: 'main',
+  localRoot: '',
 };
-
-type ProjectForm = typeof EMPTY_FORM;
-
-function ProjectFormFields({
-  form,
-  onChange,
-  showGitlab,
-}: {
-  form: ProjectForm;
-  onChange: (patch: Partial<ProjectForm>) => void;
-  showGitlab: boolean;
-}) {
-  const pickDir = async () => {
-    const dir = await window.sixgates.selectDirectory();
-    if (dir) onChange({ localRoot: dir });
-  };
-
-  const [inspect, setInspect] = useState<InspectRootResult | null>(null);
-  const [inspecting, setInspecting] = useState(false);
-  const [inspectError, setInspectError] = useState<string | null>(null);
-
-  const checkDir = async () => {
-    const path = form.localRoot.trim();
-    if (!path) {
-      setInspectError('请先填写或选择目录');
-      setInspect(null);
-      return;
-    }
-    setInspecting(true);
-    setInspectError(null);
-    try {
-      const res = await rpc<InspectRootResult>('project.inspectRoot', { path });
-      setInspect(res);
-    } catch (e) {
-      setInspect(null);
-      setInspectError(e instanceof Error ? e.message : '目录检查失败');
-    } finally {
-      setInspecting(false);
-    }
-  };
-
-  const blocking = (inspect?.blockers ?? []).filter((b) => b.severity === 'blocking');
-  const warnings = (inspect?.blockers ?? []).filter((b) => b.severity === 'warning');
-
-  return (
-    <>
-      <div className="sg-field">
-        <label htmlFor="pj-root">本地仓库目录</label>
-        <div className="sg-row">
-          <input
-            id="pj-root"
-            className="sg-input"
-            style={{ flex: 1 }}
-            value={form.localRoot}
-            onChange={(e) => onChange({ localRoot: e.target.value })}
-            placeholder="/Users/you/projects/demo"
-          />
-          <button type="button" className="sg-btn" onClick={() => void pickDir()} title="选择目录">
-            <IconFolder size={14} />
-            选择目录
-          </button>
-          <button
-            type="button"
-            className="sg-btn"
-            onClick={() => void checkDir()}
-            disabled={inspecting || !form.localRoot.trim()}
-            title="project.inspectRoot"
-          >
-            {inspecting ? '检查中…' : '检查目录'}
-          </button>
-        </div>
-        {inspectError ? (
-          <p className="sg-hint" style={{ color: 'var(--sg-status-error)' }}>{inspectError}</p>
-        ) : null}
-        {inspect ? (
-          <div className="sg-stack" style={{ gap: 4, marginTop: 6 }}>
-            <div className="sg-row" style={{ gap: 6 }}>
-              <StatusPill kind={inspect.isGitRepo ? 'ready' : 'pending'} label={inspect.isGitRepo ? 'Git 仓库' : '非 Git 目录'} />
-              <StatusPill kind={inspect.readable ? 'ready' : 'error'} label={inspect.readable ? '可读' : '不可读'} />
-              <StatusPill kind={inspect.writable ? 'ready' : 'error'} label={inspect.writable ? '可写' : '不可写'} />
-              {inspect.hasSixgatesDir ? <StatusPill kind="readonly" label="含 .sixgates" /> : null}
-            </div>
-            {inspect.stacks.length > 0 ? (
-              <div className="sg-row" style={{ gap: 6 }}>
-                {inspect.stacks.map((s) => (
-                  <span key={s} className="sg-chip">{s}</span>
-                ))}
-              </div>
-            ) : null}
-            {warnings.map((b) => (
-              <p key={b.id} className="sg-hint" style={{ margin: 0 }}>提示：{b.detail ?? b.id}</p>
-            ))}
-            {blocking.map((b) => (
-              <p key={b.id} className="sg-hint" style={{ margin: 0, color: 'var(--sg-status-error)' }}>
-                阻塞：{b.detail ?? b.id}
-              </p>
-            ))}
-          </div>
-        ) : (
-          <p className="sg-hint">可点「检查目录」校验 git 状态、权限与技术栈；创建前建议先确认路径。</p>
-        )}
-      </div>
-      <div className="sg-field">
-        <label htmlFor="pj-name">显示名</label>
-        <input
-          id="pj-name"
-          className="sg-input"
-          value={form.name}
-          onChange={(e) => onChange({ name: e.target.value })}
-          placeholder="演示项目"
-        />
-      </div>
-      {showGitlab ? (
-        <div className="sg-set-grid-3">
-          <div className="sg-field">
-            <label htmlFor="pj-gi">GitLab 实例</label>
-            <input
-              id="pj-gi"
-              className="sg-input"
-              value={form.gitlabInstance}
-              onChange={(e) => onChange({ gitlabInstance: e.target.value })}
-              placeholder="default"
-            />
-          </div>
-          <div className="sg-field">
-            <label htmlFor="pj-ns">namespace</label>
-            <input
-              id="pj-ns"
-              className="sg-input"
-              value={form.namespace}
-              onChange={(e) => onChange({ namespace: e.target.value })}
-              placeholder="team"
-            />
-          </div>
-          <div className="sg-field">
-            <label htmlFor="pj-repo">project</label>
-            <input
-              id="pj-repo"
-              className="sg-input"
-              value={form.project}
-              onChange={(e) => onChange({ project: e.target.value })}
-              placeholder="demo"
-            />
-          </div>
-        </div>
-      ) : null}
-      <div className="sg-field" style={{ maxWidth: 220 }}>
-        <label htmlFor="pj-branch">默认分支</label>
-        <input
-          id="pj-branch"
-          className="sg-input"
-          value={form.defaultBranch}
-          onChange={(e) => onChange({ defaultBranch: e.target.value })}
-        />
-      </div>
-    </>
-  );
-}
 
 export function ProjectsPage() {
   const [items, setItems] = useState<ProjectRow[]>([]);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [form, setForm] = useState<ProjectForm>(EMPTY_FORM);
-  const [creating, setCreating] = useState(false);
-  const [editing, setEditing] = useState<ProjectRow | null>(null);
-  const [editForm, setEditForm] = useState<ProjectForm>(EMPTY_FORM);
-  const [saving, setSaving] = useState(false);
+  const [showRemote, setShowRemote] = useState(false);
+  const [remote, setRemote] = useState(EMPTY_REMOTE);
 
   const load = useCallback(async (archived: boolean) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await rpc<ProjectListResult>('project.list', { includeArchived: archived });
-      setItems(res.items ?? []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '项目列表加载失败');
+      const result = await rpc<ProjectListResult>('project.list', { includeArchived: archived });
+      setItems(result.items ?? []);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '工作区列表加载失败');
     } finally {
       setLoading(false);
     }
@@ -201,210 +45,140 @@ export function ProjectsPage() {
 
   useEffect(() => {
     void load(includeArchived);
-  }, [load, includeArchived]);
+  }, [includeArchived, load]);
 
-  const create = async (e: FormEvent) => {
-    e.preventDefault();
-    setCreating(true);
+  const openFolder = async () => {
+    setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      await rpc('project.create', {
-        gitlabInstance: form.gitlabInstance.trim(),
-        namespace: form.namespace.trim(),
-        project: form.project.trim(),
-        defaultBranch: form.defaultBranch.trim(),
-        name: form.name.trim(),
-        localRoot: form.localRoot.trim(),
+      const localRoot = await window.sixgates.selectDirectory();
+      if (!localRoot) return;
+      const name = localRoot.split('/').filter(Boolean).at(-1) || '本地工作区';
+      const project = await rpc<ProjectRow>('project.create', {
+        gitlabInstance: 'local',
+        namespace: 'workspace',
+        project: `local-${stableHash(localRoot)}`,
+        defaultBranch: 'main',
+        name,
+        localRoot,
       });
-      setNotice(`项目「${form.name.trim() || form.project.trim()}」已创建`);
-      setForm(EMPTY_FORM);
+      setNotice(`“${project.name}”已添加，可以直接在新建任务中使用。`);
       await load(includeArchived);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '创建失败');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '无法打开该文件夹');
     } finally {
-      setCreating(false);
+      setBusy(false);
     }
   };
 
-  const startEdit = (p: ProjectRow) => {
-    setEditing(p);
-    setEditForm({
-      name: p.name,
-      localRoot: p.local_root,
-      gitlabInstance: p.gitlab_instance,
-      namespace: p.namespace,
-      project: p.project,
-      defaultBranch: p.default_branch,
-    });
-  };
-
-  const save = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!editing) return;
-    setSaving(true);
+  const connectRemote = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
     setError(null);
     try {
-      await rpc('project.update', {
-        projectId: editing.id,
-        name: editForm.name.trim(),
-        localRoot: editForm.localRoot.trim(),
-        defaultBranch: editForm.defaultBranch.trim(),
+      const created = await rpc<ProjectRow>('project.create', {
+        gitlabInstance: remote.gitlabInstance.trim(),
+        namespace: remote.namespace.trim(),
+        project: remote.project.trim(),
+        defaultBranch: remote.defaultBranch.trim(),
+        name: remote.name.trim() || remote.project.trim(),
+        localRoot: remote.localRoot.trim(),
       });
-      setNotice(`项目「${editForm.name.trim()}」已保存`);
-      setEditing(null);
+      setNotice(`“${created.name}”已连接。`);
+      setRemote(EMPTY_REMOTE);
+      setShowRemote(false);
       await load(includeArchived);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '保存失败');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '远程项目连接失败');
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
 
-  const archive = async (p: ProjectRow, archived: boolean) => {
+  const archive = async (project: ProjectRow, archived: boolean) => {
     setError(null);
-    setNotice(null);
     try {
-      await rpc('project.archive', { projectId: p.id, archived });
-      setNotice(archived ? `项目「${p.name}」已归档` : `项目「${p.name}」已恢复`);
+      await rpc('project.archive', { projectId: project.id, archived });
+      setNotice(archived ? `“${project.name}”已移到归档。` : `“${project.name}”已恢复。`);
       await load(includeArchived);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '操作失败');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '操作失败');
     }
   };
 
   return (
-    <div className="sg-set-page">
+    <div className="sg-set-page sg-projects-page">
       <SettingsPageHeader
-        title="项目与目录"
+        title="项目工作区"
         scope="本地"
-        description="登记 GitLab 仓库与本地检出目录；归档不出现在主流程，可随时恢复。"
-        actions={
-          <button className="sg-btn" onClick={() => void load(includeArchived)} disabled={loading}>
-            <IconRefresh size={14} />
-            刷新
-          </button>
-        }
+        description="一个工作区对应一个本地代码目录。GitLab 和远程环境都是可选连接，不再阻塞本地工作。"
+        actions={<button className="sg-btn sg-btn--quiet" onClick={() => void load(includeArchived)} disabled={loading}><IconRefresh size={14} />刷新</button>}
       />
 
-      {error ? <div className="sg-banner sg-banner--error" role="alert">操作失败：{error}</div> : null}
-      {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
+      {error ? <div className="sg-banner sg-banner--error" role="alert">{error}</div> : null}
+      {notice ? <div className="sg-banner sg-banner--info" role="status"><IconCheck size={14} />{notice}</div> : null}
 
-      <SettingsSection title="创建项目" description="当前契约要求 GitLab 关联（instance/namespace/project 必填）。">
-        <form className="sg-card sg-set-form" onSubmit={create}>
-          <ProjectFormFields form={form} onChange={(p) => setForm((f) => ({ ...f, ...p }))} showGitlab />
-          <div className="sg-row">
-            <button
-              type="submit"
-              className="sg-btn sg-btn--primary"
-              disabled={
-                creating ||
-                !form.localRoot.trim() ||
-                !form.gitlabInstance.trim() ||
-                !form.namespace.trim() ||
-                !form.project.trim()
-              }
-            >
-              <IconPlus size={14} />
-              {creating ? '创建中…' : '创建项目'}
-            </button>
-            <span className="sg-hint">创建后写入审计事件 project.create。</span>
+      <section className="sg-project-actions">
+        <button className="sg-project-action sg-project-action--primary" onClick={() => void openFolder()} disabled={busy}>
+          <span><IconFolder size={20} /></span>
+          <div><strong>{busy ? '正在打开…' : '打开文件夹'}</strong><small>选择本机已有代码目录</small></div>
+          <IconPlus size={15} />
+        </button>
+        <button className="sg-project-action" onClick={() => setShowRemote((value) => !value)}>
+          <span><IconCloud size={20} /></span>
+          <div><strong>连接 GitLab 项目</strong><small>可选：关联 Issue、分支和合并请求</small></div>
+          <IconPlus size={15} />
+        </button>
+      </section>
+
+      {showRemote ? (
+        <form className="sg-project-remote-form" onSubmit={connectRemote}>
+          <div><h2>连接 GitLab 项目</h2><p>本地目录可以稍后再选，远程连接不会替代本地工作区。</p></div>
+          <div className="sg-project-remote-grid">
+            <label><span>显示名</span><input value={remote.name} onChange={(event) => setRemote({ ...remote, name: event.target.value })} placeholder="我的项目" /></label>
+            <label><span>GitLab 实例 *</span><input value={remote.gitlabInstance} onChange={(event) => setRemote({ ...remote, gitlabInstance: event.target.value })} placeholder="default" /></label>
+            <label><span>命名空间 *</span><input value={remote.namespace} onChange={(event) => setRemote({ ...remote, namespace: event.target.value })} placeholder="team" /></label>
+            <label><span>项目 *</span><input value={remote.project} onChange={(event) => setRemote({ ...remote, project: event.target.value })} placeholder="demo" /></label>
+            <label><span>默认分支</span><input value={remote.defaultBranch} onChange={(event) => setRemote({ ...remote, defaultBranch: event.target.value })} /></label>
+            <label><span>本地目录（可选）</span><input value={remote.localRoot} onChange={(event) => setRemote({ ...remote, localRoot: event.target.value })} placeholder="/Users/you/project" /></label>
           </div>
+          <div className="sg-row"><button className="sg-btn sg-btn--primary" type="submit" disabled={busy || !remote.gitlabInstance.trim() || !remote.namespace.trim() || !remote.project.trim()}>连接项目</button><button className="sg-btn" type="button" onClick={() => setShowRemote(false)}>取消</button></div>
         </form>
-      </SettingsSection>
-
-      <SettingsSection
-        title="项目列表"
-        actions={
-          <label className="sg-row sg-hint" style={{ gap: 6, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={includeArchived}
-              onChange={(e) => setIncludeArchived(e.target.checked)}
-            />
-            显示已归档
-          </label>
-        }
-      >
-        {loading ? (
-          <div className="sg-skeleton-rows" aria-busy="true">
-            <div className="sg-skeleton-row" />
-            <div className="sg-skeleton-row" />
-          </div>
-        ) : items.length === 0 ? (
-          <div className="sg-empty">
-            <IconFolder size={28} style={{ color: 'var(--sg-border-strong)' }} />
-            <span>{includeArchived ? '暂无项目记录' : '暂无启用中的项目'}</span>
-            <span className="sg-hint">在上方表单登记第一个项目，或勾选「显示已归档」查看历史。</span>
-          </div>
-        ) : (
-          <table className="sg-table">
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>GitLab</th>
-                <th>状态</th>
-                <th style={{ width: 200 }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((p) => (
-                <tr key={p.id}>
-                  <td>
-                    <div style={{ fontWeight: 500 }}>{p.name}</div>
-                    <div className="sg-path">{p.local_root || '未设置本地目录'}</div>
-                  </td>
-                  <td>
-                    <span className="sg-code">{p.gitlab_instance}</span>{' '}
-                    <span className="sg-muted">
-                      {p.namespace}/{p.project}
-                    </span>
-                    <div className="sg-hint">分支 {p.default_branch}</div>
-                  </td>
-                  <td>
-                    <StatusPill
-                      kind={p.status === 'ready' ? 'ready' : 'readonly'}
-                      label={p.status === 'ready' ? '已就绪' : '已归档'}
-                    />
-                  </td>
-                  <td>
-                    <div className="sg-row" style={{ gap: 6 }}>
-                      <button className="sg-btn sg-btn--sm" onClick={() => startEdit(p)}>
-                        编辑
-                      </button>
-                      {p.status === 'ready' ? (
-                        <button className="sg-btn sg-btn--sm" onClick={() => void archive(p, true)}>
-                          归档
-                        </button>
-                      ) : (
-                        <button className="sg-btn sg-btn--sm" onClick={() => void archive(p, false)}>
-                          恢复
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </SettingsSection>
-
-      {editing ? (
-        <SettingsSection title={`编辑项目：${editing.name}`} description="GitLab 关联创建后不可修改（当前契约）。">
-          <form className="sg-card sg-set-form" onSubmit={save}>
-            <ProjectFormFields form={editForm} onChange={(p) => setEditForm((f) => ({ ...f, ...p }))} showGitlab={false} />
-            <div className="sg-row">
-              <button type="submit" className="sg-btn sg-btn--primary" disabled={saving || !editForm.name.trim()}>
-                {saving ? '保存中…' : '保存修改'}
-              </button>
-              <button type="button" className="sg-btn" onClick={() => setEditing(null)} disabled={saving}>
-                取消
-              </button>
-            </div>
-          </form>
-        </SettingsSection>
       ) : null}
+
+      <section className="sg-project-list-section">
+        <div className="sg-project-list-head">
+          <div><h2>最近工作区</h2><p>这些工作区会出现在新建任务上方的选择器里。</p></div>
+          <label><input type="checkbox" checked={includeArchived} onChange={(event) => setIncludeArchived(event.target.checked)} />显示已归档</label>
+        </div>
+        {loading ? <div className="sg-empty">正在加载工作区…</div> : items.length === 0 ? (
+          <div className="sg-project-empty"><IconFolder size={28} /><h3>还没有工作区</h3><p>打开一个本地文件夹即可开始，不需要先配置 GitLab。</p><button className="sg-btn sg-btn--primary" onClick={() => void openFolder()}><IconPlus size={14} />打开文件夹</button></div>
+        ) : (
+          <div className="sg-project-rows">
+            {items.map((project) => (
+              <article className="sg-project-row" key={project.id}>
+                <span className="sg-project-icon"><IconFolder size={18} /></span>
+                <div><h3>{project.name}</h3><p>{project.local_root || '未绑定本地目录'}</p></div>
+                <div className="sg-project-meta">
+                  {project.gitlab_instance && project.gitlab_instance !== 'local' ? <span>{project.namespace}/{project.project}</span> : <span>仅本地</span>}
+                  <StatusPill kind={project.status === 'archived' ? 'readonly' : 'ready'} label={project.status === 'archived' ? '已归档' : '可用'} />
+                </div>
+                <button className="sg-btn sg-btn--sm" onClick={() => void archive(project, project.status !== 'archived')}>{project.status === 'archived' ? '恢复' : '归档'}</button>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
+}
+
+function stableHash(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }

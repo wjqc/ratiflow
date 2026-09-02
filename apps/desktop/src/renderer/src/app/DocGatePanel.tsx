@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { rpc, rpcErrorMessage, waitForRunTerminal } from '../rpc/client';
 import { gateLabel } from './AppShell';
+import { IconShield, IconZap } from '../components/Icons';
+import { draftPrd, friendlyAgentError } from './prdDraft';
 
 interface Props {
   workItemId: string;
@@ -40,7 +42,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
       setNotice(await action());
       await reload();
     } catch (reason) {
-      setError(rpcErrorMessage(reason));
+      setError(friendlyAgentError(reason));
     } finally {
       setBusy(false);
     }
@@ -112,6 +114,14 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
               disabled={busy}
               onClick={() => {
                 void run(async () => {
+                  if (gate === 'requirements') {
+                    await draftPrd(
+                      workItemId,
+                      draft,
+                      `retry-prd-${workItemId}-${Date.now()}`,
+                    );
+                    return 'PRD 已重新起草并保存为当前草稿。';
+                  }
                   // M4：唯一关卡执行入口——服务端装配选路/快照/清单（客户端不自报绑定）。
                   const started = await rpc<{ runId: string; selection: { source_scope: string; fallback_used: boolean } }>('stage.startActivity', {
                     workItemId,
@@ -131,7 +141,8 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
                 });
               }}
             >
-              🤖 让 Agent 起草
+              <IconZap size={14} />
+              {gate === 'requirements' ? (revision ? '重新起草 PRD' : '起草 PRD') : '让 Agent 起草'}
             </button>
             <button
               className="sg-button sg-button--primary"
@@ -155,7 +166,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
             </button>
             {revision ? <span className="sg-muted">r{revision.rev_no} · {revision.status}</span> : null}
           </div>
-          <textarea className="sg-textarea" rows={12} value={draft} onChange={(e) => setDraft(e.target.value)}
+          <textarea className="sg-textarea sg-doc-editor" rows={12} value={draft} onChange={(e) => setDraft(e.target.value)}
             placeholder={`# ${config.label}\n\n范围…\n非目标…\n验收标准…`} />
 
           {revision?.status === 'draft' ? (
@@ -256,11 +267,11 @@ export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId:
       {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
       {pendingRelease ? (
         <span className="sg-chip" title="在审批中心完成批准 / 要求修改 / 拒绝">
-          ⏳ 放行审批等待用户决定
+          放行审批等待用户决定
         </span>
       ) : (
         <button className="sg-button sg-button--primary" disabled={busy} onClick={evaluateAndRequest}>
-          ⚖️ 评估{gateLabel(gate)}门禁并提交放行
+          <IconShield size={14} />评估{gateLabel(gate)}门禁并提交放行
         </button>
       )}
     </>

@@ -1,262 +1,381 @@
-// 模型与路由：内置供应商预设（智谱 GLM / DeepSeek）快速接入 + 自定义 OpenAI 兼容 Provider。
-// API Key 直填后经 modelProfile.create 落 OS Keychain（DB 只存凭据引用 ID），此页不回显。
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+// 模型设置：围绕“选择供应商 → 配好凭据与模型 → 连接测试通过”组织。
+// 诊断步骤默认折叠，避免把内部探测字段当成主界面。
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
-import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
-import { IconPlus, IconRefresh, IconZap } from '../../../components/Icons';
+import {
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconPlus,
+  IconRefresh,
+  IconZap,
+} from '../../../components/Icons';
 
 interface ModelProfile {
-  id: string; revision: number; name: string; provider_kind: string; base_url: string;
-  credential_ref_id?: string | null; default_model: string;
-  managed_source?: string | null; status: string; last_tested_at?: string | null;
+  id: string;
+  revision: number;
+  name: string;
+  provider_kind: string;
+  base_url: string;
+  credential_ref_id?: string | null;
+  default_model: string;
+  managed_source?: string | null;
+  status: string;
+  last_tested_at?: string | null;
 }
-interface TestStep { name: string; status: string; error_code: string | null }
+
+interface TestStep {
+  name: string;
+  status: string;
+  errorCode?: string | null;
+}
+
 interface ModelPreset {
-  id: string; label: string; providerKind: string; baseUrl: string;
-  defaultModel: string; models: { id: string; note: string }[];
+  id: string;
+  label: string;
+  providerKind: string;
+  baseUrl: string;
+  defaultModel: string;
+  models: { id: string; note: string }[];
+}
+
+interface ModelRoute {
+  id: string;
+  scope: string;
+  taskKind: string;
+  primaryProfileId: string;
+  revision: number;
 }
 
 const KIND_LABEL: Record<string, string> = {
-  zhipu: '智谱 GLM', deepseek: 'DeepSeek', openai_compatible: 'OpenAI 兼容', fake: 'fake',
+  zhipu: '智谱',
+  deepseek: 'DeepSeek',
+  openai_compatible: '自定义',
+  fake: '测试模型',
 };
 
-const EMPTY_FORM = { name: '', presetId: 'custom', baseUrl: '', apiKey: '', credentialRefId: '', defaultModel: '' };
+const STEP_LABEL: Record<string, string> = {
+  resolve: '网络地址',
+  auth: '身份验证',
+  generation: '文本生成',
+  tool: '工具调用',
+  vision: '图片理解',
+};
+
+const EMPTY_FORM = {
+  name: '',
+  presetId: 'custom',
+  baseUrl: '',
+  apiKey: '',
+  credentialRefId: '',
+  defaultModel: '',
+};
 
 export function ModelsPage() {
   const [items, setItems] = useState<ModelProfile[]>([]);
   const [presets, setPresets] = useState<ModelPreset[]>([]);
+  const [routes, setRoutes] = useState<ModelRoute[]>([]);
+  const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
-  const [testing, setTesting] = useState('');
+  const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ status: string; steps: TestStep[] } | null>(null);
-  const [syncing, setSyncing] = useState('');
-  const [synced, setSynced] = useState<{ name: string; models: string[] } | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [modelsByProfile, setModelsByProfile] = useState<Record<string, string[]>>({});
 
   const load = useCallback(async () => {
-    setLoading(true); setError(null);
+    setLoading(true);
+    setError(null);
     try {
-      const [list, presetRes] = await Promise.all([
+      const [list, presetRes, routeRes] = await Promise.all([
         rpc<{ items: ModelProfile[] }>('modelProfile.list', {}),
         rpc<{ items: ModelPreset[] }>('modelProvider.presets', {}).catch(() => ({ items: [] })),
+        rpc<ModelRoute[]>('modelRoute.get', {}).catch(() => []),
       ]);
-      setItems(list.items ?? []);
+      const next = list.items ?? [];
+      setItems(next);
       setPresets(presetRes.items ?? []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '模型列表加载失败');
-    } finally { setLoading(false); }
+      setRoutes(Array.isArray(routeRes) ? routeRes : []);
+      setSelectedId((current) =>
+        next.some((profile) => profile.id === current) ? current : next[0]?.id ?? '',
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '模型列表加载失败');
+    } finally {
+      setLoading(false);
+    }
   }, []);
-  useEffect(() => { void load(); }, [load]);
 
-  const activePreset = presets.find((p) => p.id === form.presetId);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const selected = items.find((profile) => profile.id === selectedId) ?? null;
+  const activePreset = presets.find((preset) => preset.id === form.presetId);
+  const route = routes.find((item) => item.taskKind === 'default') ?? routes[0] ?? null;
+  const selectedModels = useMemo(() => {
+    if (!selected) return [];
+    const synced = modelsByProfile[selected.id] ?? [];
+    return synced.length > 0 ? synced : selected.default_model ? [selected.default_model] : [];
+  }, [modelsByProfile, selected]);
 
   const pickPreset = (id: string) => {
-    const preset = presets.find((p) => p.id === id);
-    setForm((f) => ({
-      ...f,
+    const preset = presets.find((item) => item.id === id);
+    setForm((current) => ({
+      ...current,
       presetId: id,
-      name: preset ? preset.label : f.name,
-      baseUrl: preset ? preset.baseUrl : '',
-      defaultModel: preset ? preset.defaultModel : '',
+      name: preset?.label ?? current.name,
+      baseUrl: preset?.baseUrl ?? '',
+      defaultModel: preset?.defaultModel ?? '',
     }));
   };
 
-  const create = async (e: FormEvent) => {
-    e.preventDefault();
-    setError(null); setNotice(null);
-    const preset = presets.find((p) => p.id === form.presetId);
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    setNotice(null);
+    const preset = presets.find((item) => item.id === form.presetId);
     try {
-      await rpc('modelProfile.create', {
+      const created = await rpc<ModelProfile>('modelProfile.create', {
         name: form.name.trim(),
         providerKind: preset?.providerKind ?? 'openai_compatible',
         baseUrl: form.baseUrl.trim(),
         apiKey: form.apiKey.trim() || undefined,
-        credentialRefId: form.apiKey.trim() ? undefined : (form.credentialRefId.trim() || undefined),
+        credentialRefId: form.apiKey.trim() ? undefined : form.credentialRefId.trim() || undefined,
         defaultModel: form.defaultModel.trim(),
       });
-      setNotice(`Provider「${form.name.trim()}」已创建`);
-      setForm(EMPTY_FORM); setCreating(false);
+      setNotice(`“${created.name}”已添加。请测试连接后设为默认模型。`);
+      setForm(EMPTY_FORM);
+      setCreating(false);
       await load();
-    } catch (err) { setError(err instanceof Error ? err.message : '创建失败'); }
+      setSelectedId(created.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '创建失败');
+    }
   };
 
-  const remove = async (p: ModelProfile) => {
-    if (!window.confirm(`删除 Provider「${p.name}」？不可撤销。`)) return;
+  const test = async () => {
+    if (!selected) return;
+    setTesting(true);
+    setTestResult(null);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await rpc<{ status: string; steps: TestStep[] }>('modelProfile.test', {
+        profileId: selected.id,
+      });
+      setTestResult(result);
+      setShowDiagnostics(result.status !== 'ready');
+      setNotice(
+        result.status === 'ready'
+          ? '连接与文本生成均已通过，这个模型可以用于 Agent。'
+          : '连接测试未通过。展开详情可查看失败步骤。',
+      );
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '连接测试失败');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const syncModels = async () => {
+    if (!selected) return;
+    setSyncing(true);
     setError(null);
     try {
-      await rpc('modelProfile.remove', { profileId: p.id, expectedRevision: p.revision });
+      const result = await rpc<{ models: string[] }>('modelProfile.syncModels', {
+        profileId: selected.id,
+      });
+      setModelsByProfile((current) => ({ ...current, [selected.id]: result.models ?? [] }));
+      setNotice(`已读取 ${result.models?.length ?? 0} 个可用模型。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '模型列表同步失败');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const setDefault = async () => {
+    if (!selected) return;
+    setError(null);
+    try {
+      const result = await rpc<ModelRoute[]>('modelRoute.update', {
+        route: { scope: 'global', taskKind: 'default', primaryProfileId: selected.id },
+        expectedRevision: route?.revision ?? 0,
+      });
+      setRoutes(result);
+      setNotice(`“${selected.name}”已设为默认模型。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '默认模型设置失败');
+    }
+  };
+
+  const remove = async () => {
+    if (!selected || !window.confirm(`删除“${selected.name}”？此操作不可撤销。`)) return;
+    setError(null);
+    try {
+      await rpc('modelProfile.remove', {
+        profileId: selected.id,
+        expectedRevision: selected.revision,
+      });
+      setSelectedId('');
       await load();
-    } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
-  };
-
-  const test = async (p: ModelProfile) => {
-    setTesting(p.id); setTestResult(null); setError(null);
-    try {
-      setTestResult(await rpc<{ status: string; steps: TestStep[] }>('modelProfile.test', { profileId: p.id }));
-    } catch (e) { setError(e instanceof Error ? e.message : '测试失败'); }
-    finally { setTesting(''); }
-  };
-
-  const syncModels = async (p: ModelProfile) => {
-    setSyncing(p.id); setSynced(null); setError(null);
-    try {
-      const res = await rpc<{ models: string[] }>('modelProfile.syncModels', { profileId: p.id });
-      setSynced({ name: p.name, models: res.models ?? [] });
-    } catch (e) { setError(e instanceof Error ? e.message : '模型列表同步失败'); }
-    finally { setSyncing(''); }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '删除失败');
+    }
   };
 
   return (
-    <div className="sg-set-page">
+    <div className="sg-set-page sg-model-page">
       <SettingsPageHeader
-        title="模型与路由"
+        title="模型设置"
         scope="全局"
-        status={loading ? <StatusPill kind="checking" /> : items.length === 0 ? <StatusPill kind="pending" label="未配置" /> : <StatusPill kind="ready" />}
-        description="接入智谱 GLM、DeepSeek 或任意 OpenAI 兼容模型。API Key 直填后只写入 OS Keychain，此页不回显。"
+        description="管理 Agent 使用的模型供应商。API Key 只保存到 OS Keychain，界面不会回显。"
         actions={
-          <button className="sg-btn" onClick={() => void load()} disabled={loading}><IconRefresh size={14} />刷新</button>
+          <button className="sg-btn sg-btn--quiet" onClick={() => void load()} disabled={loading}>
+            <IconRefresh size={14} />刷新
+          </button>
         }
       />
-
-      {error ? <div className="sg-banner sg-banner--error" role="alert">操作失败：{error}</div> : null}
+      {error ? <div className="sg-banner sg-banner--error" role="alert">{error}</div> : null}
       {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
 
-      {!creating ? (
-        <SettingsSection title="Provider 列表" actions={
-          <button className="sg-btn" onClick={() => { setForm(EMPTY_FORM); setCreating(true); }}><IconPlus size={14} />新增</button>
-        }>
-          {loading ? (
-            <div className="sg-skeleton-rows" aria-busy="true"><div className="sg-skeleton-row" /></div>
-          ) : items.length === 0 ? (
-            <div className="sg-empty">
-              <span>暂无模型 Provider</span>
-              <span className="sg-hint">未配置模型时 Agent Run 被阻塞（概览有对应提示）。点「新增」用预设一键接入 GLM / DeepSeek。</span>
-            </div>
-          ) : (
-            <table className="sg-table" aria-label="Provider 列表">
-              <thead><tr><th>名称</th><th>端点</th><th>状态</th><th style={{ width: 300 }}>操作</th></tr></thead>
-              <tbody>
-                {items.map((p) => (
-                  <tr key={p.id}>
-                    <td>
-                      <div style={{ fontWeight: 500 }}>{p.name}</div>
-                      <div className="sg-hint">{KIND_LABEL[p.provider_kind] ?? p.provider_kind}{p.default_model ? ` · ${p.default_model}` : ''}</div>
-                    </td>
-                    <td><span className="sg-code">{p.base_url || '—'}</span>
-                      <div className="sg-hint">{p.credential_ref_id ? `凭据 ${p.credential_ref_id.slice(0, 10)}…` : '未绑定凭据'}</div>
-                    </td>
-                    <td>
-                      <StatusPill kind={p.managed_source ? 'readonly' : p.status === 'ready' ? 'ready' : 'pending'}
-                        label={p.managed_source ? `托管(${p.managed_source})` : undefined} />
-                    </td>
-                    <td>
-                      <div className="sg-row" style={{ gap: 6 }}>
-                        <button className="sg-btn sg-btn--sm" disabled={testing === p.id} onClick={() => void test(p)}>
-                          <IconZap size={12} />{testing === p.id ? '测试中…' : '测试'}
-                        </button>
-                        <button className="sg-btn sg-btn--sm" disabled={syncing === p.id} onClick={() => void syncModels(p)}>
-                          {syncing === p.id ? '同步中…' : '同步模型'}
-                        </button>
-                        {!p.managed_source ? (
-                          <button className="sg-btn sg-btn--sm sg-btn--danger" onClick={() => void remove(p)}>删除</button>
-                        ) : null}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          {synced ? (
-            <div className="sg-banner sg-banner--info" role="status" style={{ marginTop: 10 }}>
-              「{synced.name}」可用模型（{synced.models.length}）：{synced.models.join('、')}
-            </div>
-          ) : null}
-          {testResult ? (
-            <table className="sg-table" style={{ marginTop: 10 }} aria-label="测试步骤" aria-live="polite">
-              <thead><tr><th>步骤</th><th>状态</th><th>错误码</th></tr></thead>
-              <tbody>
-                {testResult.steps.map((s) => (
-                  <tr key={s.name}>
-                    <td>{s.name}</td>
-                    <td><StatusPill kind={s.status === 'passed' ? 'ready' : s.status === 'skipped' ? 'readonly' : 'error'} label={s.status} /></td>
-                    <td className="sg-muted">{s.error_code ?? '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : null}
-        </SettingsSection>
-      ) : (
-        <SettingsSection title="新增 Provider" description="选择预设自动填端点与模型；API Key 只写 Keychain，也可改用已有凭据引用 ID">
-          <div className="sg-row" style={{ gap: 8, marginBottom: 14 }} role="tablist" aria-label="供应商预设">
-            {presets.map((p) => (
-              <button key={p.id} type="button"
-                className={`sg-btn${form.presetId === p.id ? ' sg-btn--primary' : ''}`}
-                aria-pressed={form.presetId === p.id}
-                onClick={() => pickPreset(p.id)}>
-                {p.label}
+      <div className="sg-model-layout">
+        <aside className="sg-model-providers" aria-label="模型供应商">
+          <div className="sg-model-providers-head">供应商</div>
+          <div className="sg-model-provider-list">
+            {loading ? <div className="sg-model-provider-empty">正在加载…</div> : null}
+            {!loading && items.length === 0 ? <div className="sg-model-provider-empty">还没有模型供应商</div> : null}
+            {items.map((profile) => (
+              <button
+                key={profile.id}
+                className={`sg-model-provider ${profile.id === selectedId ? 'sg-model-provider--active' : ''}`}
+                onClick={() => {
+                  setSelectedId(profile.id);
+                  setCreating(false);
+                  setTestResult(null);
+                  setShowDiagnostics(false);
+                }}
+              >
+                <span className="sg-model-provider-mark">{profile.name.slice(0, 1).toUpperCase()}</span>
+                <span><strong>{profile.name}</strong><small>{KIND_LABEL[profile.provider_kind] ?? profile.provider_kind}</small></span>
+                <span className={`sg-model-provider-dot ${profile.status === 'ready' ? 'is-ready' : ''}`} />
               </button>
             ))}
-            <button type="button"
-              className={`sg-btn${form.presetId === 'custom' ? ' sg-btn--primary' : ''}`}
-              aria-pressed={form.presetId === 'custom'}
-              onClick={() => pickPreset('custom')}>
-              自定义（OpenAI 兼容）
-            </button>
           </div>
-          <form className="sg-card sg-set-form" onSubmit={create}>
-            <div className="sg-form-grid--2">
-              <div className="sg-field">
-                <label htmlFor="mp-name">名称 *</label>
-                <input id="mp-name" className="sg-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="主力模型" />
+          <button className="sg-model-add" onClick={() => { setCreating(true); setForm(EMPTY_FORM); }}>
+            <IconPlus size={14} />添加供应商
+          </button>
+        </aside>
+
+        <section className="sg-model-detail">
+          {creating ? (
+            <ProviderForm form={form} presets={presets} activePreset={activePreset} onForm={setForm} onPreset={pickPreset} onSubmit={create} onCancel={() => setCreating(false)} />
+          ) : selected ? (
+            <>
+              <div className="sg-model-detail-head">
+                <div>
+                  <div className="sg-model-title-row">
+                    <span className="sg-model-provider-mark sg-model-provider-mark--large">{selected.name.slice(0, 1).toUpperCase()}</span>
+                    <h2>{selected.name}</h2>
+                    <StatusPill kind={selected.status === 'ready' ? 'ready' : selected.status === 'error' ? 'error' : 'pending'} label={selected.status === 'ready' ? '可用' : selected.status === 'error' ? '需检查' : '待测试'} />
+                    {route?.primaryProfileId === selected.id ? <span className="sg-chip">默认</span> : null}
+                  </div>
+                  <p>用于需求分析、PRD 起草和后续各关 Agent 任务。</p>
+                </div>
+                <div className="sg-row">
+                  {route?.primaryProfileId !== selected.id ? <button className="sg-btn" onClick={() => void setDefault()} disabled={selected.status !== 'ready'} title={selected.status === 'ready' ? '设为默认模型' : '请先通过连接测试'}><IconCheck size={14} />设为默认</button> : null}
+                  <button className="sg-btn sg-btn--primary" onClick={() => void test()} disabled={testing}><IconZap size={14} />{testing ? '测试中…' : '测试连接'}</button>
+                </div>
               </div>
-              <div className="sg-field">
-                <label htmlFor="mp-url">Base URL</label>
-                <input id="mp-url" className="sg-input" value={form.baseUrl}
-                  onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
-                  placeholder={activePreset ? activePreset.baseUrl : 'https://api.example.com/v1'} />
+
+              <div className="sg-model-fields">
+                <label><span>Base URL</span><input value={selected.base_url} readOnly /></label>
+                <label>
+                  <span>API Key</span>
+                  <input value={selected.credential_ref_id ? '••••••••••••••••••••••••' : ''} placeholder="未绑定凭据" readOnly />
+                  <small>{selected.credential_ref_id ? '已安全存储在 Keychain' : '需要添加凭据后才能生成内容'}</small>
+                </label>
               </div>
-              <div className="sg-field">
-                <label htmlFor="mp-key">API Key</label>
-                <input id="mp-key" className="sg-input" type="password" autoComplete="off" value={form.apiKey}
-                  onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
-                  placeholder="直填（只写 Keychain，不回显）" />
+
+              <div className="sg-model-list-head">
+                <div><h3>模型列表</h3><p>当前 Agent 默认使用 {selected.default_model || '未指定模型'}。</p></div>
+                <button className="sg-btn sg-btn--quiet" onClick={() => void syncModels()} disabled={syncing}><IconRefresh size={13} />{syncing ? '同步中…' : '同步模型'}</button>
               </div>
-              <div className="sg-field">
-                <label htmlFor="mp-cred">或凭据引用 ID</label>
-                <input id="mp-cred" className="sg-input" value={form.credentialRefId}
-                  onChange={(e) => setForm({ ...form, credentialRefId: e.target.value })}
-                  placeholder="cr_…（与 API Key 二选一）" disabled={!!form.apiKey.trim()} />
+              <div className="sg-model-list">
+                {selectedModels.length === 0 ? <div className="sg-empty">同步供应商后会在这里显示可用模型。</div> : selectedModels.map((model) => (
+                  <div className="sg-model-row" key={model}><span>{model}</span>{model === selected.default_model ? <span className="sg-chip">默认</span> : null}</div>
+                ))}
               </div>
-              <div className="sg-field">
-                <label htmlFor="mp-model">默认模型</label>
-                <input id="mp-model" className="sg-input" value={form.defaultModel}
-                  onChange={(e) => setForm({ ...form, defaultModel: e.target.value })}
-                  list="mp-model-options" />
-                <datalist id="mp-model-options">
-                  {(activePreset?.models ?? []).map((m) => <option key={m.id} value={m.id}>{m.note}</option>)}
-                </datalist>
-              </div>
+
+              {testResult ? (
+                <div className="sg-model-diagnostics">
+                  <button onClick={() => setShowDiagnostics((value) => !value)}>
+                    {showDiagnostics ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
+                    连接测试详情
+                    <StatusPill kind={testResult.status === 'ready' ? 'ready' : 'error'} label={testResult.status === 'ready' ? '全部通过' : '需要处理'} />
+                  </button>
+                  {showDiagnostics ? <div className="sg-model-diagnostic-list">{testResult.steps.map((step) => (
+                    <div key={step.name}>
+                      <span>{STEP_LABEL[step.name] ?? step.name}</span>
+                      <StatusPill kind={step.status === 'passed' ? 'ready' : step.status === 'skipped' ? 'readonly' : 'error'} label={step.status === 'passed' ? '通过' : step.status === 'skipped' ? '未检测' : '失败'} />
+                      <small>{step.errorCode ?? ''}</small>
+                    </div>
+                  ))}</div> : null}
+                </div>
+              ) : null}
+
+              {!selected.managed_source ? <div className="sg-model-danger-zone"><button className="sg-link-btn sg-link-btn--danger" onClick={() => void remove()}>删除此供应商</button></div> : null}
+            </>
+          ) : (
+            <div className="sg-model-welcome">
+              <h2>添加第一个模型</h2>
+              <p>配置完成并通过文本生成测试后，需求提交才会自动起草 PRD。</p>
+              <button className="sg-btn sg-btn--primary" onClick={() => setCreating(true)}><IconPlus size={14} />添加供应商</button>
             </div>
-            {activePreset ? (
-              <p className="sg-hint" style={{ margin: '0 0 12px' }}>
-                {activePreset.label} 推荐模型：{activePreset.models.map((m) => m.id).join('、')}
-              </p>
-            ) : null}
-            <div className="sg-row">
-              <button type="submit" className="sg-btn sg-btn--primary" disabled={!form.name.trim()}>
-                <IconPlus size={14} />创建
-              </button>
-              <button type="button" className="sg-btn" onClick={() => setCreating(false)}>取消</button>
-            </div>
-          </form>
-        </SettingsSection>
-      )}
+          )}
+        </section>
+      </div>
     </div>
+  );
+}
+
+function ProviderForm({ form, presets, activePreset, onForm, onPreset, onSubmit, onCancel }: {
+  form: typeof EMPTY_FORM;
+  presets: ModelPreset[];
+  activePreset?: ModelPreset;
+  onForm: (next: typeof EMPTY_FORM) => void;
+  onPreset: (id: string) => void;
+  onSubmit: (event: FormEvent) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <form className="sg-model-create" onSubmit={onSubmit}>
+      <div><h2>添加模型供应商</h2><p>选择预设会自动填入推荐端点和模型。</p></div>
+      <div className="sg-model-preset-row">
+        {presets.map((preset) => <button key={preset.id} type="button" className={form.presetId === preset.id ? 'is-active' : ''} onClick={() => onPreset(preset.id)}>{preset.label}</button>)}
+        <button type="button" className={form.presetId === 'custom' ? 'is-active' : ''} onClick={() => onPreset('custom')}>自定义</button>
+      </div>
+      <div className="sg-model-fields">
+        <label><span>名称 *</span><input value={form.name} onChange={(event) => onForm({ ...form, name: event.target.value })} placeholder="主力模型" /></label>
+        <label><span>Base URL *</span><input value={form.baseUrl} onChange={(event) => onForm({ ...form, baseUrl: event.target.value })} placeholder={activePreset?.baseUrl || 'https://api.example.com/v1'} /></label>
+        <label><span>API Key</span><input type="password" autoComplete="off" value={form.apiKey} onChange={(event) => onForm({ ...form, apiKey: event.target.value })} placeholder="只写入 Keychain，不回显" /></label>
+        <label><span>已有凭据引用</span><input value={form.credentialRefId} onChange={(event) => onForm({ ...form, credentialRefId: event.target.value })} placeholder="与 API Key 二选一" disabled={Boolean(form.apiKey.trim())} /></label>
+        <label><span>默认模型 *</span><input value={form.defaultModel} onChange={(event) => onForm({ ...form, defaultModel: event.target.value })} list="model-options" />
+          <datalist id="model-options">{(activePreset?.models ?? []).map((model) => <option key={model.id} value={model.id}>{model.note}</option>)}</datalist>
+        </label>
+      </div>
+      <div className="sg-row">
+        <button className="sg-btn sg-btn--primary" type="submit" disabled={!form.name.trim() || !form.baseUrl.trim() || !form.defaultModel.trim()}>添加并继续</button>
+        <button className="sg-btn" type="button" onClick={onCancel}>取消</button>
+      </div>
+    </form>
   );
 }

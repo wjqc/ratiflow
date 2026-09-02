@@ -5,6 +5,7 @@ pub mod docs;
 pub mod gate;
 pub mod progress;
 pub mod release;
+pub mod release_events;
 pub mod requirements;
 pub mod rollback;
 pub mod snapshot;

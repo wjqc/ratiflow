@@ -144,6 +144,13 @@ export default function AppShell() {
     setRoute({ page: 'home' });
   }, []);
 
+  const activateWorkspace = useCallback((project: Project) => {
+    setProjects((current) =>
+      current.some((item) => item.id === project.id) ? current : [...current, project],
+    );
+    setActiveProjectId(project.id);
+  }, []);
+
   const activeProject = useMemo(
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
@@ -180,7 +187,10 @@ export default function AppShell() {
         {route.page === 'new' && (
           <NewTaskPage
             projectId={route.projectId}
-            onCreated={(workItemId) => openTask(route.projectId, workItemId)}
+            projects={projects}
+            onCreated={(workItemId, createdProjectId) => openTask(createdProjectId, workItemId)}
+            onWorkspaceChanged={activateWorkspace}
+            onOpenRemote={() => navigate({ page: 'settings', section: 'ssh' })}
             onBack={() => navigate({ page: 'home' })}
           />
         )}

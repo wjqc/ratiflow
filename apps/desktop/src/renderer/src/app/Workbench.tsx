@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { rpc } from '../rpc/client';
+import { rpc, waitForRunTerminal } from '../rpc/client';
 import type { TimelineEvent } from '../rpc/client';
 import { gateLabel } from './ProjectSidebar';
 import { relativeTime } from '../lib/format';
@@ -26,6 +26,14 @@ import DocGatePanel, { EvaluateButton } from './DocGatePanel';
 import DevGatePanel from './DevGatePanel';
 import DeployGatePanel from './DeployGatePanel';
 import TracePanel from './TracePanel';
+import {
+  clearAutomaticPrd,
+  draftPrd,
+  finishPrdDraft,
+  friendlyAgentError,
+  readAutomaticPrd,
+  rememberAutomaticPrd,
+} from './prdDraft';
 
 /* ---------------- 类型：与 Rust 序列化结构一一对应 ---------------- */
 
@@ -82,12 +90,12 @@ const GATES = ['requirements', 'design', 'development', 'testing', 'deployment',
 type Gate = (typeof GATES)[number];
 
 const GATE_SUBS: Record<Gate, string> = {
-  requirements: 'Requirement',
-  design: 'Design',
-  development: 'Development',
-  testing: 'Testing',
-  deployment: 'Deployment',
-  verification: 'Verification',
+  requirements: '需求澄清与 PRD',
+  design: '产品与技术方案',
+  development: '编码实现与自测',
+  testing: '集成测试与质量验证',
+  deployment: '发布与环境准备',
+  verification: '验收与交付确认',
 };
 
 const GATE_STATE_LABELS: Record<string, string> = {
@@ -129,7 +137,9 @@ export function Workbench({
   projectName: string;
   workItemId: string;
   knowledgeCount: number;
-  onNavigate: (r: { page: 'home' } | { page: 'approvals' }) => void;
+  onNavigate: (
+    r: { page: 'home' } | { page: 'approvals' } | { page: 'settings'; section: 'models' },
+  ) => void;
 }) {
   const [workItem, setWorkItem] = useState<WorkItemDetail | null>(null);
   const [progress, setProgress] = useState<ProgressInfo | null>(null);
@@ -138,6 +148,8 @@ export function Workbench({
   const [evidences, setEvidences] = useState<EvidenceInfo[]>([]);
   const [error, setError] = useState('');
   const [view, setView] = useState<'timeline' | 'gate'>('timeline');
+  const [prdState, setPrdState] = useState<'idle' | 'drafting' | 'ready' | 'failed'>('idle');
+  const [prdMessage, setPrdMessage] = useState('');
 
   const loadAll = useCallback(async () => {
     try {
@@ -162,6 +174,40 @@ export function Workbench({
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  // 新建任务会立即启动 PRD Agent；工作台负责恢复运行、保存结果并打开需求关。
+  useEffect(() => {
+    const pending = readAutomaticPrd(workItemId);
+    if (!pending) return;
+    if (pending.state === 'failed' || !pending.runId) {
+      setPrdState('failed');
+      setPrdMessage(pending.error || '自动起草未能启动，请检查模型后重试。');
+      return;
+    }
+
+    let cancelled = false;
+    setPrdState('drafting');
+    setPrdMessage('需求已保存，Agent 正在结合项目知识库起草 PRD…');
+    void finishPrdDraft(workItemId, pending.runId)
+      .then(async () => {
+        if (cancelled) return;
+        clearAutomaticPrd(workItemId);
+        setPrdState('ready');
+        setPrdMessage('PRD 草稿已生成并保存，等待你的审阅。');
+        await loadAll();
+        setView('gate');
+      })
+      .catch((reason) => {
+        if (cancelled) return;
+        const message = friendlyAgentError(reason);
+        rememberAutomaticPrd(workItemId, { state: 'failed', error: message });
+        setPrdState('failed');
+        setPrdMessage(message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadAll, workItemId]);
 
   // F02 事件驱动刷新：sg:event 推送触发对账拉取；30s 轮询仅作断线降级。
   useEffect(() => {
@@ -220,6 +266,22 @@ export function Workbench({
 
           <div className="sg-workbench-scroll">
             {error && <div className="sg-banner sg-banner--error">{error}</div>}
+            {prdState !== 'idle' ? (
+              <div
+                className={`sg-banner ${prdState === 'failed' ? 'sg-banner--error' : 'sg-banner--info'}`}
+                role={prdState === 'failed' ? 'alert' : 'status'}
+              >
+                <span>{prdMessage}</span>
+                {prdState === 'failed' ? (
+                  <button
+                    className="sg-link-btn"
+                    onClick={() => onNavigate({ page: 'settings', section: 'models' })}
+                  >
+                    检查模型
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {progress?.blockedReason && (
               <div className="sg-banner sg-banner--warn">
                 <IconAlert size={14} />
@@ -241,7 +303,15 @@ export function Workbench({
             <Timeline events={events} />
           </div>
 
-          <Composer knowledgeCount={knowledgeCount} />
+          <Composer
+            workItemId={workItemId}
+            currentGate={currentGate}
+            requirementText={[workItem?.title, workItem?.description].filter(Boolean).join('\n')}
+            knowledgeCount={knowledgeCount}
+            onChanged={loadAll}
+            onOpenGate={() => setView('gate')}
+            onOpenModels={() => onNavigate({ page: 'settings', section: 'models' })}
+          />
         </div>
       ) : (
         <GateWorkspace
@@ -261,6 +331,7 @@ export function Workbench({
         workItem={workItem}
         stagesByGate={stagesByGate}
         currentGate={currentGate}
+        gateOpen={view === 'gate'}
         onOpenGate={() => setView('gate')}
       />
     </div>
@@ -369,10 +440,79 @@ function eventVisual(type: string): [string, ReactNode] {
 
 /* ---------------- 底部输入器 ---------------- */
 
-function Composer({ knowledgeCount }: { knowledgeCount: number }) {
+function Composer({
+  workItemId,
+  currentGate,
+  requirementText,
+  knowledgeCount,
+  onChanged,
+  onOpenGate,
+  onOpenModels,
+}: {
+  workItemId: string;
+  currentGate: Gate;
+  requirementText: string;
+  knowledgeCount: number;
+  onChanged: () => Promise<void>;
+  onOpenGate: () => void;
+  onOpenModels: () => void;
+}) {
   const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    const message = text.trim();
+    if (!message || busy) return;
+    setBusy(true);
+    setError('');
+    setNotice(currentGate === 'requirements' ? '正在根据补充说明起草 PRD…' : 'Agent 正在处理…');
+    try {
+      if (currentGate === 'requirements') {
+        await draftPrd(
+          workItemId,
+          `${requirementText}\n\n用户补充：\n${message}`,
+          `composer-prd-${workItemId}-${Date.now()}`,
+        );
+        setNotice('PRD 草稿已生成并保存，等待你的审阅。');
+        setText('');
+        await onChanged();
+        onOpenGate();
+      } else {
+        const started = await rpc<{ runId: string }>('stage.startActivity', {
+          workItemId,
+          gate: currentGate,
+          goal: message,
+          toolAllowlist: ['read_file', 'search_knowledge'],
+          idempotencyKey: `composer-${workItemId}-${currentGate}-${Date.now()}`,
+        });
+        const run = await waitForRunTerminal(started.runId);
+        if (run.status !== 'completed_execution') {
+          throw new Error(`Agent 状态 ${run.status}：${run.result}`);
+        }
+        setNotice('Agent 已完成处理。请进入当前关查看并确认产出。');
+        setText('');
+        await onChanged();
+        onOpenGate();
+      }
+    } catch (reason) {
+      setNotice('');
+      setError(friendlyAgentError(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="sg-composer">
+      {error ? (
+        <div className="sg-banner sg-banner--error" role="alert">
+          <span>{error}</span>
+          <button className="sg-link-btn" onClick={onOpenModels}>检查模型</button>
+        </div>
+      ) : null}
+      {notice ? <div className="sg-composer-status" role="status">{notice}</div> : null}
       <div className="sg-composer-chips">
         <span className="sg-composer-chip">
           <IconBook size={12} />
@@ -386,6 +526,12 @@ function Composer({ knowledgeCount }: { knowledgeCount: number }) {
           rows={2}
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              void submit();
+            }
+          }}
           aria-label="补充说明"
         />
         <div className="sg-composer-tools">
@@ -406,9 +552,14 @@ function Composer({ knowledgeCount }: { knowledgeCount: number }) {
               <IconBook size={15} />
             </button>
           </div>
-          <button className="sg-btn sg-btn--primary sg-btn--sm" title="发送（规划中）" disabled>
+          <button
+            className="sg-btn sg-btn--primary sg-btn--sm"
+            title={busy ? '处理中…' : '发送（⌘↵）'}
+            disabled={busy || text.trim() === ''}
+            onClick={() => void submit()}
+          >
             <IconSend size={13} />
-            发送
+            {busy ? '处理中…' : '发送'}
           </button>
         </div>
       </div>
@@ -423,12 +574,14 @@ function GoalPanel({
   workItem,
   stagesByGate,
   currentGate,
+  gateOpen,
   onOpenGate,
 }: {
   progress: ProgressInfo | null;
   workItem: WorkItemDetail | null;
   stagesByGate: Map<string, StageInfo>;
   currentGate: Gate;
+  gateOpen: boolean;
   onOpenGate: () => void;
 }) {
   const passedCount = GATES.filter((g) => stagesByGate.get(g)?.state === 'passed').length;
@@ -471,6 +624,10 @@ function GoalPanel({
           <div className="sg-banner sg-banner--ok">
             <IconCheck size={14} />
             <span>六关全部通过，本任务可进入归档。</span>
+          </div>
+        ) : gateOpen ? (
+          <div className="sg-inspector-current">
+            正在查看{gateLabel(currentGate)}，完成草稿与检查后再提交放行。
           </div>
         ) : (
           <button className="sg-btn sg-btn--primary" style={{ width: '100%' }} onClick={onOpenGate}>

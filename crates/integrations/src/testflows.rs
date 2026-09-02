@@ -154,14 +154,23 @@ pub fn model_test(
         let resp = ureq::get(&url)
             .set("Authorization", &format!("Bearer {key}"))
             .timeout(std::time::Duration::from_secs(10))
-            .call()
-            .map_err(|e| map_ureq(&e.to_string()))?;
-        if resp.status() == 401 {
-            return Err("CREDENTIAL_AUTH_FAILED | {\"status\": 401} | Key 无效".into());
-        }
-        if resp.status() == 429 {
-            return Err("MODEL_RATE_LIMITED | {\"status\": 429} | 限流".into());
-        }
+            .call();
+        let resp = match resp {
+            Ok(response) => response,
+            Err(ureq::Error::Status(401 | 403, _)) => {
+                return Err("CREDENTIAL_AUTH_FAILED | {\"status\": 401} | Key 无效".into())
+            }
+            Err(ureq::Error::Status(429, _)) => {
+                return Err("MODEL_RATE_LIMITED | {\"status\": 429} | 限流".into())
+            }
+            Err(ureq::Error::Status(code, _)) => {
+                return Err(format!(
+                    "MODEL_UNAVAILABLE | {{\"status\": {code}}} | 模型列表不可用"
+                ))
+            }
+            Err(e) => return Err(map_ureq(&e.to_string())),
+        };
+        let _ = resp;
         Ok(Value::Null)
     }));
     steps.push(step("generation", || {
@@ -169,10 +178,16 @@ pub fn model_test(
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
         let body = json!({"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1});
         let resp = ureq::post(&url).set("Authorization", &format!("Bearer {key}"))
-            .timeout(std::time::Duration::from_secs(30)).send_json(body)
-            .map_err(|e| map_ureq(&e.to_string()))?;
-        if resp.status() >= 400 {
-            return Err(format!("MODEL_UNAVAILABLE | {{\"status\": {}}} | 生成失败", resp.status()));
+            .timeout(std::time::Duration::from_secs(30)).send_json(body);
+        match resp {
+            Ok(_) => {}
+            Err(ureq::Error::Status(429, _)) => {
+                return Err("MODEL_RATE_LIMITED | {\"status\": 429} | 限流".into())
+            }
+            Err(ureq::Error::Status(code, _)) => {
+                return Err(format!("MODEL_UNAVAILABLE | {{\"status\": {code}}} | 生成失败"))
+            }
+            Err(e) => return Err(map_ureq(&e.to_string())),
         }
         Ok(Value::Null)
     }));
@@ -197,7 +212,17 @@ pub fn model_test(
             s.status = "skipped".into();
         }
     }
-    report(fixed, false)
+    let mut result = report(fixed, false);
+    // tool / vision 是可选能力；文本生成三步通过即可供 PRD 与普通 Agent 使用。
+    if result
+        .steps
+        .iter()
+        .filter(|step| matches!(step.name.as_str(), "resolve" | "auth" | "generation"))
+        .all(|step| step.status == "passed")
+    {
+        result.status = "ready".into();
+    }
+    result
 }
 
 fn map_ureq(e: &str) -> String {
@@ -218,7 +243,11 @@ fn resolve_host(host: &str) -> Result<(), String> {
     if host.parse::<std::net::IpAddr>().is_ok() {
         return Ok(());
     }
-    host.to_socket_addrs()
+    // `ToSocketAddrs for &str` expects `host:port`; passing a bare hostname made
+    // every valid HTTPS provider look like a DNS failure while later HTTP steps
+    // could still pass. Use the default TLS port for connectivity resolution.
+    (host, 443)
+        .to_socket_addrs()
         .map(|_| ())
         .map_err(|_| "TLS_ERROR | DNS 解析失败".to_string())
 }
@@ -415,6 +444,11 @@ mod tests {
             url_host("https://gitlab.test").as_deref(),
             Some("gitlab.test")
         );
+    }
+
+    #[test]
+    fn localhost_resolves_without_explicit_port() {
+        assert!(resolve_host("localhost").is_ok());
     }
 
     #[test]

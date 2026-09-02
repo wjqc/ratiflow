@@ -24,8 +24,15 @@ pub enum Mode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicationWitness {
-    Verified { event_id: String, ref_name: String, commit_sha: String },
-    Revoked { event_id: String, reason: String },
+    Verified {
+        event_id: String,
+        ref_name: String,
+        commit_sha: String,
+    },
+    Revoked {
+        event_id: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -89,11 +96,20 @@ pub struct FactProjection {
     pub invalid_resolutions: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Projection {
     /// 完整性校验失败：整体 fail-closed，无任何可用投影（C2）。
     Failed(crate::Error),
     Facts(FactProjection),
+}
+
+/// 便捷装配：装载事件 → 校验 → 事实投影。完整性失败时整体 `Projection::Failed`
+/// （fail-closed，不产半投影，C2）。
+pub fn project(loaded: Vec<(String, Envelope)>) -> Projection {
+    match DagView::build(loaded) {
+        Ok(view) => fact_projection(&view),
+        Err(e) => Projection::Failed(e),
+    }
 }
 
 /// 事实投影：两遍法——先复算校验 ForkResolved 闭包，再按因果序应用未被剔除事件。
@@ -103,26 +119,51 @@ pub fn fact_projection(view: &DagView) -> Projection {
 
     // 第一遍：闭包复算校验。
     let mut superseded_events: BTreeSet<String> = BTreeSet::new();
+    let mut superseded_attempts: BTreeSet<String> = BTreeSet::new();
     let mut invalid_resolutions: Vec<String> = Vec::new();
     for env in &order {
-        let Payload::ForkResolved { conflicting_heads, winner, superseded_descendants, .. } =
-            &env.payload
+        let Payload::ForkResolved {
+            conflicting_heads,
+            winner,
+            superseded_descendants,
+            ..
+        } = &env.payload
         else {
             continue;
         };
-        match validate_resolution(view, conflicting_heads, winner, superseded_descendants, &env.event_id) {
-            Ok(losers) => superseded_events.extend(losers),
+        match validate_resolution(
+            view,
+            conflicting_heads,
+            winner,
+            superseded_descendants,
+            &env.event_id,
+        ) {
+            Ok(losers) => {
+                for id in &losers {
+                    if let Some(loser) = view.events.get(id) {
+                        superseded_attempts.insert(loser.attempt_id.clone());
+                    }
+                }
+                superseded_events.extend(losers);
+            }
             Err(()) => invalid_resolutions.push(env.event_id.clone()),
         }
     }
 
     // 未被有效裁决消解的分叉头 → 波及其分叉双侧 attempt（C6：forked/blocked）。
+    // 裁决事件给出的是冲突 head 集；被消解的是它们的共同 parent 分叉头。
     let mut resolved_heads: BTreeSet<&str> = BTreeSet::new();
     for env in &order {
-        if let Payload::ForkResolved { conflicting_heads, .. } = &env.payload {
-            if !invalid_resolutions.contains(&env.event_id) {
-                for h in conflicting_heads {
-                    resolved_heads.insert(h.as_str());
+        if let Payload::ForkResolved {
+            conflicting_heads, ..
+        } = &env.payload
+        {
+            if invalid_resolutions.contains(&env.event_id) {
+                continue;
+            }
+            if let Some(h) = conflicting_heads.first() {
+                if let Some(e) = view.events.get(h) {
+                    resolved_heads.insert(e.parent_head.as_str());
                 }
             }
         }
@@ -143,6 +184,7 @@ pub fn fact_projection(view: &DagView) -> Projection {
 
     // 第二遍：应用未被剔除事件。
     let mut proj = FactProjection {
+        superseded_attempts,
         forked_blocked_attempts: forked_blocked,
         ..Default::default()
     };
@@ -182,7 +224,10 @@ fn validate_resolution(
         .get(parent)
         .map(|v| v.iter().map(|s| s.as_str()).collect())
         .unwrap_or_default();
-    if conflicting_heads.iter().any(|h| !actual_children.contains(h.as_str())) {
+    if conflicting_heads
+        .iter()
+        .any(|h| !actual_children.contains(h.as_str()))
+    {
         return Err(());
     }
     let losers: Vec<String> = conflicting_heads
@@ -207,11 +252,13 @@ fn apply(proj: &mut FactProjection, env: &Envelope) {
     }
     match &env.payload {
         Payload::AttemptStarted { gate } => {
-            proj.attempts.entry(env.attempt_id.clone()).or_insert_with(|| AttemptFact {
-                gate: gate.clone(),
-                state: "running".into(),
-                transitions: Vec::new(),
-            });
+            proj.attempts
+                .entry(env.attempt_id.clone())
+                .or_insert_with(|| AttemptFact {
+                    gate: gate.clone(),
+                    state: "running".into(),
+                    transitions: Vec::new(),
+                });
         }
         Payload::StageTransition { to, .. } => {
             if let Some(a) = proj.attempts.get_mut(&env.attempt_id) {
@@ -219,7 +266,13 @@ fn apply(proj: &mut FactProjection, env: &Envelope) {
                 a.transitions.push(to.clone());
             }
         }
-        Payload::ReleaseDecided { digest, decision, reviewer, trust, .. } => {
+        Payload::ReleaseDecided {
+            digest,
+            decision,
+            reviewer,
+            trust,
+            ..
+        } => {
             proj.release_claims.push(ReleaseClaim {
                 event_id: env.event_id.clone(),
                 attempt_id: env.attempt_id.clone(),
@@ -296,7 +349,12 @@ mod tests {
     }
 
     fn started(num: u128, parent: &str, attempt: &str) -> Envelope {
-        env(num, parent, attempt, Payload::AttemptStarted { gate: "dev".into() })
+        env(
+            num,
+            parent,
+            attempt,
+            Payload::AttemptStarted { gate: "dev".into() },
+        )
     }
 
     fn decided(
@@ -349,34 +407,41 @@ mod tests {
         let d = decided(2, &a.event_id, "at1", TrustLevel::Local, None);
         let p1 = fact_projection(&view(vec![a.clone(), d.clone()]));
         let p2 = fact_projection(&view(vec![d, a]));
-        let s1 = serde_json::to_string(&p1).unwrap();
-        let s2 = serde_json::to_string(&p2).unwrap();
+        let Projection::Facts(f1) = p1 else { panic!() };
+        let Projection::Facts(f2) = p2 else { panic!() };
+        let s1 = serde_json::to_string(&f1).unwrap();
+        let s2 = serde_json::to_string(&f2).unwrap();
         assert_eq!(s1, s2, "任意装载顺序投影逐字节一致（C7-1 判据）");
-        let Projection::Facts(f) = p1 else { panic!() };
-        assert_eq!(f.release_claims[0].status, "release_decided_claimed");
+        assert_eq!(f1.release_claims[0].status, "release_decided_claimed");
     }
 
     #[test]
     fn audit_trust_never_effective_anywhere() {
         let a = started(1, ROOT_PARENT, "at1");
         let d = decided(2, &a.event_id, "at1", TrustLevel::Audit, None);
-        let Projection::Facts(f) = fact_projection(&view(vec![a, d])) else { panic!() };
-        assert!(!effective_passed(Mode::LocalOnly, &f, &f.release_claims[0].event_id, &[]).unwrap());
+        let Projection::Facts(f) = fact_projection(&view(vec![a, d.clone()])) else {
+            panic!()
+        };
+        assert!(!effective_passed(Mode::LocalOnly, &f, &d, &[]).unwrap());
+        assert!(
+            !effective_passed(Mode::RepositoryBacked, &f, &d, &[verified(&d.event_id)]).unwrap()
+        );
     }
 
     #[test]
     fn effective_local_only_requires_local_trust() {
         let a = started(1, ROOT_PARENT, "at1");
         let d = decided(2, &a.event_id, "at1", TrustLevel::Local, None);
-        let Projection::Facts(f) = fact_projection(&view(vec![a, d])) else { panic!() };
-        assert!(effective_passed(Mode::LocalOnly, &f, &f.release_claims[0].event_id, &[]).unwrap());
+        let Projection::Facts(f) = fact_projection(&view(vec![a, d.clone()])) else {
+            panic!()
+        };
+        assert!(effective_passed(Mode::LocalOnly, &f, &d, &[]).unwrap());
     }
 
     #[test]
     fn effective_repo_backed_requires_published_and_verified_proof() {
         let a = started(1, ROOT_PARENT, "at1");
-        let proof = gate_proof("SELF", TrustLevel::Gate, true);
-        let mut d = decided(2, &a.event_id, "at1", TrustLevel::Gate, Some(proof));
+        let mut d = decided(2, &a.event_id, "at1", TrustLevel::Gate, None);
         d.payload = Payload::ReleaseDecided {
             digest: "d".into(),
             decision: Decision::Approved,
@@ -384,7 +449,9 @@ mod tests {
             trust: TrustLevel::Gate,
             proof: Some(gate_proof(&d.event_id, TrustLevel::Gate, true)),
         };
-        let Projection::Facts(f) = fact_projection(&view(vec![a, d.clone()])) else { panic!() };
+        let Projection::Facts(f) = fact_projection(&view(vec![a, d.clone()])) else {
+            panic!()
+        };
         // 断网/无见证 → Unknown → fail-closed（C7-17）
         assert!(!effective_passed(Mode::RepositoryBacked, &f, &d, &[]).unwrap());
         // 已验证见证 → effective
@@ -411,7 +478,9 @@ mod tests {
             trust: TrustLevel::Gate,
             proof: Some(gate_proof(&d.event_id, TrustLevel::Gate, false)),
         };
-        let Projection::Facts(f) = fact_projection(&view(vec![a, d.clone()])) else { panic!() };
+        let Projection::Facts(f) = fact_projection(&view(vec![a, d.clone()])) else {
+            panic!()
+        };
         assert!(
             !effective_passed(Mode::RepositoryBacked, &f, &d, &w_gen(&d.event_id)).unwrap(),
             "verified=false 不可采信（C7-11）"
@@ -425,7 +494,9 @@ mod tests {
             TrustLevel::Gate,
             Some(gate_proof("OTHER", TrustLevel::Gate, true)),
         );
-        let Projection::Facts(f2) = fact_projection(&view(vec![a2, d2.clone()])) else { panic!() };
+        let Projection::Facts(f2) = fact_projection(&view(vec![a2, d2.clone()])) else {
+            panic!()
+        };
         assert!(
             !effective_passed(Mode::RepositoryBacked, &f2, &d2, &w_gen(&d2.event_id)).unwrap(),
             "证明未绑定该事件 → 不生效"
@@ -436,8 +507,12 @@ mod tests {
     fn local_trust_not_valid_in_repository_backed() {
         let a = started(1, ROOT_PARENT, "at1");
         let d = decided(2, &a.event_id, "at1", TrustLevel::Local, None);
-        let Projection::Facts(f) = fact_projection(&view(vec![a, d.clone()])) else { panic!() };
-        assert!(!effective_passed(Mode::RepositoryBacked, &f, &d, &[verified(&d.event_id)]).unwrap());
+        let Projection::Facts(f) = fact_projection(&view(vec![a, d.clone()])) else {
+            panic!()
+        };
+        assert!(
+            !effective_passed(Mode::RepositoryBacked, &f, &d, &[verified(&d.event_id)]).unwrap()
+        );
     }
 
     #[test]
@@ -457,11 +532,17 @@ mod tests {
                 reason: "B 基线漂移".into(),
             },
         );
-        let Projection::Facts(f) = fact_projection(&view(vec![base, b1, b2.clone(), d1, res])) else { panic!() };
+        let Projection::Facts(f) = fact_projection(&view(vec![base, b1, b2.clone(), d1, res]))
+        else {
+            panic!()
+        };
         assert!(f.superseded_attempts.contains("atB"), "败方分支被剔除");
         assert!(f.attempts.contains_key("atA"));
         assert!(f.invalid_resolutions.is_empty());
-        assert!(!f.forked_blocked_attempts.contains("atA"), "有效裁决后不再 blocked");
+        assert!(
+            !f.forked_blocked_attempts.contains("atA"),
+            "有效裁决后不再 blocked"
+        );
     }
 
     #[test]
@@ -488,9 +569,16 @@ mod tests {
         else {
             panic!();
         };
-        assert_eq!(f.invalid_resolutions.len(), 1, "伪造闭包 → 裁决无效（C7-19）");
+        assert_eq!(
+            f.invalid_resolutions.len(),
+            1,
+            "伪造闭包 → 裁决无效（C7-19）"
+        );
         assert!(f.attempts.contains_key("atC"), "败方真实后代不被静默删除");
-        assert!(f.release_claims.iter().any(|c| c.event_id == d1.event_id), "胜方分支事实不丢");
+        assert!(
+            f.release_claims.iter().any(|c| c.event_id == d1.event_id),
+            "胜方分支事实不丢"
+        );
         assert!(
             f.forked_blocked_attempts.contains("atA") && f.forked_blocked_attempts.contains("atB"),
             "未裁决分叉保持 blocked"
@@ -513,14 +601,24 @@ mod tests {
                 reason: "越界 winner".into(),
             },
         );
-        let Projection::Facts(f) = fact_projection(&view(vec![base, b1, b2, res])) else { panic!() };
+        let Projection::Facts(f) = fact_projection(&view(vec![base, b1, b2, res])) else {
+            panic!()
+        };
         assert_eq!(f.invalid_resolutions.len(), 1);
     }
 
     #[test]
     fn integrity_failure_fails_closed_whole_projection() {
         let a = started(1, "GHOST", "at1"); // 未知 parent
-        let p = fact_projection(&view(vec![a]));
-        assert!(matches!(p, Projection::Failed(_)));
+        let p = project(
+            vec![a]
+                .into_iter()
+                .map(|e| (e.event_id.clone(), e))
+                .collect(),
+        );
+        assert!(
+            matches!(p, Projection::Failed(_)),
+            "完整性失败 → 整体 fail-closed，不产半投影"
+        );
     }
 }

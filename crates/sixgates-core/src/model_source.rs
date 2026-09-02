@@ -1,5 +1,6 @@
 //! Profile 路由模型提供者：Agent Run 运行时从设置域 model_profiles 解析供应商。
-//! 优先级：env 装配（state.rs 短路）→ DB Profile（路由主档 → 最早可用档案）→ fake 兜底。
+//! 优先级：env 装配（state.rs 短路）→ DB Profile（路由主档 → 最早可用档案）→
+//! 显式 E2E fake；普通运行态缺少可用 Profile 时返回可操作错误，不伪装成脚本耗尽。
 //! API Key 每次调用经 Keychain reveal，不落内存缓存之外的任何存储。
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ pub struct ProfileModel {
     credentials: Arc<dyn CredentialStore>,
     env_key: Option<String>,
     fallback: Box<dyn ModelProvider>,
+    fallback_enabled: bool,
 }
 
 impl ProfileModel {
@@ -34,6 +36,7 @@ impl ProfileModel {
                 .ok()
                 .filter(|k| !k.is_empty()),
             fallback,
+            fallback_enabled: std::env::var_os("SIXGATES_FAKE_MODEL_SCRIPT").is_some(),
         }
     }
 
@@ -53,35 +56,46 @@ impl ProfileModel {
                     .find(|id| !id.is_empty())
             })
         });
-        let profile = items
+        let resolve_profile = |profile: &profiles::ModelProfile| {
+            if !profiles::kind_runtime_usable(&profile.provider_kind) {
+                return None;
+            }
+            let base_url = profiles::resolve_base_url(&profile.provider_kind, &profile.base_url);
+            if base_url.is_empty() {
+                return None;
+            }
+            let api_key = match &profile.credential_ref_id {
+                Some(rid) => {
+                    profiles::reveal_for(&self.store, self.credentials.as_ref(), rid).ok()?
+                }
+                None => self.env_key.clone()?,
+            };
+            if api_key.trim().is_empty() {
+                return None;
+            }
+            Some(Resolved {
+                base_url,
+                model: profile.default_model.clone(),
+                api_key,
+            })
+        };
+
+        if let Some(profile) = items
             .iter()
             .find(|p| Some(p.id.as_str()) == primary.as_deref())
-            .or_else(|| {
-                items.iter().find(|p| {
-                    p.managed_source.is_none()
-                        && profiles::kind_runtime_usable(&p.provider_kind)
-                        && p.status != "error"
-                })
-            })?;
-        if !profiles::kind_runtime_usable(&profile.provider_kind) {
-            return None;
+        {
+            if let Some(resolved) = resolve_profile(profile) {
+                return Some(resolved);
+            }
         }
-        let base_url = profiles::resolve_base_url(&profile.provider_kind, &profile.base_url);
-        if base_url.is_empty() {
-            return None;
-        }
-        let api_key = match &profile.credential_ref_id {
-            Some(rid) => profiles::reveal_for(&self.store, self.credentials.as_ref(), rid).ok()?,
-            None => self.env_key.clone()?,
-        };
-        if api_key.trim().is_empty() {
-            return None;
-        }
-        Some(Resolved {
-            base_url,
-            model: profile.default_model.clone(),
-            api_key,
-        })
+
+        // `status=error` is the latest connection-test result, not a disable
+        // switch. Keep attempting the configured endpoint so the Agent reports
+        // the provider's real error and a user can recover without a core restart.
+        items
+            .iter()
+            .filter(|p| p.managed_source.is_none())
+            .find_map(resolve_profile)
     }
 
     /// 解析成功 → 构建 OpenAI 兼容委托；失败 → 走 fake 兜底。
@@ -105,14 +119,20 @@ impl ModelProvider for ProfileModel {
     fn health_check(&self) -> Result<(), String> {
         match self.delegate() {
             Ok(http) => http.health_check(),
-            Err(()) => self.fallback.health_check(),
+            Err(()) if self.fallback_enabled => self.fallback.health_check(),
+            Err(()) => {
+                Err("model_unavailable: 未找到可用模型，请到“设置 → 模型”完成连接测试".into())
+            }
         }
     }
 
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, String> {
         match self.delegate() {
             Ok(http) => http.complete(req),
-            Err(()) => self.fallback.complete(req),
+            Err(()) if self.fallback_enabled => self.fallback.complete(req),
+            Err(()) => {
+                Err("model_unavailable: 未找到可用模型，请到“设置 → 模型”完成连接测试".into())
+            }
         }
     }
 }

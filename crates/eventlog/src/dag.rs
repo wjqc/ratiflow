@@ -6,9 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Envelope, Error, ROOT_PARENT, is_ulid};
+use crate::{is_ulid, Envelope, Error, ROOT_PARENT};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DagError {
     #[error("duplicate_event_id: {0}")]
     DuplicateEventId(String),
@@ -56,11 +56,9 @@ impl DagView {
                 continue;
             }
             if !ids.contains(&env.parent_head) {
-                return Err(DagError::UnknownParent(
-                    env.event_id.clone(),
-                    env.parent_head.clone(),
-                )
-                .into());
+                return Err(
+                    DagError::UnknownParent(env.event_id.clone(), env.parent_head.clone()).into(),
+                );
             }
             view.children
                 .entry(env.parent_head.clone())
@@ -145,7 +143,13 @@ mod tests {
     use crate::Payload;
 
     fn env(id_num: u128, parent: &str, attempt: &str) -> Envelope {
-        let mut e = Envelope::new("wi", attempt, parent, Payload::AttemptStarted { gate: "dev".into() }, "t");
+        let mut e = Envelope::new(
+            "wi",
+            attempt,
+            parent,
+            Payload::AttemptStarted { gate: "dev".into() },
+            "t",
+        );
         e.event_id = crate::encode_ulid(id_num);
         e
     }
@@ -160,7 +164,11 @@ mod tests {
         let a = env(1, ROOT_PARENT, "at1");
         let b = env(2, &a.event_id, "at1");
         let view = DagView::build(loaded(vec![b.clone(), a.clone()])).unwrap();
-        let order: Vec<&str> = view.causal_order().iter().map(|e| e.event_id.as_str()).collect();
+        let order: Vec<&str> = view
+            .causal_order()
+            .iter()
+            .map(|e| e.event_id.as_str())
+            .collect();
         assert_eq!(order, vec![a.event_id.as_str(), b.event_id.as_str()]);
     }
 
@@ -169,8 +177,12 @@ mod tests {
         let p = env(1, ROOT_PARENT, "at1");
         let c2 = env(20, &p.event_id, "at2"); // 字典序更大
         let c1 = env(10, &p.event_id, "at3");
-        let view = DagView::build(loaded(vec![c2, p.clone(), c1.clone()])).unwrap();
-        let order: Vec<&str> = view.causal_order().iter().map(|e| e.event_id.as_str()).collect();
+        let view = DagView::build(loaded(vec![c2.clone(), p.clone(), c1.clone()])).unwrap();
+        let order: Vec<&str> = view
+            .causal_order()
+            .iter()
+            .map(|e| e.event_id.as_str())
+            .collect();
         assert_eq!(order.len(), 3);
         assert_eq!(order[0], p.event_id);
         assert_eq!(order[1], c1.event_id, "同层并列按 eventId 字典序");

@@ -1038,7 +1038,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(result)
         }
         "gate.decideRelease" => {
-            let result = sg_workitem::release::decide_release(
+            let mut result = sg_workitem::release::decide_release(
                 store,
                 &str_param(params, "approvalId")?,
                 &str_param(params, "decision")?,
@@ -1056,6 +1056,38 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 json!({}),
             )
             .map_err(store_err)?;
+            // ADR-031 C2：放行成功 → 镜像 ReleaseDecided 事件（事件权威，DB 为投影）。
+            // 事件写入失败不回滚已成的放行，但如实记审计并在响应标注（事件先行的
+            // 严格顺序属投影化改造里程碑，见 ADR-031 实施状态）。
+            match sg_workitem::release_events::mirror_release_decided(
+                store,
+                result["attempt"]["workitem_id"]
+                    .as_str()
+                    .unwrap_or_default(),
+                result["attempt"]["gate"].as_str().unwrap_or_default(),
+                result["attempt"]["id"].as_str().unwrap_or_default(),
+                result["release_digest"].as_str().unwrap_or_default(),
+                &str_param(params, "decision")?,
+                &str_param(params, "decidedBy")?,
+            ) {
+                Ok(Some(event_id)) => {
+                    result["releaseEventId"] = json!(event_id);
+                }
+                Ok(None) => {
+                    result["releaseEventId"] = json!(null);
+                }
+                Err(e) => {
+                    let _ = sg_store::audit::append(
+                        store,
+                        "system",
+                        "gate.release.event_mirror_failed",
+                        "approval",
+                        &str_param(params, "approvalId")?,
+                        json!({ "error": e.to_string() }),
+                    );
+                    result["releaseEventMirrorError"] = json!(e.to_string());
+                }
+            }
             Ok(result)
         }
         "gate.getRelease" => {

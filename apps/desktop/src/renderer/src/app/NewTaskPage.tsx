@@ -1,13 +1,23 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { rpc, rpcErrorMessage } from '../rpc/client';
 import { IconDoc, IconImage, IconIssue, IconSend, IconText } from '../components/Icons';
+import {
+  friendlyAgentError,
+  rememberAutomaticPrd,
+  startPrdDraft,
+} from './prdDraft';
+import { WorkspacePicker } from './WorkspacePicker';
+import type { Project } from './ProjectSidebar';
 
 type Mode = 'text' | 'document' | 'issue' | 'image';
 
 interface Props {
   projectId: string;
-  onCreated: (workItemId: string) => void;
+  projects: Project[];
+  onCreated: (workItemId: string, projectId: string) => void;
+  onWorkspaceChanged: (project: Project) => void;
+  onOpenRemote: () => void;
   onBack: () => void;
 }
 
@@ -36,7 +46,14 @@ const GATE_FLOW: Array<{ name: string; sub: string }> = [
 
 // 统一输入器：文字 / 本地文档 / GitLab Issue / 图片 四种来源（规范 §4.2）。
 // 组件不推断上传成功；状态以服务端返回为准。
-export default function NewTaskPage({ projectId, onCreated }: Props) {
+export default function NewTaskPage({
+  projectId,
+  projects,
+  onCreated,
+  onWorkspaceChanged,
+  onOpenRemote,
+}: Props) {
+  const [workspaceId, setWorkspaceId] = useState(projectId);
   const [mode, setMode] = useState<Mode>('text');
   const [description, setDescription] = useState('');
   const [file, setFile] = useState<SelectedFile | null>(null);
@@ -44,6 +61,8 @@ export default function NewTaskPage({ projectId, onCreated }: Props) {
   const [issueIid, setIssueIid] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => setWorkspaceId(projectId), [projectId]);
 
   // 标题取需求描述首行（原型只有一个大输入框）。
   const deriveTitle = (text: string): string => {
@@ -61,45 +80,77 @@ export default function NewTaskPage({ projectId, onCreated }: Props) {
           throw new Error('请先描述你的需求');
         }
         const wi = await rpc<{ id: string }>('workitem.create', {
-          projectId, title, description: description.trim(),
+          projectId: workspaceId, title, description: description.trim(),
         });
-        onCreated(wi.id);
+        await openWithAutomaticPrd(wi.id, description.trim());
       } else if (mode === 'document') {
         if (!file?.content) {
           throw new Error('请先选择文档');
         }
         const wi = await rpc<{ id: string }>('workitem.importDocument', {
-          projectId, filename: file.filename, content: file.content,
+          projectId: workspaceId, filename: file.filename, content: file.content,
         });
-        onCreated(wi.id);
+        await openWithAutomaticPrd(wi.id);
       } else if (mode === 'issue') {
         if (!gitlabProjectId.trim() || !issueIid.trim()) {
           throw new Error('GitLab 项目 ID 与 Issue IID 必填');
         }
         const wi = await rpc<{ id: string }>('workitem.importIssue', {
-          projectId, gitlabProjectId: gitlabProjectId.trim(), issueIid: issueIid.trim(),
+          projectId: workspaceId, gitlabProjectId: gitlabProjectId.trim(), issueIid: issueIid.trim(),
         });
-        onCreated(wi.id);
+        await openWithAutomaticPrd(wi.id, description.trim());
       } else {
         if (!file) {
           throw new Error('请先选择图片');
         }
         // 图片：先创建任务，再作为附件导入（多模态解析由核心标记状态）。
         const wi = await rpc<{ id: string }>('workitem.create', {
-          projectId,
+          projectId: workspaceId,
           title: deriveTitle(description) || file.filename,
           description: description.trim(),
         });
         await rpc('attachment.import', {
           workItemId: wi.id, filename: file.filename, contentBase64: file.contentBase64,
         });
-        onCreated(wi.id);
+        await openWithAutomaticPrd(wi.id, description.trim());
       }
     } catch (reason) {
       setError(rpcErrorMessage(reason));
     } finally {
       setBusy(false);
     }
+  };
+
+  const openWithAutomaticPrd = async (workItemId: string, suppliedText = '') => {
+    let requirementText = suppliedText;
+    if (!requirementText) {
+      try {
+        const detail = await rpc<{ workItem: { title: string; description: string } }>(
+          'workitem.get',
+          { workItemId },
+        );
+        requirementText = [detail.workItem.title, detail.workItem.description]
+          .filter(Boolean)
+          .join('\n');
+      } catch {
+        // WorkItem 已创建，自动起草仍可仅依赖其需求修订与项目知识库。
+      }
+    }
+
+    try {
+      const runId = await startPrdDraft(
+        workItemId,
+        requirementText,
+        `auto-prd-${workItemId}`,
+      );
+      rememberAutomaticPrd(workItemId, { state: 'running', runId });
+    } catch (reason) {
+      rememberAutomaticPrd(workItemId, {
+        state: 'failed',
+        error: friendlyAgentError(reason),
+      });
+    }
+    onCreated(workItemId, workspaceId);
   };
 
   const pickFile = async () => {
@@ -123,7 +174,25 @@ export default function NewTaskPage({ projectId, onCreated }: Props) {
       <div className="sg-scroll">
         <div className="sg-nt-wrap">
           <h2 className="sg-hero-title">从需求开始，让 Agent 逐关推进</h2>
-          <p className="sg-hero-sub">基于你选择的项目知识库，Agent 将按流程逐关完成交付。</p>
+          <p className="sg-hero-sub">提交后会自动创建需求版本并起草 PRD，你只需要审阅和确认。</p>
+
+          <div className="sg-nt-context-row">
+            <span>工作区</span>
+            <WorkspacePicker
+              projects={projects}
+              projectId={workspaceId}
+              onSelect={(project) => {
+                setWorkspaceId(project.id);
+                onWorkspaceChanged(project);
+              }}
+              onCreated={(project) => {
+                setWorkspaceId(project.id);
+                onWorkspaceChanged(project);
+              }}
+              onRemote={onOpenRemote}
+            />
+            <span className="sg-muted">PRD 将结合此工作区的代码与知识库起草</span>
+          </div>
 
           <div className="sg-nt-card">
             <textarea
@@ -233,68 +302,9 @@ export default function NewTaskPage({ projectId, onCreated }: Props) {
             ))}
           </div>
 
-          <div className="sg-nt-flow-label">更多输入方式</div>
-          <div className="sg-nt-alt-grid">
-            <AltCard
-              label="文档"
-              active={mode === 'document'}
-              onClick={() => setMode('document')}
-              icon={<IconDoc size={18} />}
-              body={mode === 'document' && file ? file.filename : '选择本地文档'}
-              hint={mode === 'document' && file ? formatSize(file.size) : '支持 .md / .txt'}
-            />
-            <AltCard
-              label="Issue（GitLab）"
-              active={mode === 'issue'}
-              onClick={() => setMode('issue')}
-              icon={<IconIssue size={18} />}
-              body={mode === 'issue' && issueIid ? `Issue #${issueIid}` : '填写项目与 Issue'}
-              hint={mode === 'issue' && gitlabProjectId ? `项目 ${gitlabProjectId}` : '导入议题描述'}
-            />
-            <AltCard
-              label="图片"
-              active={mode === 'image'}
-              onClick={() => setMode('image')}
-              icon={<IconImage size={18} />}
-              body={mode === 'image' && file ? file.filename : '选择界面截图'}
-              hint={mode === 'image' && file ? formatSize(file.size) : '多模态解析'}
-            />
-          </div>
         </div>
       </div>
     </>
-  );
-}
-
-function AltCard({
-  label,
-  active,
-  onClick,
-  icon,
-  body,
-  hint,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-  icon: ReactNode;
-  body: string;
-  hint: string;
-}) {
-  return (
-    <button
-      className={`sg-nt-alt-card ${active ? 'sg-nt-alt-card--active' : ''}`}
-      onClick={onClick}
-    >
-      <span className="sg-nt-alt-label">{label}</span>
-      <span className="sg-nt-alt-body">
-        {icon}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {body}
-        </span>
-      </span>
-      <span className="sg-nt-alt-hint">{hint}</span>
-    </button>
   );
 }
 

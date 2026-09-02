@@ -6,6 +6,7 @@
 //! 本 crate 不依赖 sg-store/SQLite：事件流是唯一权威，SQLite 只是可丢弃投影。
 
 pub mod dag;
+pub mod publish;
 pub mod reducer;
 pub mod store;
 
@@ -58,11 +59,13 @@ const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub fn new_ulid() -> String {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u128)
+        .map(|d| d.as_millis())
         .unwrap_or(0);
     let mut rand = [0u8; 10];
     getrandom::getrandom(&mut rand).expect("系统熵源不可用");
-    let value = (ms << 80) | u128::from_be_bytes(rand);
+    let mut be = [0u8; 16];
+    be[6..].copy_from_slice(&rand); // 80bit 随机段对齐到低位
+    let value = (ms << 80) | u128::from_be_bytes(be);
     encode_ulid(value)
 }
 
@@ -73,7 +76,7 @@ pub fn encode_ulid(value: u128) -> String {
         out[i] = CROCKFORD[(v & 0x1f) as usize];
         v >>= 5;
     }
-    String::from_utf8(out).expect("Crockford 字母表恒为 ASCII")
+    String::from_utf8(out.to_vec()).expect("Crockford 字母表恒为 ASCII")
 }
 
 pub fn is_ulid(s: &str) -> bool {
@@ -144,9 +147,17 @@ pub struct GovernanceProof {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Payload {
-    AttemptStarted { gate: String },
-    OutputFrozen { digest: String, manifest_sha256: String, object_refs: Vec<String> },
-    ReleaseRequested { digest: String },
+    AttemptStarted {
+        gate: String,
+    },
+    OutputFrozen {
+        digest: String,
+        manifest_sha256: String,
+        object_refs: Vec<String>,
+    },
+    ReleaseRequested {
+        digest: String,
+    },
     /// 事实层只呈现为 release_decided_claimed（ADR-031 C3 r4）。
     ReleaseDecided {
         digest: String,
@@ -157,8 +168,13 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         proof: Option<GovernanceProof>,
     },
-    StageTransition { from: String, to: String },
-    PlanFrozen { plan_doc_id: String },
+    StageTransition {
+        from: String,
+        to: String,
+    },
+    PlanFrozen {
+        plan_doc_id: String,
+    },
     /// 闭包字段不具可信性：reducer 自行从 DAG 复算并要求完全相等（ADR-031 C6 r4）。
     ForkResolved {
         conflicting_heads: Vec<String>,
@@ -166,7 +182,9 @@ pub enum Payload {
         superseded_descendants: Vec<String>,
         reason: String,
     },
-    Supersede { target_attempt_id: String },
+    Supersede {
+        target_attempt_id: String,
+    },
 }
 
 /// 事件信封。字段与 ADR-031 C2 一致；`parent_head` 为本机所见事件头，
@@ -256,7 +274,12 @@ mod tests {
         assert!(is_ulid(&id));
         let decoded = id
             .bytes()
-            .map(|b| CROCKFORD.iter().position(|c| *c == b.to_ascii_uppercase()).unwrap() as u128)
+            .map(|b| {
+                CROCKFORD
+                    .iter()
+                    .position(|c| *c == b.to_ascii_uppercase())
+                    .unwrap() as u128
+            })
             .fold(0u128, |acc, d| (acc << 5) | d);
         assert_eq!(encode_ulid(decoded), id);
     }
