@@ -23,6 +23,14 @@ const DOC_GATES: Record<string, { kind: string; label: string }> = {
 interface ArtifactInfo { id: string; kind: string; title: string }
 interface RevisionInfo { id: string; rev_no: number; status: string; etag: string }
 
+/** 修订状态中文展示（工程状态值不直接暴露给用户）。 */
+const REVISION_STATUS: Record<string, string> = {
+  draft: '草稿',
+  in_review: '评审中',
+  frozen: '已冻结',
+  superseded: '已废弃',
+};
+
 // 文档驱动关（需求/方案/测试）：创建工件 → 草稿（可让 Agent 起草）→ 评审 → 冻结 → 证据 → 门禁。
 export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
   const config = DOC_GATES[gate];
@@ -164,7 +172,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
             >
               保存草稿
             </button>
-            {revision ? <span className="sg-muted">r{revision.rev_no} · {revision.status}</span> : null}
+            {revision ? <span className="sg-muted">r{revision.rev_no} · {REVISION_STATUS[revision.status] ?? revision.status}</span> : null}
           </div>
           <textarea className="sg-textarea sg-doc-editor" rows={12} value={draft} onChange={(e) => setDraft(e.target.value)}
             placeholder={`# ${config.label}\n\n范围…\n非目标…\n验收标准…`} />
@@ -225,6 +233,8 @@ export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId:
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [pendingRelease, setPendingRelease] = useState<{ id: string } | null>(null);
+  // 自持评估中态：父层 busy 恒为 false 时也不能双击重复评估。
+  const [evaluating, setEvaluating] = useState(false);
 
   // M2：该关有待审批放行时不再重复评估——用户决定在审批中心完成。
   const loadPending = useCallback(async () => {
@@ -241,13 +251,16 @@ export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId:
   }, [loadPending]);
 
   const evaluateAndRequest = () => {
+    if (evaluating) return;
     setError('');
     setNotice('');
+    setEvaluating(true);
     void (async () => {
       try {
         const result = await rpc<{ passed: boolean; failed_inputs: string[] }>('gate.evaluate', { workItemId, gate });
         if (!result.passed) {
-          setError(`门禁未通过：${result.failed_inputs.join('、')}`);
+          // 键名→中文问题+下一步：门禁拒绝是流程最关键的反馈时刻，不能甩内部键名。
+          setError(`门禁未通过：${result.failed_inputs.map(gateInputText).join('；')}`);
           return;
         }
         // evaluate 只计算；通过后冻结输出包并提交用户放行审批（AC-SW-02：current_gate 不变）。
@@ -257,6 +270,8 @@ export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId:
         onDone();
       } catch (reason) {
         setError(rpcErrorMessage(reason));
+      } finally {
+        setEvaluating(false);
       }
     })();
   };
@@ -270,8 +285,10 @@ export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId:
           放行审批等待用户决定
         </span>
       ) : (
-        <button className="sg-button sg-button--primary" disabled={busy} onClick={evaluateAndRequest}>
-          <IconShield size={14} />评估{gateLabel(gate)}门禁并提交放行
+        <button className="sg-button sg-button--primary" disabled={busy || evaluating} onClick={evaluateAndRequest}>
+          <IconShield size={14} />
+          {evaluating ? '评估中…' : '评估'}
+          {gateLabel(gate)}门禁并提交放行
         </button>
       )}
     </>
@@ -288,13 +305,33 @@ export async function activeRequirementKeys(workItemId: string): Promise<string[
   }
 }
 
+/** 门禁内部输入键 → 用户能看懂的问题 + 下一步动作（P6：键名不外露）。 */
+const GATE_INPUT_GUIDANCE: Record<string, string> = {
+  required_artifacts_frozen: '本关要求的文档产物还未全部冻结——先在各面板完成「冻结基线」步骤',
+  required_checks_passed: '本关的自动检查未全部通过——查看检查详情并修复失败项',
+  approvals_valid: '所需审批缺失或已过期——补齐审批后再试',
+  evidence_complete: '证据链不完整——先「记录证据并复验」，补齐每步证据',
+  no_blocking_risk: '存在未关闭的阻塞风险——先处理风险项或降低风险等级',
+  inputs_current: '输入基线已过期——上游文档有更新，需要重新冻结并同步',
+};
+
+function gateInputText(key: string): string {
+  return GATE_INPUT_GUIDANCE[key] ?? key;
+}
+
 function draftGoal(gate: string, draft: string): string {
+  // 六关各有正确的起草指令：否则部署/验证关会把"测试计划"贴进发布/验收说明。
+  const instructions: Record<string, string> = {
+    requirements: '根据以下需求起草 PRD（范围、非目标、用户故事、验收标准、风险）',
+    design: '为以下需求起草技术方案（架构、API、数据、错误、测试与回滚）',
+    development: '为以下需求与方案撰写开发说明（实现要点、改动清单、自测记录、遗留问题）',
+    testing: '为以下需求起草测试计划（每条验收标准至少一个用例）',
+    deployment: '为以下任务撰写发布说明（发布步骤、配置变更、验证方式、回滚步骤）',
+    verification: '为以下任务撰写验收说明（逐条验收标准的核验结果、结论与遗留风险）',
+  };
+  const instruction = instructions[gate] ?? '根据以下内容撰写本关文档';
   const base = draft.slice(0, 400);
-  if (gate === 'requirements') {
-    return `根据以下需求起草 PRD（范围、非目标、用户故事、验收标准、风险）：\n${base}`;
-  }
-  if (gate === 'design') {
-    return `为以下需求起草技术方案（架构、API、数据、错误、测试与回滚）：\n${base}`;
-  }
-  return `为以下需求起草测试计划（每条验收标准至少一个用例）：\n${base}`;
+  // 静默截断会让人以为模型看到了全文：截断必须显式告知。
+  const suffix = draft.length > 400 ? '（注：已有内容过长，仅截取前 400 字作为上下文）' : '';
+  return `${instruction}${suffix}：\n${base}`;
 }

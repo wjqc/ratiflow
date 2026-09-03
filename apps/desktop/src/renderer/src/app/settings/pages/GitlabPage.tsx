@@ -4,6 +4,7 @@ import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
+import { useTwoStepConfirm } from '../components/useTwoStepConfirm';
 import { IconPlus, IconRefresh, IconUser, IconZap } from '../../../components/Icons';
 
 interface GitlabProfile {
@@ -49,14 +50,17 @@ export function GitlabPage() {
     } catch (err) { setError(err instanceof Error ? err.message : '创建失败'); }
   };
 
-  const remove = async (p: GitlabProfile) => {
-    if (!window.confirm(`删除实例「${p.name}」？不可撤销。`)) return;
-    setError(null);
-    try {
-      await rpc('gitlabProfile.remove', { profileId: p.id, expectedRevision: p.revision });
-      await load();
-    } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
-  };
+  const [pendingRemove, requestRemove] = useTwoStepConfirm();
+  const remove = (p: GitlabProfile) =>
+    requestRemove(p.id, () => {
+      void (async () => {
+        setError(null);
+        try {
+          await rpc('gitlabProfile.remove', { profileId: p.id, expectedRevision: p.revision });
+          await load();
+        } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
+      })();
+    });
 
   const test = async (p: GitlabProfile) => {
     setTesting(p.id); setTestResult(null); setError(null);
@@ -119,7 +123,13 @@ export function GitlabPage() {
                           <IconUser size={12} />用户
                         </button>
                         {!p.managed_source ? (
-                          <button className="sg-btn sg-btn--sm sg-btn--danger" onClick={() => void remove(p)}>删除</button>
+                          <button
+                          className="sg-btn sg-btn--sm sg-btn--danger"
+                          onClick={() => remove(p)}
+                          title={pendingRemove === p.id ? '再次点击确认删除' : `删除实例「${p.name}」（不可撤销）`}
+                        >
+                          {pendingRemove === p.id ? '确认删除？' : '删除'}
+                        </button>
                         ) : null}
                       </div>
                     </td>

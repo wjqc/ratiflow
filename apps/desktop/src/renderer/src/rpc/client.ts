@@ -42,7 +42,7 @@ export async function waitForRunTerminal(runId: string, timeoutMs = 600_000): Pr
       return run;
     }
     if (Date.now() > deadline) {
-      throw new Error(`等待任务结束超时（${runId}）`);
+      throw new Error('等待任务结束超时。任务可能仍在后台运行，请稍后刷新查看；也可重新发起。');
     }
     await new Promise((resolve) => setTimeout(resolve, 400));
   }

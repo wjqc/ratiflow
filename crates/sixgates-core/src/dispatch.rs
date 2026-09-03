@@ -989,6 +989,19 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             };
             Ok(v)
         }
+        "agent.list" => {
+            let items = sg_agent::list_recent(
+                store,
+                &str_param(params, "workItemId")?,
+                params.get("limit").and_then(|v| v.as_i64()).unwrap_or(8),
+            )
+            .map_err(store_err)?;
+            Ok(json!({"items": items}))
+        }
+        "agent.trace" => {
+            let run_id = str_param(params, "runId")?;
+            sg_agent::trace(store, &run_id).map_err(store_err)
+        }
         "agent.cancel" => {
             let run_id = str_param(params, "runId")?;
             let run = sg_agent::get_run(store, &run_id).map_err(store_err)?;
@@ -1035,11 +1048,12 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(serde_json::to_value(result).unwrap_or_default())
         }
         "gate.requestRelease" => {
-            // E2E 钩子（仅显式设置时生效）：SIXGATES_APPROVAL_TTL_SECS 覆盖放行审批有效期。
+            // 关卡放行审批不限时（人工评审无期限）；E2E 需要限时行为时显式设置
+            // SIXGATES_APPROVAL_TTL_SECS（秒）即可恢复过期语义。
             let ttl = std::env::var("SIXGATES_APPROVAL_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse::<i64>().ok())
-                .unwrap_or_else(|| assemble_policy_snapshot(store).0.approval_ttl_secs);
+                .unwrap_or(0);
             let result = sg_workitem::release::request_release(
                 store,
                 &str_param(params, "workItemId")?,

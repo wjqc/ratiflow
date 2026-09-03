@@ -58,7 +58,8 @@ interface Props {
   onExpandProject: (projectId: string) => void;
   onProjectRemove: (project: Project) => void;
   onTaskRemove: (task: WorkItemSummary) => void;
-  onTaskOpen: (workItemId: string) => void;
+  /** 打开任务：第二参数是任务所属项目（树可多项目同时展开，不能假定是活动项目）。 */
+  onTaskOpen: (workItemId: string, projectId?: string) => void;
   onNavigate: (route: Route) => void;
 }
 
@@ -135,6 +136,14 @@ export function ProjectSidebar({
       return next;
     });
   };
+
+  // 搜索时加载全部项目任务：只搜"已展开"的项目会漏掉未展开项目的任务。
+  useEffect(() => {
+    if (!q) return;
+    for (const p of projects) {
+      if (tasksByProject[p.id] === undefined) onExpandProject(p.id);
+    }
+  }, [q, projects, tasksByProject, onExpandProject]);
 
   // 移除采用行内两步确认（不依赖原生 confirm 对话框）：第一次点变「确认」，3 秒内再点执行。
   const [pendingRemove, setPendingRemove] = useState<{ kind: 'project' | 'task'; id: string } | null>(
@@ -304,17 +313,11 @@ export function ProjectSidebar({
                       >
                         <button
                           className={`sg-tree-sub ${selected ? 'sg-tree-sub--active' : ''}`}
-                          onClick={() => onTaskOpen(t.id)}
+                          onClick={() => onTaskOpen(t.id, p.id)}
                           title={`${t.title} · ${gateLabel(workItemGate(t))}`}
                         >
                           <span
-                            className={`sg-tree-dot ${
-                              selected
-                                ? 'sg-tree-dot--active'
-                                : workItemGate(t) === 'verification'
-                                  ? 'sg-tree-dot--done'
-                                  : ''
-                            }`}
+                            className={`sg-tree-dot ${selected ? 'sg-tree-dot--active' : ''}`}
                           />
                           <span className="sg-tree-name">{t.title}</span>
                           <span className="sg-tree-time">{relativeTime(t.updated_at)}</span>
@@ -329,7 +332,7 @@ export function ProjectSidebar({
                           title={
                             pendingRemove?.kind === 'task' && pendingRemove.id === t.id
                               ? '再次点击确认移除'
-                              : `移除任务「${t.title}」（归档）`
+                              : `移除任务「${t.title}」（归档后从界面隐藏）`
                           }
                           aria-label={
                             pendingRemove?.kind === 'task' && pendingRemove.id === t.id
@@ -358,7 +361,7 @@ export function ProjectSidebar({
         })}
         {filteredProjects.length === 0 && (
           <div className="sg-sub" style={{ padding: '4px 14px' }}>
-            {q ? '无匹配项目' : '暂无项目，请到「设置 → 常规」登记'}
+            {q ? '无匹配项目' : '暂无项目，请到「设置与诊断 → 项目与目录」登记'}
           </div>
         )}
       </div>

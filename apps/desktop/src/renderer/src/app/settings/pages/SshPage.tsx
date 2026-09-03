@@ -5,6 +5,7 @@ import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
 import { IconPlus, IconRefresh, IconZap } from '../../../components/Icons';
+import { useTwoStepConfirm } from '../components/useTwoStepConfirm';
 
 interface SshTarget {
   id: string; revision: number; name: string; host: string; port: number;
@@ -50,14 +51,17 @@ export function SshPage() {
     } catch (err) { setError(err instanceof Error ? err.message : '创建失败'); }
   };
 
-  const remove = async (t: SshTarget) => {
-    if (!window.confirm(`删除目标「${t.name}」？不可撤销。`)) return;
-    setError(null);
-    try {
-      await rpc('sshTarget.remove', { targetId: t.id, expectedRevision: t.revision });
-      await load();
-    } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
-  };
+  const [pendingRemove, requestRemove] = useTwoStepConfirm();
+  const remove = (t: SshTarget) =>
+    requestRemove(t.id, () => {
+      void (async () => {
+        setError(null);
+        try {
+          await rpc('sshTarget.remove', { targetId: t.id, expectedRevision: t.revision });
+          await load();
+        } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
+      })();
+    });
 
   const test = async (t: SshTarget) => {
     setTesting(t.id); setTestResult(null); setPendingFp(null); setError(null);
@@ -129,7 +133,13 @@ export function SshPage() {
                         <button className="sg-btn sg-btn--sm" disabled={testing === t.id} onClick={() => void test(t)}>
                           <IconZap size={12} />{testing === t.id ? '测试中…' : '测试'}
                         </button>
-                        <button className="sg-btn sg-btn--sm sg-btn--danger" onClick={() => void remove(t)}>删除</button>
+                        <button
+                          className="sg-btn sg-btn--sm sg-btn--danger"
+                          onClick={() => remove(t)}
+                          title={pendingRemove === t.id ? '再次点击确认删除' : `删除目标「${t.name}」（不可撤销）`}
+                        >
+                          {pendingRemove === t.id ? '确认删除？' : '删除'}
+                        </button>
                       </div>
                     </td>
                   </tr>

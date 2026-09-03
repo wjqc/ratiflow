@@ -64,6 +64,9 @@ impl Gateway {
             if budget.max_tokens_in > 0 && usage.tokens_in >= budget.max_tokens_in {
                 return Err("budget_exceeded: tokens_in".into());
             }
+            if budget.max_tokens_out > 0 && usage.tokens_out >= budget.max_tokens_out {
+                return Err("budget_exceeded: tokens_out".into());
+            }
         }
 
         let mut masked = req.clone();

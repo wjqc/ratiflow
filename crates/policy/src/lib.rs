@@ -155,10 +155,15 @@ pub fn request_approval(
 ) -> Result<Approval, Error> {
     let id = ids::new_id("appr");
     let now = timefmt::now();
-    let expires = (timefmt::parse(&now).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
-        + time::Duration::seconds(ttl_secs.max(1)))
-    .format(&time::format_description::well_known::Rfc3339)
-    .unwrap_or(now.clone());
+    // ttl_secs <= 0 表示不限时（如关卡放行的人工评审）；expires_at 留空即永不失效。
+    let expires = if ttl_secs > 0 {
+        (timefmt::parse(&now).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+            + time::Duration::seconds(ttl_secs))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or(now.clone())
+    } else {
+        String::new()
+    };
     store.with_conn(|conn| {
         conn.execute(
             "INSERT INTO approvals(id, subject_type, subject_id, workitem_id, stage_attempt_id, action_digest, risk, status,
@@ -308,7 +313,7 @@ pub fn pending_blocking_count(store: &Store, workitem_id: &str) -> Result<i64, E
 pub fn expire_stale(store: &Store) -> Result<(), Error> {
     store.with_conn(|conn| {
         conn.execute(
-            "UPDATE approvals SET status='expired' WHERE status='requested' AND expires_at < ?1",
+            "UPDATE approvals SET status='expired' WHERE status='requested' AND expires_at != '' AND expires_at < ?1",
             [timefmt::now()],
         )?;
         Ok(())
@@ -341,7 +346,7 @@ pub fn validate_for(
             if approved_digest != digest {
                 return Err(PolicyError::ApprovalInvalid);
             }
-            if expires_at < timefmt::now() {
+            if !expires_at.is_empty() && expires_at < timefmt::now() {
                 return Err(PolicyError::ApprovalExpired);
             }
             Ok(())

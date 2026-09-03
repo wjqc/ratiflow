@@ -70,6 +70,20 @@ impl Store {
         Ok(out)
     }
 
+    /// 立即事务（BEGIN IMMEDIATE）：读阶段就取写锁。
+    /// 供"先读判定、再写"且怕多进程竞态的序列使用（如 schema 迁移）。
+    pub fn with_tx_immediate<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        use rusqlite::TransactionBehavior;
+        let mut conn = self.conn.lock().expect("store connection poisoned");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = f(&tx)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
     fn migrate(&self) -> Result<(), Error> {
         crate::migration::run(self)
     }

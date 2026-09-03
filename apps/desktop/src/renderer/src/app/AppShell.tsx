@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpc } from '../rpc/client';
 import { ProjectSidebar, gateLabel, workItemGate } from './ProjectSidebar';
 import type { KnowledgeSourceInfo, Project, WorkItemSummary } from './ProjectSidebar';
@@ -22,7 +22,8 @@ export type Route =
   | { page: 'knowledge'; projectId: string }
   | { page: 'settings'; section?: SettingsRouteId };
 
-// 刷新/重启恢复（契约 FR-DESK-008）：最近页面与最近项目；任务上下文仅恢复 section 级页面。
+// 刷新/重启只恢复 section 级页面与最近项目，不恢复任务上下文
+// （产品决策：避免草稿误发送，见 dev-notes/2026-08-22-settings-center.md；FR-DESK-008 是自动更新签名，与此无关）。
 const LS_ROUTE = 'sg:lastRoute';
 const LS_PROJECT = 'sg:lastProject';
 
@@ -88,7 +89,11 @@ export default function AppShell() {
     })();
   }, []);
 
+  // 已加载过任务的项目集合：任务归档/恢复广播后按缓存精准重载。
+  const cachedTaskProjects = useRef<Set<string>>(new Set());
+
   const loadTasks = useCallback(async (projectId: string) => {
+    cachedTaskProjects.current.add(projectId);
     try {
       const r = await rpc<{ items: WorkItemSummary[] }>('workitem.list', { projectId, limit: 50 });
       setTasksByProject((prev) => ({ ...prev, [projectId]: r.items ?? [] }));
@@ -96,6 +101,15 @@ export default function AppShell() {
       setTasksByProject((prev) => ({ ...prev, [projectId]: [] }));
     }
   }, []);
+
+  // 设置页恢复/归档任务后广播 sg:tasks-changed：重载所有已缓存项目的任务列表。
+  useEffect(() => {
+    const onTasksChanged = () => {
+      for (const pid of cachedTaskProjects.current) void loadTasks(pid);
+    };
+    window.addEventListener('sg:tasks-changed', onTasksChanged);
+    return () => window.removeEventListener('sg:tasks-changed', onTasksChanged);
+  }, [loadTasks]);
 
   const loadProjectData = useCallback(
     async (projectId: string) => {
@@ -125,6 +139,26 @@ export default function AppShell() {
   useEffect(() => {
     if (activeProjectId) void loadProjectData(activeProjectId);
   }, [activeProjectId, loadProjectData]);
+
+  // 设置内新建/归档项目后刷新侧栏列表（与 sg:settings-navigate 同一事件约定）。
+  useEffect(() => {
+    const onProjectsChanged = () => {
+      (async () => {
+        try {
+          const result = await rpc<{ items: Project[] }>('project.list');
+          const items = result.items ?? [];
+          setProjects(items);
+          setActiveProjectId((prev) =>
+            prev && items.some((p) => p.id === prev) ? prev : items[0]?.id ?? null,
+          );
+        } catch {
+          /* core 异常时保持现状 */
+        }
+      })();
+    };
+    window.addEventListener('sg:projects-changed', onProjectsChanged);
+    return () => window.removeEventListener('sg:projects-changed', onProjectsChanged);
+  }, []);
 
   const navigate = useCallback((next: Route) => {
     setRoute((prev) => {
@@ -194,7 +228,14 @@ export default function AppShell() {
           setRoute({ page: 'home' });
         }
       }
-      if (route.page === 'knowledge' && route.projectId === project.id) setRoute({ page: 'home' });
+      // 移除项目后，正看着该项目的任务/知识库/新建页时必须离开，
+      // 否则主区渲染孤儿任务、面包屑/上下文挂到新活动项目上（错位）。
+      if (
+        (route.page === 'knowledge' || route.page === 'task' || route.page === 'new') &&
+        route.projectId === project.id
+      ) {
+        setRoute({ page: 'home' });
+      }
     },
     [activeProjectId, projects, route],
   );
@@ -250,43 +291,90 @@ export default function AppShell() {
         onExpandProject={expandProject}
         onProjectRemove={(project) => void removeProject(project)}
         onTaskRemove={(task) => void removeTask(task)}
-        onTaskOpen={(workItemId) => activeProjectId && openTask(activeProjectId, workItemId)}
+        // 任务所属项目以树节点为准（可多项目同时展开），不能假定是当前活动项目。
+        onTaskOpen={(workItemId, projectId) => {
+          const pid = projectId ?? activeProjectId;
+          if (pid) openTask(pid, workItemId);
+        }}
         onNavigate={navigate}
       />
       <main className="sg-main">
-        {route.page === 'home' && (
-          <HomePage projects={projects} onNavigate={navigate} refreshKey={listVersion} />
+        {coreReady === false ? (
+          <CoreFailurePage />
+        ) : (
+          <>
+            {route.page === 'home' && (
+              <HomePage
+                projects={projects}
+                activeProjectId={activeProjectId}
+                onNavigate={navigate}
+                refreshKey={listVersion}
+              />
+            )}
+            {route.page === 'new' && (
+              <NewTaskPage
+                projectId={route.projectId}
+                projects={projects}
+                onCreated={(workItemId, createdProjectId) => openTask(createdProjectId, workItemId)}
+                onWorkspaceChanged={activateWorkspace}
+                onOpenRemote={() => navigate({ page: 'settings', section: 'ssh' })}
+                onBack={() => navigate({ page: 'home' })}
+              />
+            )}
+            {route.page === 'task' && (
+              <Workbench
+                projectId={route.projectId}
+                projectName={
+                  projects.find((p) => p.id === route.projectId)?.name ??
+                  activeProject?.name ??
+                  ''
+                }
+                workItemId={route.workItemId}
+                knowledgeCount={knowledgeSources.length}
+                onNavigate={navigate}
+              />
+            )}
+            {route.page === 'approvals' && (
+              <ApprovalsPage
+                onDecided={() => activeProjectId && void loadProjectData(activeProjectId)}
+              />
+            )}
+            {route.page === 'knowledge' && (
+              <KnowledgePage projectId={route.projectId} projectName={activeProject?.name} />
+            )}
+            {route.page === 'settings' && <SettingsShell section={route.section} />}
+          </>
         )}
-        {route.page === 'new' && (
-          <NewTaskPage
-            projectId={route.projectId}
-            projects={projects}
-            onCreated={(workItemId, createdProjectId) => openTask(createdProjectId, workItemId)}
-            onWorkspaceChanged={activateWorkspace}
-            onOpenRemote={() => navigate({ page: 'settings', section: 'ssh' })}
-            onBack={() => navigate({ page: 'home' })}
-          />
-        )}
-        {route.page === 'task' && (
-          <Workbench
-            projectId={route.projectId}
-            projectName={activeProject?.name ?? ''}
-            workItemId={route.workItemId}
-            knowledgeCount={knowledgeSources.length}
-            onNavigate={navigate}
-          />
-        )}
-        {route.page === 'approvals' && (
-          <ApprovalsPage
-            onDecided={() => activeProjectId && void loadProjectData(activeProjectId)}
-          />
-        )}
-        {route.page === 'knowledge' && (
-          <KnowledgePage projectId={route.projectId} projectName={activeProject?.name} />
-        )}
-        {route.page === 'settings' && <SettingsShell section={route.section} />}
       </main>
     </div>
+  );
+}
+
+/** core 未就绪/崩溃时的主区故障态：给出真实原因与出路，而不是误导性的「先去登记项目」。 */
+function CoreFailurePage() {
+  return (
+    <>
+      <header className="sg-page-head">
+        <span className="sg-page-head-title">核心服务异常</span>
+      </header>
+      <div className="sg-scroll">
+        <div className="sg-card">
+          <div className="sg-empty" style={{ padding: '40px 24px' }}>
+            <div>本地核心（core）未就绪</div>
+            <div className="sg-sub">
+              项目、任务与模型配置都保存在本地核心里；恢复前无法继续操作。可到「设置与诊断」查看诊断与日志。
+            </div>
+            <button
+              className="sg-btn sg-btn--primary"
+              style={{ marginTop: 8 }}
+              onClick={() => window.location.reload()}
+            >
+              重试连接
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -294,10 +382,12 @@ export default function AppShell() {
 
 function HomePage({
   projects,
+  activeProjectId,
   onNavigate,
   refreshKey,
 }: {
   projects: Project[];
+  activeProjectId: string | null;
   onNavigate: (r: Route) => void;
   refreshKey: number;
 }) {
@@ -348,7 +438,12 @@ function HomePage({
             文字描述、需求文档、GitLab Issue 或界面截图，选择一种方式开始。Agent
             将带着任务依次通过需求、方案、开发、测试、发布、验收六关。
           </p>
-          <RecentTasks projects={projects} onNavigate={onNavigate} refreshKey={refreshKey} />
+          <RecentTasks
+            projects={projects}
+            activeProjectId={activeProjectId}
+            onNavigate={onNavigate}
+            refreshKey={refreshKey}
+          />
         </div>
       </div>
     </>
@@ -357,10 +452,12 @@ function HomePage({
 
 function RecentTasks({
   projects,
+  activeProjectId,
   onNavigate,
   refreshKey,
 }: {
   projects: Project[];
+  activeProjectId: string | null;
   onNavigate: (r: Route) => void;
   refreshKey: number;
 }) {
@@ -370,7 +467,8 @@ function RecentTasks({
     let cancelled = false;
     (async () => {
       const all: { project: Project; task: WorkItemSummary }[] = [];
-      for (const p of projects.slice(0, 5)) {
+      // 全量项目遍历（本地 RPC）：截断到前 5 个会让第 6 个项目的任务在首页永远不可见。
+      for (const p of projects) {
         try {
           const r = await rpc<{ items: WorkItemSummary[] }>('workitem.list', {
             projectId: p.id,
@@ -393,10 +491,12 @@ function RecentTasks({
       <div className="sg-card-head">
         最近任务
         <span className="sg-card-extra">
-          {projects[0] && (
+          {(activeProjectId || projects[0]) && (
             <button
               className="sg-btn sg-btn--primary sg-btn--sm"
-              onClick={() => onNavigate({ page: 'new', projectId: projects[0].id })}
+              onClick={() =>
+                onNavigate({ page: 'new', projectId: activeProjectId ?? projects[0].id })
+              }
             >
               <IconSend size={13} />
               新建任务

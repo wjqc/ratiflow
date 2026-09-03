@@ -13,6 +13,7 @@ import { SettingsPageHeader } from './components/SettingsPageHeader';
 import { SettingsSection } from './components/SettingsSection';
 import { StatusPill } from './components/StatusPill';
 import { IconDb, IconDownload, IconRefresh } from '../../components/Icons';
+import { useTwoStepConfirm } from './components/useTwoStepConfirm';
 
 function statusKind(status: string): 'ready' | 'pending' | 'error' {
   if (status === 'verified') return 'ready';
@@ -30,6 +31,8 @@ export function BackupPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  // 删除/恢复都是破坏性操作：行内两步确认（window.confirm 在本环境会被自动放行，禁用）。
+  const [pendingConfirm, requestConfirm] = useTwoStepConfirm();
 
   useEffect(() => {
     rpc<CoreVersionInfo>('core.version')
@@ -107,8 +110,12 @@ export function BackupPage() {
     }
   };
 
-  const remove = async (id: string) => {
-    if (!window.confirm('删除该备份记录与其快照文件？此操作不可撤销。')) return;
+  const remove = (id: string) =>
+    requestConfirm(`backup:${id}`, () => {
+      void doRemove(id);
+    });
+
+  const doRemove = async (id: string) => {
     setBusyId(id);
     setError(null);
     setInfo(null);
@@ -237,20 +244,24 @@ export function BackupPage() {
                         <button
                           className="sg-btn sg-btn--sm sg-btn--danger"
                           disabled={busyId !== null || b.status !== 'verified'}
-                          onClick={() => {
-                            if (window.confirm('确认恢复该备份？将覆盖当前本地数据库（会先保存安全快照）。')) void restore(b.id);
-                          }}
-                          title={b.status !== 'verified' ? '仅已校验通过的备份可恢复；先执行校验' : '恢复该备份'}
+                          onClick={() => requestConfirm(`restore:${b.id}`, () => void restore(b.id))}
+                          title={
+                            b.status !== 'verified'
+                              ? '仅已校验通过的备份可恢复；先执行校验'
+                              : pendingConfirm === `restore:${b.id}`
+                                ? '再次点击确认恢复（将覆盖当前本地数据库）'
+                                : '恢复该备份'
+                          }
                         >
-                          {busyId === b.id ? '处理中…' : '恢复'}
+                          {busyId === b.id ? '处理中…' : pendingConfirm === `restore:${b.id}` ? '确认恢复？' : '恢复'}
                         </button>
                         <button
                           className="sg-btn sg-btn--sm"
                           disabled={busyId !== null}
-                          onClick={() => void remove(b.id)}
-                          title="删除记录与快照文件"
+                          onClick={() => remove(b.id)}
+                          title={pendingConfirm === `backup:${b.id}` ? '再次点击确认删除' : '删除记录与快照文件（不可撤销）'}
                         >
-                          {busyId === b.id ? '处理中…' : '删除'}
+                          {busyId === b.id ? '处理中…' : pendingConfirm === `backup:${b.id}` ? '确认删除？' : '删除'}
                         </button>
                       </div>
                     </td>

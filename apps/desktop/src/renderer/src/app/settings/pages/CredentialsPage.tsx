@@ -4,6 +4,7 @@ import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
+import { useTwoStepConfirm } from '../components/useTwoStepConfirm';
 import { IconPlus, IconRefresh, IconShield } from '../../../components/Icons';
 
 interface CredentialRef {
@@ -68,14 +69,17 @@ export function CredentialsPage() {
     } catch (e) { setError(e instanceof Error ? e.message : '验证失败'); }
   };
 
-  const remove = async (ref: CredentialRef) => {
-    if (!window.confirm(`删除凭据「${ref.name}」？引用方将进入 degraded，不回退到其他秘密。`)) return;
-    setError(null);
-    try {
-      await rpc('credentialRef.remove', { refId: ref.id, expectedRevision: ref.revision, force: true });
-      await load();
-    } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
-  };
+  const [pendingRemove, requestRemove] = useTwoStepConfirm();
+  const remove = (ref: CredentialRef) =>
+    requestRemove(ref.id, () => {
+      void (async () => {
+        setError(null);
+        try {
+          await rpc('credentialRef.remove', { refId: ref.id, expectedRevision: ref.revision, force: true });
+          await load();
+        } catch (e) { setError(e instanceof Error ? e.message : '删除失败'); }
+      })();
+    });
 
   return (
     <div className="sg-set-page">
@@ -122,7 +126,13 @@ export function CredentialsPage() {
                         <button className="sg-btn sg-btn--sm" onClick={() => { setRotating(rotating === ref.id ? '' : ref.id); setRotateSecret(''); }}>
                           <IconRefresh size={12} />轮换
                         </button>
-                        <button className="sg-btn sg-btn--sm sg-btn--danger" onClick={() => void remove(ref)}>删除</button>
+                        <button
+                        className="sg-btn sg-btn--sm sg-btn--danger"
+                        onClick={() => remove(ref)}
+                        title={pendingRemove === ref.id ? '再次点击确认删除' : `删除凭据「${ref.name}」（引用方将进入 degraded）`}
+                      >
+                        {pendingRemove === ref.id ? '确认删除？' : '删除'}
+                      </button>
                       </div>
                       {rotating === ref.id ? (
                         <form className="sg-row" style={{ marginTop: 6, gap: 6 }} onSubmit={(e) => { e.preventDefault(); void replace(ref); }}>

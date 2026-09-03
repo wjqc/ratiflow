@@ -1,6 +1,6 @@
 // 模型设置：围绕“选择供应商 → 配好凭据与模型 → 连接测试通过”组织。
 // 诊断步骤默认折叠，避免把内部探测字段当成主界面。
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { StatusPill } from '../components/StatusPill';
@@ -21,6 +21,7 @@ interface ModelProfile {
   base_url: string;
   credential_ref_id?: string | null;
   default_model: string;
+  models?: string[];
   managed_source?: string | null;
   status: string;
   last_tested_at?: string | null;
@@ -88,6 +89,15 @@ export function ModelsPage() {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [modelsByProfile, setModelsByProfile] = useState<Record<string, string[]>>({});
+  // 删除走行内两步确认：Electron/自动化环境下 window.confirm 会被自动放行（曾致误删），禁用。
+  const [pendingRemove, setPendingRemove] = useState(false);
+  const [settingDefault, setSettingDefault] = useState(false);
+  const removeTimer = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (removeTimer.current !== null) window.clearTimeout(removeTimer.current);
+    };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -121,8 +131,11 @@ export function ModelsPage() {
   const route = routes.find((item) => item.taskKind === 'default') ?? routes[0] ?? null;
   const selectedModels = useMemo(() => {
     if (!selected) return [];
+    // 只展示已同步的模型（持久化在 profile.models）；未同步显示空态引导。
+    if (selected.models?.length) return selected.models;
     const synced = modelsByProfile[selected.id] ?? [];
-    return synced.length > 0 ? synced : selected.default_model ? [selected.default_model] : [];
+    if (synced.length > 0) return synced;
+    return selected.default_model ? [selected.default_model] : [];
   }, [modelsByProfile, selected]);
 
   const pickPreset = (id: string) => {
@@ -194,11 +207,41 @@ export function ModelsPage() {
         profileId: selected.id,
       });
       setModelsByProfile((current) => ({ ...current, [selected.id]: result.models ?? [] }));
-      setNotice(`已读取 ${result.models?.length ?? 0} 个可用模型。`);
+      setNotice(`已读取 ${result.models?.length ?? 0} 个可用模型，点击模型行可设为默认。`);
+      await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '模型列表同步失败');
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const friendlyError = (reason: unknown, fallback: string): string => {
+    // revision 冲突直译给用户是工程日志（"期望 5 实际 7"）：翻译成可操作文案。
+    if ((reason as { code?: string } | null)?.code === 'conflict') {
+      return '设置刚被其他窗口修改，已刷新当前状态，请重试';
+    }
+    return reason instanceof Error ? `${fallback}：${reason.message}` : fallback;
+  };
+
+  // 点击模型行：把该模型设为此 Profile 的默认模型（default_model 是 Agent 运行时实际使用的模型）。
+  const setDefaultModel = async (model: string) => {
+    if (!selected || model === selected.default_model) return;
+    setSettingDefault(true);
+    setError(null);
+    try {
+      await rpc('modelProfile.update', {
+        profileId: selected.id,
+        defaultModel: model,
+        expectedRevision: selected.revision,
+      });
+      setNotice(`默认模型已切换为 ${model}。后续 Agent 任务立即生效。`);
+      await load();
+    } catch (reason) {
+      setError(friendlyError(reason, '默认模型切换失败'));
+      await load();
+    } finally {
+      setSettingDefault(false);
     }
   };
 
@@ -213,12 +256,22 @@ export function ModelsPage() {
       setRoutes(result);
       setNotice(`“${selected.name}”已设为默认模型。`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '默认模型设置失败');
+      setError(friendlyError(reason, '默认模型设置失败'));
+      await load();
     }
   };
 
+  // 行内两步确认：第一次点进入待确认态（3 秒超时复位），再点才执行删除。
   const remove = async () => {
-    if (!selected || !window.confirm(`删除“${selected.name}”？此操作不可撤销。`)) return;
+    if (!selected) return;
+    if (!pendingRemove) {
+      setPendingRemove(true);
+      if (removeTimer.current !== null) window.clearTimeout(removeTimer.current);
+      removeTimer.current = window.setTimeout(() => setPendingRemove(false), 3000);
+      return;
+    }
+    setPendingRemove(false);
+    if (removeTimer.current !== null) window.clearTimeout(removeTimer.current);
     setError(null);
     try {
       await rpc('modelProfile.remove', {
@@ -228,7 +281,8 @@ export function ModelsPage() {
       setSelectedId('');
       await load();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '删除失败');
+      setError(friendlyError(reason, '删除失败'));
+      await load();
     }
   };
 
@@ -311,7 +365,16 @@ export function ModelsPage() {
               </div>
               <div className="sg-model-list">
                 {selectedModels.length === 0 ? <div className="sg-empty">同步供应商后会在这里显示可用模型。</div> : selectedModels.map((model) => (
-                  <div className="sg-model-row" key={model}><span>{model}</span>{model === selected.default_model ? <span className="sg-chip">默认</span> : null}</div>
+                  <button
+                    className={`sg-model-row ${model === selected.default_model ? 'sg-model-row--default' : ''}`}
+                    key={model}
+                    onClick={() => void setDefaultModel(model)}
+                    disabled={model === selected.default_model || settingDefault}
+                    title={model === selected.default_model ? '当前默认模型' : '点击设为默认模型'}
+                  >
+                    <span>{model}</span>
+                    {model === selected.default_model ? <span className="sg-chip">默认</span> : <span className="sg-model-row-action">{settingDefault ? '切换中…' : '设为默认'}</span>}
+                  </button>
                 ))}
               </div>
 
@@ -332,7 +395,17 @@ export function ModelsPage() {
                 </div>
               ) : null}
 
-              {!selected.managed_source ? <div className="sg-model-danger-zone"><button className="sg-link-btn sg-link-btn--danger" onClick={() => void remove()}>删除此供应商</button></div> : null}
+              {!selected.managed_source ? (
+                <div className="sg-model-danger-zone">
+                  <button
+                    className={`sg-link-btn sg-link-btn--danger ${pendingRemove ? 'sg-link-btn--danger-confirm' : ''}`}
+                    onClick={() => void remove()}
+                    title={pendingRemove ? '再次点击确认删除' : '删除此供应商（不可撤销）'}
+                  >
+                    {pendingRemove ? '确认删除？（再次点击，不可撤销）' : '删除此供应商'}
+                  </button>
+                </div>
+              ) : null}
             </>
           ) : (
             <div className="sg-model-welcome">

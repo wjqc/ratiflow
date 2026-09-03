@@ -1,6 +1,33 @@
 import { useCallback, useEffect, useState } from 'react';
+import { marked } from 'marked';
 import { rpc, rpcErrorMessage } from '../rpc/client';
+import { relativeTime } from '../lib/format';
 import { IconBook, IconDoc, IconFolder, IconIssue, IconPlus, IconSearch, IconX } from '../components/Icons';
+
+// 渲染前转义原生 HTML（产物内容来自 Agent 输出，不信任内嵌标签），再交 marked 解析。
+marked.setOptions({ gfm: true, breaks: true });
+function renderMarkdown(content: string): string {
+  const escaped = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return marked.parse(escaped, { async: false }) as string;
+}
+
+interface ArtifactRow {
+  id: string;
+  workitemId: string;
+  workitemTitle: string;
+  kind: string;
+  title: string;
+  updated_at: string;
+}
+
+const ARTIFACT_KIND: Record<string, string> = {
+  prd: 'PRD',
+  tech_design: '技术方案',
+  code: '代码产出',
+  test: '测试产出',
+  deployment: '部署产物',
+  verification: '验收产出',
+};
 
 interface SourceInfo {
   id: string; kind: string; name: string; locator: string; enabled: boolean;
@@ -16,22 +43,43 @@ const KIND_TAGS: Record<string, string> = {
   rule: '规则',
 };
 
-// 项目知识库（规范 §4.3）：来源管理、扫描状态、检索试用与隔离提示。
-// 布局对齐原型 03：工具条 + 来源表 + 右侧详情抽屉 + 本次上下文卡。
+const GATE_OF_KIND: Record<string, string> = {
+  prd: '需求关',
+  tech_design: '方案关',
+  code: '开发关',
+  test: '测试关',
+  deployment: '部署关',
+  verification: '验证关',
+};
+
+type Selection = { kind: 'artifact' | 'source'; id: string } | null;
+
+// 项目知识库：左目录（任务产物 + 知识来源）/ 右预览与编辑（规范 §4.3）。
 export default function KnowledgePage({ projectId, projectName }: Props) {
   const [sources, setSources] = useState<SourceInfo[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [kind, setKind] = useState('repo_path');
   const [name, setName] = useState('');
   const [locator, setLocator] = useState('');
-  const [filter, setFilter] = useState('');
   const [query, setQuery] = useState('');
-  const [hits, setHits] = useState<Array<{ chunkId: string; sourceId: string; snippet: string }>>([]);
+  const [hits, setHits] = useState<
+    Array<{ source_name?: string; title?: string; path?: string; snippet: string; score?: number }>
+  >([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const reload = useCallback(async () => {
+  // 任务产物（各关工件，如 PRD/技术方案）：跟随项目。
+  const [artifacts, setArtifacts] = useState<ArtifactRow[]>([]);
+  const [artifactContent, setArtifactContent] = useState('');
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactRev, setArtifactRev] = useState<{ id: string; status: string; etag: string } | null>(null);
+  const [artifactMode, setArtifactMode] = useState<'preview' | 'edit'>('preview');
+  const [artifactEdit, setArtifactEdit] = useState('');
+  const [artifactNotice, setArtifactNotice] = useState('');
+
+  const [selection, setSelection] = useState<Selection>(null);
+
+  const reloadSources = useCallback(async () => {
     try {
       const page = await rpc<{ items: SourceInfo[] }>('knowledge.list', { projectId });
       setSources(page.items);
@@ -40,13 +88,87 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
     }
   }, [projectId]);
 
-  useEffect(() => { void reload(); }, [reload]);
+  const loadArtifacts = useCallback(async () => {
+    try {
+      const list = await rpc<{ items: Array<{ id: string; title: string }> }>('workitem.list', {
+        projectId,
+        limit: 50,
+      });
+      const rows: ArtifactRow[] = [];
+      for (const wi of list.items ?? []) {
+        try {
+          const res = await rpc<{
+            items: Array<{ id: string; kind: string; title: string; updated_at: string }>;
+          }>('artifact.list', { workItemId: wi.id });
+          for (const a of res.items ?? []) {
+            rows.push({
+              id: a.id,
+              workitemId: wi.id,
+              workitemTitle: wi.title,
+              kind: a.kind,
+              title: a.title,
+              updated_at: a.updated_at,
+            });
+          }
+        } catch {
+          /* 单个工作项失败不影响整体 */
+        }
+      }
+      setArtifacts(rows);
+    } catch {
+      setArtifacts([]);
+    }
+  }, [projectId]);
 
-  const selected = sources.find((s) => s.id === selectedId) ?? null;
+  const loadArtifactContent = useCallback(async (a: ArtifactRow) => {
+    setArtifactLoading(true);
+    setArtifactNotice('');
+    try {
+      const page = await rpc<{ items: Array<{ id: string; status: string; etag: string }> }>(
+        'artifact.listRevisions',
+        { artifactId: a.id },
+      );
+      const items = page.items ?? [];
+      const current = items.find((r) => r.status !== 'superseded') ?? items[0] ?? null;
+      setArtifactRev(current ? { id: current.id, status: current.status, etag: current.etag } : null);
+      if (!current) {
+        setArtifactContent('（该工件还没有修订内容）');
+        return;
+      }
+      const res = await rpc<{ content: string }>('artifact.revisionContent', {
+        revisionId: current.id,
+      });
+      setArtifactContent(res.content ?? '');
+    } catch (reason) {
+      setArtifactContent(`读取失败：${reason instanceof Error ? reason.message : String(reason)}`);
+    } finally {
+      setArtifactLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadSources();
+    void loadArtifacts();
+  }, [reloadSources, loadArtifacts]);
+
+  const selected = selection
+    ? selection.kind === 'artifact'
+      ? artifacts.find((a) => a.id === selection.id) ?? null
+      : sources.find((s) => s.id === selection.id) ?? null
+    : null;
+  const selectedArtifact =
+    selection?.kind === 'artifact' ? (selected as ArtifactRow | null) : null;
+  const selectedSource =
+    selection?.kind === 'source' ? (selected as SourceInfo | null) : null;
   const enabledSources = sources.filter((s) => s.enabled);
-  const filtered = filter.trim()
-    ? sources.filter((s) => `${s.name} ${s.locator} ${s.kind}`.toLowerCase().includes(filter.trim().toLowerCase()))
-    : sources;
+
+  // 选中产物后自动加载内容。
+  useEffect(() => {
+    if (selection?.kind === 'artifact') {
+      const a = artifacts.find((x) => x.id === selection.id);
+      if (a) void loadArtifactContent(a);
+    }
+  }, [selection, artifacts, loadArtifactContent]);
 
   const addSource = () => {
     setBusy(true);
@@ -55,7 +177,7 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
         setName('');
         setLocator('');
         setShowAdd(false);
-        return reload();
+        return reloadSources();
       })
       .catch((reason) => setError(rpcErrorMessage(reason)))
       .finally(() => setBusy(false));
@@ -64,26 +186,26 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
   const scan = (sourceId: string) => {
     setBusy(true);
     void rpc('knowledge.scan', { sourceId })
-      .then(reload)
+      .then(reloadSources)
       .catch((reason) => setError(rpcErrorMessage(reason)))
       .finally(() => setBusy(false));
   };
 
-  const toggle = (source: SourceInfo) => {
-    void rpc('knowledge.update', { sourceId: source.id, enabled: !source.enabled }).then(reload);
+  const toggleSource = (source: SourceInfo) => {
+    void rpc('knowledge.update', { sourceId: source.id, enabled: !source.enabled }).then(reloadSources);
   };
 
-  const remove = (sourceId: string) => {
+  const removeSource = (sourceId: string) => {
     void rpc('knowledge.remove', { sourceId }).then(() => {
-      setSelectedId((cur) => (cur === sourceId ? null : cur));
-      return reload();
+      setSelection((cur) => (cur?.kind === 'source' && cur.id === sourceId ? null : cur));
+      return reloadSources();
     });
   };
 
   const rescanAll = () => {
     setBusy(true);
     void Promise.all(sources.map((s) => rpc('knowledge.scan', { sourceId: s.id })))
-      .then(reload)
+      .then(reloadSources)
       .catch((reason) => setError(rpcErrorMessage(reason)))
       .finally(() => setBusy(false));
   };
@@ -95,29 +217,44 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
       .catch((reason) => setError(rpcErrorMessage(reason)));
   };
 
-  return (
-    <>
-      <header className="sg-page-head">
-        <span className="sg-page-head-title">{projectName ? `${projectName} · 项目知识库` : '项目知识库'}</span>
-        <span className="sg-page-head-status">本地运行</span>
-      </header>
+  const saveArtifactEdit = async () => {
+    if (!artifactRev || artifactRev.status !== 'draft') return;
+    try {
+      await rpc('artifact.updateDraft', {
+        revisionId: artifactRev.id,
+        etag: artifactRev.etag,
+        content: artifactEdit,
+      });
+      setArtifactContent(artifactEdit);
+      setArtifactNotice('已保存。');
+      setArtifactMode('preview');
+    } catch (reason) {
+      setArtifactNotice(`保存失败：${reason instanceof Error ? reason.message : String(reason)}`);
+    }
+  };
 
-      <div className="sg-toolbar">
-        <IconSearch size={13} style={{ color: 'var(--sg-text-secondary)', flexShrink: 0 }} />
-        <input
-          className="sg-input"
-          placeholder="搜索来源 / 类型 / 位置…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          aria-label="过滤来源"
-        />
-        <div className="sg-toolbar-actions">
-          <button
-            className="sg-btn sg-btn--sm"
-            disabled={busy || sources.length === 0}
-            onClick={rescanAll}
-            title="对全部来源重新扫描"
-          >
+  const selectArtifact = (a: ArtifactRow) => {
+    setSelection({ kind: 'artifact', id: a.id });
+    setArtifactMode('preview');
+    void loadArtifactContent(a);
+  };
+
+  const artifactGroups = new Map<string, ArtifactRow[]>();
+  for (const a of artifacts) {
+    const list = artifactGroups.get(a.workitemTitle) ?? [];
+    list.push(a);
+    artifactGroups.set(a.workitemTitle, list);
+  }
+
+  return (
+    <div className="sg-kbv2">
+      <header className="sg-kbv2-head">
+        <span className="sg-page-head-title">
+          {projectName ? `${projectName} · 项目知识库` : '项目知识库'}
+        </span>
+        <span className="sg-kbv2-head-note">本地运行 · 产物默认跟随项目归档</span>
+        <div className="sg-kbv2-head-actions">
+          <button className="sg-btn sg-btn--sm" disabled={busy || sources.length === 0} onClick={rescanAll}>
             重建索引
           </button>
           <button className="sg-btn sg-btn--primary sg-btn--sm" onClick={() => setShowAdd((v) => !v)}>
@@ -125,218 +262,261 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
             添加来源
           </button>
         </div>
-      </div>
+      </header>
 
-      <div className="sg-kb-layout">
-        <div className="sg-kb-main">
-          {error ? (
-            <div className="sg-banner sg-banner--error" style={{ margin: '12px 16px 0' }} role="alert">
-              {error}
+      {error ? <div className="sg-banner sg-banner--error" style={{ margin: '0 16px' }} role="alert">{error}</div> : null}
+
+      {showAdd ? (
+        <div className="sg-card" style={{ margin: '10px 16px 0' }}>
+          <div className="sg-card-head">
+            添加知识来源
+            <span className="sg-card-extra">
+              <button className="sg-icon-btn" aria-label="关闭" onClick={() => setShowAdd(false)}>
+                <IconX size={13} />
+              </button>
+            </span>
+          </div>
+          <div style={{ padding: '12px 14px', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <label className="sg-field" style={{ width: 130, marginBottom: 0 }}>
+              <span>类型</span>
+              <select className="sg-input" value={kind} onChange={(e) => setKind(e.target.value)}>
+                <option value="repo_path">仓库目录</option>
+                <option value="document">文档</option>
+                <option value="openapi">OpenAPI</option>
+                <option value="rule">规则</option>
+              </select>
+            </label>
+            <label className="sg-field" style={{ width: 200, marginBottom: 0 }}>
+              <span>名称 *</span>
+              <input className="sg-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="主仓库" />
+            </label>
+            <label className="sg-field" style={{ flex: 1, minWidth: 220, marginBottom: 0 }}>
+              <span>位置（绝对路径）*</span>
+              <input className="sg-input" value={locator} onChange={(e) => setLocator(e.target.value)} placeholder="/Users/you/project" />
+            </label>
+            <button className="sg-btn sg-btn--primary" disabled={busy || !name.trim() || !locator.trim()} onClick={addSource}>
+              添加
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="sg-kbv2-layout">
+        {/* 左：目录树 */}
+        <aside className="sg-kbv2-side">
+          <div className="sg-kbv2-side-title">任务产物</div>
+          {artifactGroups.size === 0 ? (
+            <div className="sg-kbv2-empty">本项目的任务还没有产出工件。</div>
+          ) : (
+            [...artifactGroups.entries()].map(([title, rows]) => (
+              <div key={title} className="sg-kbv2-group">
+                <div className="sg-kbv2-group-name">{title}</div>
+                {rows.map((a) => {
+                  const active = selection?.kind === 'artifact' && selection.id === a.id;
+                  return (
+                    <button
+                      key={a.id}
+                      className={`sg-kbv2-item${active ? ' sg-kbv2-item--active' : ''}`}
+                      onClick={() => selectArtifact(a)}
+                    >
+                      <IconDoc size={12} />
+                      {ARTIFACT_KIND[a.kind] ?? a.kind}
+                    </button>
+                  );
+                })}
+              </div>
+            ))
+          )}
+
+          <div className="sg-kbv2-side-title" style={{ marginTop: 14 }}>
+            知识来源（{sources.length}）
+          </div>
+          {sources.length === 0 ? (
+            <div className="sg-kbv2-empty">点右上角「添加来源」接入仓库、文档或规则。</div>
+          ) : (
+            sources.map((s) => {
+              const active = selection?.kind === 'source' && selection.id === s.id;
+              return (
+                <button
+                  key={s.id}
+                  className={`sg-kbv2-item${active ? ' sg-kbv2-item--active' : ''}`}
+                  onClick={() => setSelection({ kind: 'source', id: s.id })}
+                >
+                  {kindIcon(s.kind)}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
+                  {!s.enabled ? <span className="sg-kbv2-item-tag">停用</span> : null}
+                </button>
+              );
+            })
+          )}
+        </aside>
+
+        {/* 右：预览 / 编辑 / 管理 */}
+        <section className="sg-kbv2-main">
+          {showAdd && !selection ? (
+            <div className="sg-kbv2-hint">来源添加表单在上方；添加后会出现在左侧目录。</div>
+          ) : null}
+
+          {!selected ? (
+            <div className="sg-kbv2-hint" style={{ alignItems: 'center' }}>
+              <IconBook size={22} />
+              <div style={{ textAlign: 'center' }}>
+                从左侧目录选择产物或知识来源
+                <div className="sg-sub" style={{ marginTop: 6 }}>
+                  产物支持 Markdown 预览与草稿编辑；知识来源可扫描、启停与检索试用。
+                </div>
+              </div>
             </div>
           ) : null}
 
-          <div className="sg-banner sg-banner--info" style={{ margin: '12px 16px 0' }}>
-            <IconBook size={14} style={{ flexShrink: 0, marginTop: 2 }} />
-            <span>
-              项目边界：{projectName || '本项目'} · 不会检索其他项目。来源只在当前项目内检索，任务仅使用已确认的上下文。
-            </span>
-          </div>
-
-          {showAdd && (
-            <div className="sg-card" style={{ margin: '12px 16px 0' }}>
-              <div className="sg-card-head">
-                添加知识来源
-                <span className="sg-card-extra">
-                  <button className="sg-icon-btn" aria-label="关闭" onClick={() => setShowAdd(false)}>
-                    <IconX size={13} />
-                  </button>
+          {/* 产物：Markdown 预览 / 草稿编辑 */}
+          {selectedArtifact ? (
+            <>
+              <div className="sg-kbv2-main-head">
+                <span className="sg-kbv2-crumb">
+                  {selectedArtifact.workitemTitle} / {ARTIFACT_KIND[selectedArtifact.kind] ?? selectedArtifact.kind}
                 </span>
-              </div>
-              <div style={{ padding: '12px 14px', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                <label className="sg-field" style={{ width: 130, marginBottom: 0 }}>
-                  <span>类型</span>
-                  <select className="sg-input" value={kind} onChange={(e) => setKind(e.target.value)}>
-                    <option value="repo_path">仓库目录</option>
-                    <option value="document">文档</option>
-                    <option value="openapi">OpenAPI</option>
-                    <option value="rule">规则</option>
-                  </select>
-                </label>
-                <label className="sg-field" style={{ width: 200, marginBottom: 0 }}>
-                  <span>名称 *</span>
-                  <input className="sg-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="主仓库" />
-                </label>
-                <label className="sg-field" style={{ flex: 1, minWidth: 220, marginBottom: 0 }}>
-                  <span>位置（绝对路径）*</span>
-                  <input className="sg-input" value={locator} onChange={(e) => setLocator(e.target.value)} placeholder="/Users/you/project" />
-                </label>
-                <button
-                  className="sg-btn sg-btn--primary"
-                  disabled={busy || !name.trim() || !locator.trim()}
-                  onClick={addSource}
-                >
-                  添加
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div className="sg-card" style={{ margin: '12px 16px 0' }}>
-            <table className="sg-table">
-              <thead>
-                <tr><th>来源</th><th>类型</th><th>位置</th><th>索引状态</th><th>最后扫描</th><th /></tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 ? (
-                  <tr>
-                    <td colSpan={6}>
-                      <div className="sg-empty" style={{ padding: '28px 24px' }}>
-                        {sources.length === 0 ? '尚无来源。点击右上角「添加来源」接入仓库、文档或规则。' : '没有匹配的来源。'}
-                      </div>
-                    </td>
-                  </tr>
-                ) : filtered.map((source) => (
-                  <tr
-                    key={source.id}
-                    className={selectedId === source.id ? 'is-selected' : ''}
-                    onClick={() => setSelectedId(source.id)}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <td>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontWeight: 500 }}>
-                        {kindIcon(source.kind)}
-                        {source.name}
-                      </span>
-                    </td>
-                    <td><span className="sg-chip">{KIND_TAGS[source.kind] ?? source.kind}</span></td>
-                    <td><span className="sg-muted sg-code" style={{ fontSize: 11 }}>{source.locator}</span></td>
-                    <td>
-                      <span className={`sg-status ${statusClass(source)}`}>
-                        {statusLabel(source)}
-                      </span>
-                    </td>
-                    <td className="sg-muted">
-                      {source.last_scanned_at ? new Date(source.last_scanned_at).toLocaleString('zh-CN') : '—'}
-                    </td>
-                    <td onClick={(e) => e.stopPropagation()}>
-                      <button className="sg-btn sg-btn--sm" disabled={busy} onClick={() => scan(source.id)}>
-                        扫描
+                <div className="sg-kbv2-main-actions">
+                  {artifactRev && artifactRev.status === 'draft' ? (
+                    artifactMode === 'edit' ? (
+                      <button className="sg-btn sg-btn--primary sg-btn--sm" onClick={() => void saveArtifactEdit()}>
+                        保存
                       </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="sg-card" style={{ margin: '12px 16px 0' }}>
-            <div className="sg-card-head">
-              本次任务已选来源
-              <span className="sg-card-extra">{enabledSources.length} 个启用</span>
-            </div>
-            {enabledSources.length === 0 ? (
-              <div className="sg-empty" style={{ padding: '20px 24px' }}>
-                暂无启用的来源；任务上下文将只包含需求描述。
+                    ) : (
+                      <button
+                        className="sg-btn sg-btn--sm"
+                        onClick={() => {
+                          setArtifactEdit(artifactContent);
+                          setArtifactNotice('');
+                          setArtifactMode('edit');
+                        }}
+                      >
+                        编辑
+                      </button>
+                    )
+                  ) : (
+                    <span className="sg-kbv2-readonly">只读</span>
+                  )}
+                </div>
               </div>
-            ) : (
-              <div style={{ padding: '10px 14px 12px', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {enabledSources.map((s) => (
-                  <span className="sg-composer-chip" key={s.id}>
-                    {kindIcon(s.kind)}
-                    {s.name}
-                    <span className="sg-muted">{KIND_TAGS[s.kind] ?? s.kind}</span>
-                    <button
-                      className="sg-icon-btn"
-                      style={{ width: 16, height: 16 }}
-                      aria-label={`停用 ${s.name}`}
-                      title="从本次上下文移除（停用来源）"
-                      onClick={() => toggle(s)}
-                    >
-                      <IconX size={10} />
-                    </button>
-                  </span>
-                ))}
+              <div className="sg-kbv2-scroll">
+                {artifactLoading ? (
+                  <div className="sg-kbv2-loading">正在加载…</div>
+                ) : artifactMode === 'edit' ? (
+                  <textarea
+                    className="sg-kbv2-edit"
+                    value={artifactEdit}
+                    onChange={(e) => setArtifactEdit(e.target.value)}
+                    aria-label="编辑产物内容"
+                  />
+                ) : (
+                  <div className="sg-kbv2-body sg-md-body">
+                    <div dangerouslySetInnerHTML={{ __html: renderMarkdown(artifactContent) }} />
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-
-          <div className="sg-card" style={{ margin: '12px 16px 24px' }}>
-            <div className="sg-card-head">检索试用</div>
-            <div style={{ padding: '12px 14px', display: 'grid', gap: 10 }}>
-              <div className="sg-row">
-                <input
-                  className="sg-input"
-                  style={{ flex: 1 }}
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="输入关键词（如：登录 认证）"
-                  onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); }}
-                />
-                <button className="sg-btn" disabled={!query.trim()} onClick={runSearch}>搜索</button>
-              </div>
-              {hits.length > 0 ? (
-                <ul style={{ margin: 0, paddingLeft: 18 }}>
-                  {hits.slice(0, 8).map((hit) => (
-                    <li key={hit.chunkId} className="sg-muted" style={{ marginBottom: 6 }}>
-                      {hit.snippet.split('\n').slice(0, 3).join(' / ')}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-          </div>
-        </div>
-
-        {selected && (
-          <aside className="sg-kb-drawer">
-            <div className="sg-section" style={{ borderBottom: '1px solid var(--sg-border-default)' }}>
-              <div className="sg-row" style={{ justifyContent: 'space-between' }}>
-                <strong style={{ fontSize: 14, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  {kindIcon(selected.kind)}
-                  {selected.name}
-                </strong>
-                <button className="sg-icon-btn" aria-label="关闭详情" onClick={() => setSelectedId(null)}>
-                  <IconX size={14} />
-                </button>
-              </div>
-              <div style={{ marginTop: 8 }}>
-                <span className={`sg-status ${statusClass(selected)}`}>{statusLabel(selected)}</span>
-              </div>
-            </div>
-
-            <div className="sg-section">
-              <dl className="sg-kv">
-                <dt>类型</dt>
-                <dd>{KIND_TAGS[selected.kind] ?? selected.kind}</dd>
-                <dt>位置</dt>
-                <dd className="sg-code">{selected.locator}</dd>
-                <dt>启用</dt>
-                <dd>{selected.enabled ? '是' : '否'}</dd>
-                <dt>最后索引</dt>
-                <dd>{selected.last_scanned_at ? new Date(selected.last_scanned_at).toLocaleString('zh-CN') : '—'}</dd>
-              </dl>
-              {selected.error ? (
-                <div className="sg-banner sg-banner--error" style={{ marginTop: 12 }}>
-                  {selected.error}
+              {artifactNotice ? <div className="sg-kbv2-note sg-kbv2-note--error">{artifactNotice}</div> : null}
+              {artifactRev && artifactRev.status !== 'draft' && artifactMode !== 'edit' ? (
+                <div className="sg-kbv2-note">
+                  当前版本已定稿（{artifactRev.status}），如需修改请在门禁评审中发起新修订。
                 </div>
               ) : null}
-            </div>
+            </>
+          ) : null}
 
-            <div className="sg-section" style={{ display: 'grid', gap: 8 }}>
-              <button className="sg-btn sg-btn--primary" disabled={busy} onClick={() => scan(selected.id)}>
-                重新扫描
-              </button>
-              <button className="sg-btn" onClick={() => toggle(selected)}>
-                {selected.enabled ? '停用（移出任务上下文）' : '启用（加入任务上下文）'}
-              </button>
-              <button className="sg-btn sg-btn--danger" onClick={() => remove(selected.id)}>
-                移除来源
-              </button>
-            </div>
-          </aside>
-        )}
+          {/* 来源：管理详情 + 检索试用 */}
+          {selectedSource ? (
+            <>
+              <div className="sg-kbv2-main-head">
+                <span className="sg-kbv2-crumb">
+                  {kindIcon(selectedSource.kind)}
+                  {selectedSource.name}
+                </span>
+                <div className="sg-kbv2-main-actions">
+                  <span className={`sg-status ${statusClass(selectedSource)}`}>{statusLabel(selectedSource)}</span>
+                  <button className="sg-btn sg-btn--sm" disabled={busy} onClick={() => scan(selectedSource.id)}>
+                    重新扫描
+                  </button>
+                  <button className="sg-btn sg-btn--sm" onClick={() => toggleSource(selectedSource)}>
+                    {selectedSource.enabled ? '停用' : '启用'}
+                  </button>
+                  <button className="sg-btn sg-btn--danger sg-btn--sm" onClick={() => removeSource(selectedSource.id)}>
+                    移除
+                  </button>
+                </div>
+              </div>
+              <div className="sg-kbv2-scroll">
+              <div className="sg-kbv2-body">
+                <div className="sg-card" style={{ margin: '0 0 14px' }}>
+                  <div className="sg-card-head">来源信息</div>
+                  <div style={{ padding: '10px 14px' }}>
+                    <dl className="sg-kv">
+                      <dt>类型</dt>
+                      <dd>{KIND_TAGS[selectedSource.kind] ?? selectedSource.kind}</dd>
+                      <dt>位置</dt>
+                      <dd className="sg-code">{selectedSource.locator}</dd>
+                      <dt>启用</dt>
+                      <dd>{selectedSource.enabled ? '是（参与任务上下文）' : '否'}</dd>
+                      <dt>最后索引</dt>
+                      <dd>
+                        {selectedSource.last_scanned_at
+                          ? new Date(selectedSource.last_scanned_at).toLocaleString('zh-CN')
+                          : '—'}
+                      </dd>
+                    </dl>
+                    {selectedSource.error ? (
+                      <div className="sg-banner sg-banner--error" style={{ marginTop: 10 }}>
+                        {selectedSource.error}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="sg-card">
+                  <div className="sg-card-head">检索试用</div>
+                  <div style={{ padding: '12px 14px', display: 'grid', gap: 10 }}>
+                    <div className="sg-row">
+                      <input
+                        className="sg-input"
+                        style={{ flex: 1 }}
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="输入关键词（如：登录 认证）"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') runSearch();
+                        }}
+                      />
+                      <button className="sg-btn" disabled={!query.trim()} onClick={runSearch}>
+                        搜索
+                      </button>
+                    </div>
+                    {hits.length > 0 ? (
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {hits.slice(0, 8).map((hit, index) => (
+                          <li key={index} style={{ marginBottom: 8 }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                              <span className="sg-chip">{hit.source_name || '未知来源'}</span>
+                              <span style={{ fontSize: 12.5 }}>{hit.title || hit.path || ''}</span>
+                              {typeof hit.score === 'number' && hit.score > 0 ? (
+                                <span className="sg-muted" style={{ marginLeft: 'auto', fontSize: 12 }}>
+                                  相关度 {hit.score}
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="sg-muted">{hit.snippet.split('\n').slice(0, 3).join(' / ')}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+              </div>
+            </>
+          ) : null}
+        </section>
       </div>
-    </>
+    </div>
   );
 }
 

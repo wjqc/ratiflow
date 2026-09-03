@@ -264,6 +264,9 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             }
             let models = sg_integrations::list_models(&base, &api_key)
                 .map_err(|e| RpcError::new(ErrorCode::InternalError, e))?;
+            // 持久化到 models_json：设置页与工作台模型选择器重启后仍可用。
+            settings::profiles::model_set_models(store, &profile.id, &models).map_err(serr)?;
+            changed(store, "modelProfile", &profile.id);
             Ok(json!({"models": models}))
         }
         "modelRoute.get" => settings::profiles::route_get(store).map_err(serr),

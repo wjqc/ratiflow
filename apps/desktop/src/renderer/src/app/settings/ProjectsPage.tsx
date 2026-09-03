@@ -29,6 +29,11 @@ export function ProjectsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [showRemote, setShowRemote] = useState(false);
   const [remote, setRemote] = useState(EMPTY_REMOTE);
+  // 已归档任务（侧栏移除即归档，原本从界面"永久消失"）；这里提供唯一的找回入口。
+  const [archivedTasks, setArchivedTasks] = useState<
+    Array<{ id: string; title: string; projectId: string; projectName: string }>
+  >([]);
+  const [restoringTask, setRestoringTask] = useState('');
 
   const load = useCallback(async (archived: boolean) => {
     setLoading(true);
@@ -43,9 +48,34 @@ export function ProjectsPage() {
     }
   }, []);
 
+  const loadArchivedTasks = useCallback(async () => {
+    try {
+      const projects = await rpc<{ items: ProjectRow[] }>('project.list', { includeArchived: false });
+      const out: Array<{ id: string; title: string; projectId: string; projectName: string }> = [];
+      for (const p of projects.items ?? []) {
+        const r = await rpc<{ items: Array<{ id: string; title: string; archived_at?: string }> }>(
+          'workitem.list',
+          { projectId: p.id, limit: 50, includeArchived: true },
+        );
+        for (const t of r.items ?? []) {
+          if (t.archived_at) out.push({ id: t.id, title: t.title, projectId: p.id, projectName: p.name });
+        }
+      }
+      setArchivedTasks(out);
+    } catch {
+      // 只读增强：失败不打断项目列表。
+    }
+  }, []);
+
   useEffect(() => {
     void load(includeArchived);
-  }, [includeArchived, load]);
+    void loadArchivedTasks();
+  }, [includeArchived, load, loadArchivedTasks]);
+
+  // 项目列表是 AppShell 的侧栏数据源：设置内的增删改必须广播，否则侧栏不刷新。
+  const notifyProjectsChanged = () => window.dispatchEvent(new CustomEvent('sg:projects-changed'));
+  // 任务归档/恢复后广播，侧栏与首页「最近任务」按缓存重载。
+  const notifyTasksChanged = () => window.dispatchEvent(new CustomEvent('sg:tasks-changed'));
 
   const openFolder = async () => {
     setBusy(true);
@@ -65,6 +95,7 @@ export function ProjectsPage() {
       });
       setNotice(`“${project.name}”已添加，可以直接在新建任务中使用。`);
       await load(includeArchived);
+      notifyProjectsChanged();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '无法打开该文件夹');
     } finally {
@@ -89,10 +120,26 @@ export function ProjectsPage() {
       setRemote(EMPTY_REMOTE);
       setShowRemote(false);
       await load(includeArchived);
+      notifyProjectsChanged();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '远程项目连接失败');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const restoreTask = async (task: { id: string; title: string }) => {
+    setRestoringTask(task.id);
+    setError(null);
+    try {
+      await rpc('workitem.archive', { workItemId: task.id, archived: false });
+      setNotice(`任务「${task.title}」已恢复，重新打开项目可见。`);
+      await loadArchivedTasks();
+      notifyTasksChanged();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '恢复失败');
+    } finally {
+      setRestoringTask('');
     }
   };
 
@@ -102,6 +149,7 @@ export function ProjectsPage() {
       await rpc('project.archive', { projectId: project.id, archived });
       setNotice(archived ? `“${project.name}”已移到归档。` : `“${project.name}”已恢复。`);
       await load(includeArchived);
+      notifyProjectsChanged();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '操作失败');
     }
@@ -162,14 +210,36 @@ export function ProjectsPage() {
                 <div><h3>{project.name}</h3><p>{project.local_root || '未绑定本地目录'}</p></div>
                 <div className="sg-project-meta">
                   {project.gitlab_instance && project.gitlab_instance !== 'local' ? <span>{project.namespace}/{project.project}</span> : <span>仅本地</span>}
-                  <StatusPill kind={project.status === 'archived' ? 'readonly' : 'ready'} label={project.status === 'archived' ? '已归档' : '可用'} />
+                  <StatusPill kind={project.archived_at ? 'readonly' : 'ready'} label={project.archived_at ? '已归档' : '可用'} />
                 </div>
-                <button className="sg-btn sg-btn--sm" onClick={() => void archive(project, project.status !== 'archived')}>{project.status === 'archived' ? '恢复' : '归档'}</button>
+                <button className="sg-btn sg-btn--sm" onClick={() => void archive(project, !project.archived_at)}>{project.archived_at ? '恢复' : '归档'}</button>
               </article>
             ))}
           </div>
         )}
       </section>
+
+      {archivedTasks.length > 0 ? (
+        <section className="sg-project-list-section">
+          <div className="sg-project-list-head">
+            <div><h2>已归档任务</h2><p>侧栏移除的任务在这里，可恢复回项目。</p></div>
+          </div>
+          <div className="sg-project-rows">
+            {archivedTasks.map((task) => (
+              <article className="sg-project-row" key={task.id}>
+                <span className="sg-project-icon"><IconFolder size={18} /></span>
+                <div><h3>{task.title}</h3><p>{task.projectName}</p></div>
+                <div className="sg-project-meta">
+                  <StatusPill kind="readonly" label="已归档" />
+                </div>
+                <button className="sg-btn sg-btn--sm" disabled={restoringTask !== ''} onClick={() => void restoreTask(task)}>
+                  {restoringTask === task.id ? '恢复中…' : '恢复'}
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

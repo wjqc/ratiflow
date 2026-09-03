@@ -220,7 +220,7 @@ export default function NewTaskPage({
                     </button>
                     {mode === 'image' && file ? (
                       <p className="sg-muted" style={{ margin: '8px 0 0' }}>
-                        图片将作为附件导入并进入多模态解析；模型不支持视觉时会明确标记 vision_unsupported。
+                        图片将作为附件导入并进入多模态解析；若当前模型不支持看图，会在解析结果中明确提示。
                       </p>
                     ) : null}
                     {mode === 'document' && file && !file.content ? (

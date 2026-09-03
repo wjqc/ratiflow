@@ -378,7 +378,24 @@ function buildMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(async () => {
+// D5 多实例防线：双开会各自拉起 core 进程打开同一 SQLite，
+// 迁移窗口期的并发 ALTER 会 duplicate column 拒启——单实例锁 fail-closed。
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
+      mainWindow.focus();
+    }
+  });
+  void bootstrap();
+}
+
+function bootstrap(): void {
+  app.whenReady().then(async () => {
   buildMenu();
   // E2E 隔离：显式数据目录覆盖（发布构建不设此变量，不影响生产）。
   const userData = process.env.SIXGATES_E2E_DATA_DIR || app.getPath('userData');
@@ -405,6 +422,7 @@ app.whenReady().then(async () => {
     }
   });
 });
+}
 
 app.on('window-all-closed', () => {
   void client?.shutdown();

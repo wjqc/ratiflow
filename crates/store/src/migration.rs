@@ -32,6 +32,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0020_model_provider_presets.sql"),
     ),
     (21, include_str!("../migrations/0021_workitem_archive.sql")),
+    (
+        22,
+        include_str!("../migrations/0022_model_profile_models.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。
@@ -59,8 +63,23 @@ pub fn run(store: &crate::Store) -> Result<(), crate::Error> {
     // 预迁移备份（在线快照）。
     let _ = crate::backup::snapshot(store);
 
-    store.with_tx(|tx| {
-        for (version, body) in &pending {
+    // BEGIN IMMEDIATE + 锁内重读版本表：多进程同时升级（双开应用）时，
+    // 后到者在写锁内发现版本已推进，安全降级为 no-op，
+    // 不会对同一版本重复执行 ALTER 而报 duplicate column。
+    store.with_tx_immediate(|tx| {
+        let applied: std::collections::HashSet<i64> = {
+            let mut stmt = tx.prepare("SELECT version FROM schema_migrations")?;
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            let mut set = std::collections::HashSet::new();
+            for row in rows {
+                set.insert(row?);
+            }
+            set
+        };
+        for (version, body) in MIGRATIONS {
+            if applied.contains(version) {
+                continue;
+            }
             tx.execute_batch(body)
                 .map_err(|e| crate::Error::Message(format!("migration {version:04}: {e}")))?;
             tx.execute(

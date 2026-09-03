@@ -13,6 +13,17 @@ struct Resolved {
     base_url: String,
     model: String,
     api_key: String,
+    /// 供应商声明的输出上限（limits.maxOutputTokens）：请求侧超限会被端点 400 拒绝。
+    max_output_tokens: Option<i64>,
+}
+
+/// limits_json 约定键：maxOutputTokens（兼容 max_output_tokens）；<=0 视为未声明。
+fn parse_max_output_tokens(limits: &serde_json::Value) -> Option<i64> {
+    limits
+        .get("maxOutputTokens")
+        .or_else(|| limits.get("max_output_tokens"))
+        .and_then(|v| v.as_i64())
+        .filter(|v| *v > 0)
 }
 
 pub struct ProfileModel {
@@ -44,9 +55,15 @@ impl ProfileModel {
     /// 非托管 Profile（kind 可运行 + 有 Base URL + 能取到 API Key）。
     fn resolve(&self) -> Option<Resolved> {
         let items = profiles::model_list(&self.store).ok()?;
+        // 主档路由精确匹配 (scope=global, taskKind=default)：
+        // 其余 scope/taskKind 的路由是未来扩展位，不得旁路掉用户在 UI 设的默认。
         let primary: Option<String> = profiles::route_get(&self.store).ok().and_then(|routes| {
             routes.as_array().and_then(|list| {
                 list.iter()
+                    .filter(|r| {
+                        r.get("scope").and_then(|v| v.as_str()) == Some("global")
+                            && r.get("taskKind").and_then(|v| v.as_str()) == Some("default")
+                    })
                     .map(|r| {
                         r.get("primaryProfileId")
                             .and_then(|v| v.as_str())
@@ -77,6 +94,7 @@ impl ProfileModel {
                 base_url,
                 model: profile.default_model.clone(),
                 api_key,
+                max_output_tokens: parse_max_output_tokens(&profile.limits),
             })
         };
 
@@ -98,14 +116,26 @@ impl ProfileModel {
             .find_map(resolve_profile)
     }
 
-    /// 解析成功 → 构建 OpenAI 兼容委托；失败 → 走 fake 兜底。
-    fn delegate(&self) -> Result<sg_integrations::ModelHttp, ()> {
+    /// 解析成功 → (OpenAI 兼容委托, 输出上限钳制)；失败 → 走 fake 兜底。
+    fn delegate_with(
+        &self,
+        req: &CompletionRequest,
+    ) -> Result<(sg_integrations::ModelHttp, CompletionRequest), ()> {
         self.resolve()
-            .map(|r| sg_integrations::ModelHttp {
-                name_value: "profile-routed".into(),
-                base_url: r.base_url,
-                api_key: r.api_key,
-                model: r.model,
+            .map(|r| {
+                let mut req = req.clone();
+                if let Some(limit) = r.max_output_tokens {
+                    req.max_tokens = req.max_tokens.min(limit);
+                }
+                (
+                    sg_integrations::ModelHttp {
+                        name_value: "profile-routed".into(),
+                        base_url: r.base_url,
+                        api_key: r.api_key,
+                        model: r.model,
+                    },
+                    req,
+                )
             })
             .ok_or(())
     }
@@ -117,8 +147,14 @@ impl ModelProvider for ProfileModel {
     }
 
     fn health_check(&self) -> Result<(), String> {
-        match self.delegate() {
-            Ok(http) => http.health_check(),
+        match self.delegate_with(&CompletionRequest {
+            model: String::new(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            max_tokens: 0,
+            response_schema: None,
+        }) {
+            Ok((http, _)) => http.health_check(),
             Err(()) if self.fallback_enabled => self.fallback.health_check(),
             Err(()) => {
                 Err("model_unavailable: 未找到可用模型，请到“设置 → 模型”完成连接测试".into())
@@ -127,12 +163,39 @@ impl ModelProvider for ProfileModel {
     }
 
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, String> {
-        match self.delegate() {
-            Ok(http) => http.complete(req),
+        match self.delegate_with(req) {
+            Ok((http, req)) => http.complete(&req),
             Err(()) if self.fallback_enabled => self.fallback.complete(req),
             Err(()) => {
                 Err("model_unavailable: 未找到可用模型，请到“设置 → 模型”完成连接测试".into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_max_output_tokens;
+
+    #[test]
+    fn parse_max_output_tokens_reads_limits_convention() {
+        // D4：请求侧 max_tokens 必须按供应商声明钳制，超限会被端点 400 拒绝。
+        assert_eq!(
+            parse_max_output_tokens(&serde_json::json!({"maxOutputTokens": 8192})),
+            Some(8192)
+        );
+        assert_eq!(
+            parse_max_output_tokens(&serde_json::json!({"max_output_tokens": 4096})),
+            Some(4096)
+        );
+        assert_eq!(
+            parse_max_output_tokens(&serde_json::json!({"maxOutputTokens": 0})),
+            None
+        );
+        assert_eq!(
+            parse_max_output_tokens(&serde_json::json!({"other": 1})),
+            None
+        );
+        assert_eq!(parse_max_output_tokens(&serde_json::json!(null)), None);
     }
 }

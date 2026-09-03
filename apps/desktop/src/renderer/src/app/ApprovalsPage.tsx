@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { rpc, rpcErrorMessage } from '../rpc/client';
+import { renderMarkdown } from '../lib/markdown';
 import { IconAlert, IconCheck, IconShield } from '../components/Icons';
 
 interface ApprovalInfo {
@@ -9,7 +10,7 @@ interface ApprovalInfo {
 
 interface ReleaseDetail {
   releaseRequest: { id: string; release_digest: string; state: string };
-  attempt?: { gate: string; attempt_no: number; state: string };
+  attempt?: { gate: string; attempt_no: number; state: string; workitem_id?: string };
   package?: { digest: string; packageNo: number; coverage?: { totalItems: number; coveredCount: number; verifiedCount: number } };
   items?: { role: string; nodeType: string; entityId: string }[];
 }
@@ -68,12 +69,58 @@ export default function ApprovalsPage({ onDecided }: Props) {
   const selected = visible.find((a) => a.id === selectedId) ?? visible[0] ?? null;
 
   const [releaseDetail, setReleaseDetail] = useState<ReleaseDetail | null>(null);
+  // 审批人要看的交付内容：该任务各工件（PRD/技术方案…）的当前修订全文。
+  const [deliverables, setDeliverables] = useState<
+    Array<{ id: string; label: string; content: string }>
+  >([]);
   useEffect(() => {
     let alive = true;
     setReleaseDetail(null);
-    if (selected?.subject_type !== 'gate_release') return;
+    if (selected?.subject_type !== 'gate_release') {
+      if (alive) setDeliverables([]);
+      return;
+    }
     void rpc<ReleaseDetail>('gate.getRelease', { releaseId: selected.subject_id })
-      .then((d) => { if (alive) setReleaseDetail(d); })
+      .then(async (d) => {
+        if (alive) setReleaseDetail(d);
+        if (!alive) return;
+        // 拉取该任务各工件的当前修订全文，作为审批人要看的交付内容。
+        const workitemId = d.attempt?.workitem_id;
+        if (!workitemId) return;
+        try {
+          const arts = await rpc<{
+            items: Array<{ id: string; kind: string; title: string }>;
+          }>('artifact.list', { workItemId: workitemId });
+          const KINDS: Record<string, string> = {
+            prd: 'PRD', tech_design: '技术方案', code: '代码产出',
+            test: '测试产出', deployment: '部署产物', verification: '验收产出',
+          };
+          const docs: Array<{ id: string; label: string; content: string }> = [];
+          for (const a of arts.items ?? []) {
+            try {
+              const revs = await rpc<{ items: Array<{ id: string; status: string }> }>(
+                'artifact.listRevisions',
+                { artifactId: a.id },
+              );
+              const cur = (revs.items ?? []).find((r) => r.status !== 'superseded') ?? (revs.items ?? [])[0];
+              if (!cur) continue;
+              const body = await rpc<{ content: string }>('artifact.revisionContent', {
+                revisionId: cur.id,
+              });
+              docs.push({
+                id: a.id,
+                label: KINDS[a.kind] ?? a.title ?? a.kind,
+                content: body.content ?? '',
+              });
+            } catch {
+              /* 单个工件读取失败跳过 */
+            }
+          }
+          if (alive) setDeliverables(docs);
+        } catch {
+          if (alive) setDeliverables([]);
+        }
+      })
       .catch(() => {});
     return () => { alive = false; };
   }, [selected]);
@@ -179,31 +226,12 @@ export default function ApprovalsPage({ onDecided }: Props) {
                 </span>
               </div>
 
-              <div className="sg-ap-block">
-                <div className="sg-ap-block-label">动作目标</div>
-                <dl className="sg-kv">
-                  <dt>类型</dt>
-                  <dd>{subjectLabel(selected.subject_type)}</dd>
-                  <dt>对象</dt>
-                  <dd className="sg-code">{selected.subject_id}</dd>
-                </dl>
-              </div>
-
-              <div className="sg-ap-block">
-                <div className="sg-ap-block-label">ActionDigest</div>
-                <div className="sg-code sg-muted" style={{ wordBreak: 'break-all' }}>
-                  {selected.action_digest || selected.subject_id}
-                </div>
-              </div>
-
               {selected.subject_type === 'gate_release' && releaseDetail ? (
                 <div className="sg-ap-block">
                   <div className="sg-ap-block-label">放行详情</div>
                   <dl className="sg-kv">
                     <dt>关卡</dt>
                     <dd>{releaseDetail.attempt?.gate ?? '—'}（第 {releaseDetail.attempt?.attempt_no ?? '—'} 次尝试）</dd>
-                    <dt>输出包 digest</dt>
-                    <dd className="sg-code">{releaseDetail.package?.digest ?? releaseDetail.releaseRequest.release_digest}</dd>
                     <dt>需求覆盖</dt>
                     <dd>
                       {releaseDetail.package?.coverage
@@ -217,12 +245,32 @@ export default function ApprovalsPage({ onDecided }: Props) {
                 </div>
               ) : null}
 
-              {selected.reason ? (
+              {selected.subject_type === 'gate_release' && deliverables.length > 0 ? (
                 <div className="sg-ap-block">
-                  <div className="sg-ap-block-label">申请理由</div>
-                  <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7 }}>{selected.reason}</p>
+                  <div className="sg-ap-block-label">交付内容（进入下一阶段的文档）</div>
+                  {deliverables.map((d) => (
+                    <div key={d.id} style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>{d.label}</div>
+                      <div
+                        className="sg-md-body"
+                        style={{
+                          border: '1px solid var(--sg-border-default)',
+                          borderRadius: 8,
+                          padding: '12px 14px',
+                          maxHeight: 320,
+                          overflowY: 'auto',
+                        }}
+                        dangerouslySetInnerHTML={{ __html: renderMarkdown(d.content) }}
+                      />
+                    </div>
+                  ))}
                 </div>
               ) : null}
+
+              <div className="sg-ap-block">
+                <div className="sg-ap-block-label">申请理由</div>
+                <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7 }}>{selected.reason}</p>
+              </div>
 
               <div className="sg-banner sg-banner--warning">
                 <IconAlert size={14} style={{ flexShrink: 0, marginTop: 2 }} />

@@ -378,17 +378,38 @@
           "name": "limit",
           "type": "number",
           "required": false
+        },
+        {
+          "name": "includeArchived",
+          "type": "boolean",
+          "required": false
         }
       ],
       "result": "value"
     },
     {
-      "name": "workitem.get",
+      "name": "workitem.archive",
       "params": [
         {
           "name": "workItemId",
           "type": "string",
           "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workitem.archive",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "archived",
+          "type": "boolean",
+          "required": false
         }
       ],
       "result": "value"

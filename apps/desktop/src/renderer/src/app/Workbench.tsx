@@ -3,12 +3,14 @@ import type { ReactNode } from 'react';
 import { rpc, waitForRunTerminal } from '../rpc/client';
 import type { TimelineEvent } from '../rpc/client';
 import { gateLabel } from './ProjectSidebar';
-import { relativeTime } from '../lib/format';
+import { formatDateTime, relativeTime } from '../lib/format';
 import {
   IconAlert,
   IconArrowLeft,
+  IconChevronDown,
   IconBook,
   IconCheck,
+  IconCpu,
   IconDoc,
   IconEdit,
   IconImage,
@@ -26,13 +28,15 @@ import DocGatePanel, { EvaluateButton } from './DocGatePanel';
 import DevGatePanel from './DevGatePanel';
 import DeployGatePanel from './DeployGatePanel';
 import TracePanel from './TracePanel';
+import { ModelPicker } from './ModelPicker';
+import { useTwoStepConfirm } from './settings/components/useTwoStepConfirm';
 import {
   clearAutomaticPrd,
-  draftPrd,
   finishPrdDraft,
   friendlyAgentError,
   readAutomaticPrd,
   rememberAutomaticPrd,
+  startPrdDraft,
 } from './prdDraft';
 
 /* ---------------- 类型：与 Rust 序列化结构一一对应 ---------------- */
@@ -100,11 +104,69 @@ const GATE_SUBS: Record<Gate, string> = {
 
 const GATE_STATE_LABELS: Record<string, string> = {
   pending: '未开始',
+  not_started: '未开始',
   in_progress: '进行中',
+  running: '进行中',
+  prepared: '已准备',
+  awaiting_approval: '等待放行',
   blocked: '被阻塞',
+  stale: '基线过期',
   passed: '已通过',
   failed: '未通过',
   cancelled: '已取消',
+};
+
+interface AgentRunInfo {
+  id: string;
+  goal: string;
+  status: string;
+  result: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TraceStep {
+  kind: string;
+  seq: number;
+  ts: string;
+  name: string;
+  summary?: string;
+  proposeTs?: string;
+  preview?: string;
+}
+
+interface RunTrace {
+  steps: TraceStep[];
+  checkpoints: { seq: number; createdAt: string }[];
+}
+
+/** 各关的本关要求（展示用清单，与门禁就绪检查互补）。 */
+const GATE_REQUIREMENTS: Record<Gate, string[]> = {
+  requirements: ['完成需求澄清与确认', '完成 PRD 并存储到知识库', '通过评审并放行'],
+  design: ['完成技术方案设计', '方案评审通过并冻结基线', '通过评审并放行'],
+  development: ['完成编码实现与自测', '通过代码评审', '通过评审并放行'],
+  testing: ['完成集成测试', '缺陷清零或达成豁免', '通过评审并放行'],
+  deployment: ['完成发布与环境准备', '部署到目标环境', '通过评审并放行'],
+  verification: ['完成验收确认', '交付物归档', '通过验收并放行'],
+};
+
+/** 各关默认执行 Agent 名称（展示用）。 */
+const GATE_AGENT: Record<Gate, string> = {
+  requirements: '需求分析 Agent',
+  design: '方案设计 Agent',
+  development: '开发实施 Agent',
+  testing: '质量校验 Agent',
+  deployment: '部署执行 Agent',
+  verification: '验收确认 Agent',
+};
+
+const RUN_STATUS: Record<string, { label: string; cls: string }> = {
+  queued: { label: '排队中', cls: 'pending' },
+  running: { label: '进行中', cls: 'active' },
+  paused: { label: '等待审批', cls: 'blocked' },
+  completed_execution: { label: '已完成', cls: 'done' },
+  failed: { label: '失败', cls: 'failed' },
+  cancelled: { label: '已取消', cls: 'pending' },
 };
 
 type StageVisual = 'done' | 'active' | 'blocked' | 'failed' | 'idle';
@@ -114,6 +176,9 @@ function stageVisual(state?: string): StageVisual {
     case 'passed':
       return 'done';
     case 'in_progress':
+    case 'running':
+    case 'awaiting_approval':
+    case 'prepared':
       return 'active';
     case 'blocked':
       return 'blocked';
@@ -146,25 +211,35 @@ export function Workbench({
   const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [evidences, setEvidences] = useState<EvidenceInfo[]>([]);
+  const [runs, setRuns] = useState<AgentRunInfo[]>([]);
+  const [docs, setDocs] = useState<string[]>([]);
+  const [trace, setTrace] = useState<RunTrace | null>(null);
   const [error, setError] = useState('');
   const [view, setView] = useState<'timeline' | 'gate'>('timeline');
+  const [gateTab, setGateTab] = useState<'process' | 'materials' | 'evidence' | 'review'>('process');
+  // 右下角悬浮详情卡（跟随当前关）：胶囊化状态。
+  const [detailMinimized, setDetailMinimized] = useState(false);
   const [prdState, setPrdState] = useState<'idle' | 'drafting' | 'ready' | 'failed'>('idle');
   const [prdMessage, setPrdMessage] = useState('');
 
   const loadAll = useCallback(async () => {
     try {
-      const [detail, prog, atts, tl, evs] = await Promise.all([
+      const [detail, prog, atts, tl, evs, runList, docList] = await Promise.all([
         rpc<{ workItem: WorkItemDetail; stages: StageInfo[] }>('workitem.get', { workItemId }),
         rpc<ProgressInfo>('workitem.progress', { workItemId }),
         rpc<{ items: AttachmentInfo[] }>('attachment.list', { workItemId }),
         rpc<{ events: TimelineEvent[]; latest: number }>('timeline.snapshot', { workItemId, afterSeq: 0 }),
         rpc<{ items: EvidenceInfo[] }>('evidence.list', { workItemId }),
+        rpc<{ items: AgentRunInfo[] }>('agent.list', { workItemId, limit: 6 }).catch(() => ({ items: [] })),
+        rpc<{ items: string[] }>('workitem.documents', { workItemId }).catch(() => ({ items: [] })),
       ]);
       setWorkItem(detail.workItem);
       setProgress(prog);
       setAttachments(atts.items ?? []);
       setEvents(tl.events ?? []);
       setEvidences(evs.items ?? []);
+      setRuns(runList.items ?? []);
+      setDocs(docList.items ?? []);
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -195,6 +270,7 @@ export function Workbench({
         setPrdState('ready');
         setPrdMessage('PRD 草稿已生成并保存，等待你的审阅。');
         await loadAll();
+        setGateTab('review');
         setView('gate');
       })
       .catch((reason) => {
@@ -220,6 +296,26 @@ export function Workbench({
       clearInterval(t);
     };
   }, [loadAll]);
+
+  // 最新 Run 的执行轨迹（推理摘要 + 工具调用 + 检查点）。
+  useEffect(() => {
+    const runId = runs[0]?.id;
+    if (!runId) {
+      setTrace(null);
+      return;
+    }
+    let cancelled = false;
+    rpc<RunTrace>('agent.trace', { runId })
+      .then((t) => {
+        if (!cancelled) setTrace(t);
+      })
+      .catch(() => {
+        if (!cancelled) setTrace(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runs]);
 
   const stagesByGate = new Map((progress?.stages ?? []).map((s) => [s.gate, s]));
   const currentGate: Gate = GATES.includes(progress?.currentGate as Gate)
@@ -309,7 +405,10 @@ export function Workbench({
             requirementText={[workItem?.title, workItem?.description].filter(Boolean).join('\n')}
             knowledgeCount={knowledgeCount}
             onChanged={loadAll}
-            onOpenGate={() => setView('gate')}
+            onOpenGate={() => {
+              setGateTab('review');
+              setView('gate');
+            }}
             onOpenModels={() => onNavigate({ page: 'settings', section: 'models' })}
           />
         </div>
@@ -320,20 +419,421 @@ export function Workbench({
           progress={progress}
           evidences={gateEvidences}
           workItemId={workItemId}
+          events={events}
+          runs={runs}
+          docs={docs}
+          trace={trace}
+          knowledgeCount={knowledgeCount}
+          tab={gateTab}
+          onTab={setGateTab}
           onChanged={loadAll}
           onBack={() => setView('timeline')}
           onOpenApprovals={() => onNavigate({ page: 'approvals' })}
         />
       )}
 
-      <GoalPanel
-        progress={progress}
-        workItem={workItem}
+      <GateDetailFloat
+        gate={currentGate}
         stagesByGate={stagesByGate}
-        currentGate={currentGate}
         gateOpen={view === 'gate'}
+        minimized={detailMinimized}
+        onToggleMinimized={() => setDetailMinimized((v) => !v)}
         onOpenGate={() => setView('gate')}
       />
+    </div>
+  );
+}
+
+/* ---------------- Run 执行轨迹（推理摘要 + 工具调用 + 检查点） ---------------- */
+
+/* ---------------- 执行过程（双栏：左时间线 / 右当前步骤面板） ---------------- */
+
+function formatElapsed(fromIso: string, toIso?: string): string {
+  const from = Date.parse(fromIso);
+  const to = toIso ? Date.parse(toIso) : Date.now();
+  if (Number.isNaN(from)) return '—';
+  const total = Math.max(0, Math.floor((to - from) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+function ExecutionProcessView({
+  gate,
+  stage,
+  progress,
+  events,
+  runs,
+  trace,
+  docs,
+  knowledgeCount,
+}: {
+  gate: Gate;
+  stage?: StageInfo;
+  progress: ProgressInfo | null;
+  events: TimelineEvent[];
+  runs: AgentRunInfo[];
+  trace: RunTrace | null;
+  docs: string[];
+  knowledgeCount: number;
+}) {
+  const [showReasoning, setShowReasoning] = useState(true);
+  const [showFinal, setShowFinal] = useState(false);
+  const steps = trace?.steps ?? [];
+  const toolSteps = steps.filter((s) => s.kind === 'tool');
+  const reasonSteps = steps.filter((s) => s.kind === 'reasoning');
+  const latestReason = reasonSteps[reasonSteps.length - 1] ?? null;
+  const failedRun = runs.find((r) => r.status === 'failed');
+  const finishedRun = runs.find((r) => r.status === 'completed_execution');
+  const activeRun = runs.find((r) => r.status === 'running' || r.status === 'queued') ?? runs[0] ?? null;
+
+  // 进度：以迭代步数估算（预算 40 次工具调用上限对齐 max_iterations 语义），完成即 100%。
+  const finished = activeRun?.status === 'completed_execution';
+  const totalSteps = Math.max(7, steps.length + 1);
+  const stepIndex = finished ? totalSteps : Math.min(steps.length, totalSteps - 1);
+  const percent = finished ? 100 : Math.round((stepIndex / totalSteps) * 100);
+  const elapsedFrom = activeRun?.created_at ?? stage?.updated_at;
+  const elapsedTo = finished ? activeRun?.updated_at : undefined;
+  const elapsed = elapsedFrom ? formatElapsed(elapsedFrom, elapsedTo) : '—';
+  const remaining =
+    !finished && percent > 0 && percent < 90 && elapsedFrom
+      ? formatElapsed(elapsedFrom, new Date().toISOString())
+      : null;
+
+  const inputDocs = docs.filter((d) => d.startsWith('requirement'));
+  const outputDocs = docs.filter((d) => !d.startsWith('requirement'));
+
+  return (
+    <div className="sg-process-grid">
+      {/* 左：执行时间线 */}
+      <div className="sg-card sg-process-left">
+        <div className="sg-card-head">执行时间线</div>
+        {steps.length === 0 ? (
+          <div className="sg-empty" style={{ padding: '20px 16px' }}>
+            Agent 尚未开始执行。在下方输入补充说明即可启动。
+          </div>
+        ) : (
+          <div className="sg-process-timeline">
+            {steps.map((step, index) => {
+              const isLast = index === steps.length - 1;
+              const done = step.kind === 'tool' || index < steps.length - 1 || finished;
+              return (
+                <div className="sg-process-tl-row" key={`${step.seq}-${index}`}>
+                  <span className="sg-process-tl-time">{timelineTime(step.ts)}</span>
+                  <span
+                    className={`sg-process-tl-dot ${
+                      isLast && !finished ? 'sg-process-tl-dot--active' : done ? 'sg-process-tl-dot--done' : ''
+                    }`}
+                  />
+                  <div className="sg-process-tl-body">
+                    <div className="sg-process-tl-name">
+                      {index + 1}. {step.name === 'final' ? '生成最终结果' : step.name}
+                    </div>
+                    <div className={`sg-process-tl-state ${done ? '' : 'sg-process-tl-state--pending'}`}>
+                      {isLast && !finished ? '进行中' : '已完成'}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {steps.length === 0 ? <Timeline events={events} /> : null}
+      </div>
+
+      {/* 右：当前步骤面板 */}
+      <div className="sg-process-right">
+        <div className="sg-card sg-process-current">
+          <div className="sg-process-current-head">
+            当前步骤 {stepIndex}/{totalSteps}：
+            {latestReason ? (latestReason.name === 'final' ? '生成最终结果' : latestReason.name) : '等待启动'}
+          </div>
+          <div className="sg-process-progress">
+            <div className="sg-process-progress-bar">
+              <div className="sg-process-progress-fill" style={{ width: `${percent}%` }} />
+            </div>
+            <span className="sg-process-progress-pct">{finished ? 100 : percent}%</span>
+          </div>
+          <div className="sg-process-progress-meta">
+            <span>⏱ 已用时 {elapsed}</span>
+            {remaining ? <span>↑ 预计剩余 {remaining}</span> : null}
+          </div>
+
+          {latestReason?.summary ? (
+            <div className="sg-process-section">
+              <button className="sg-process-collapse" onClick={() => setShowReasoning((v) => !v)}>
+                <span className={`sg-caret${showReasoning ? ' sg-caret--open' : ''}`}>⌄</span>
+                模型推理摘要
+              </button>
+              {showReasoning ? (
+                <div className="sg-process-reasoning">{latestReason.summary}</div>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="sg-process-cards">
+            <div className="sg-process-info">
+              <div className="sg-process-info-head">工具调用</div>
+              {toolSteps.length === 0 ? (
+                <div className="sg-process-info-empty">暂无工具调用</div>
+              ) : (
+                <>
+                  {toolSteps.map((s, i) => {
+                    const ms = s.proposeTs && s.ts ? Math.max(0, Date.parse(s.ts) - Date.parse(s.proposeTs)) : null;
+                    return (
+                      <div className="sg-process-tool" key={`${s.seq}-${i}`}>
+                        <span className="sg-process-tool-name">{s.name}</span>
+                        <span className="sg-process-tool-dur">
+                          {ms !== null ? (ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`) : ''}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {toolSteps.length > 3 ? (
+                    <div className="sg-process-info-more">查看全部工具调用（{toolSteps.length}）</div>
+                  ) : null}
+                </>
+              )}
+            </div>
+            <div className="sg-process-info">
+              <div className="sg-process-info-head">输入（Input）</div>
+              {(inputDocs.length ? inputDocs : ['requirement.md']).map((d) => (
+                <div className="sg-process-file" key={d}>
+                  <IconDoc size={12} /> {d}
+                </div>
+              ))}
+              <div className="sg-process-file">
+                <IconBook size={12} /> 知识库（{knowledgeCount} 个来源）
+              </div>
+            </div>
+            <div className="sg-process-info">
+              <div className="sg-process-info-head">输出（Output）</div>
+              {outputDocs.length === 0 ? (
+                <div className="sg-process-info-empty">暂无产出文件</div>
+              ) : (
+                <>
+                  {outputDocs.slice(0, 3).map((d) => (
+                    <div className="sg-process-file" key={d}>
+                      <IconDoc size={12} /> {d}
+                    </div>
+                  ))}
+                  {outputDocs.length > 3 ? (
+                    <div className="sg-process-info-more">+ {outputDocs.length - 3} 个文件</div>
+                  ) : null}
+                </>
+              )}
+            </div>
+            <div className="sg-process-info">
+              <div className="sg-process-info-head">检查点（Checkpoint）</div>
+              {(trace?.checkpoints ?? []).length === 0 ? (
+                <div className="sg-process-info-empty">暂无检查点</div>
+              ) : (
+                <>
+                  {(trace?.checkpoints ?? []).slice(0, 2).map((c) => (
+                    <div className="sg-process-file" key={c.seq}>
+                      已保存中间结果
+                      <span className="sg-process-tool-dur">{timelineTime(c.createdAt)}</span>
+                    </div>
+                  ))}
+                  {(trace?.checkpoints ?? []).length > 2 ? (
+                    <div className="sg-process-info-more">
+                      查看全部检查点（{trace?.checkpoints.length}）
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="sg-process-section sg-process-section--row">
+            <span className="sg-process-ok-icon">
+              <IconCheck size={11} />
+            </span>
+            错误与警告
+            <span className="sg-process-section-note">
+              {failedRun ? failedRun.result : '当前无错误或警告'}
+            </span>
+          </div>
+
+          <div className="sg-process-section">
+            <button className="sg-process-collapse" onClick={() => setShowFinal((v) => !v)}>
+              <span className={`sg-caret${showFinal ? ' sg-caret--open' : ''}`}>⌄</span>
+              最终结果
+              <span className="sg-process-section-note">
+                {finishedRun ? '' : '（当前运行尚未完成）'}
+              </span>
+            </button>
+            {showFinal ? (
+              <div className="sg-process-reasoning">
+                {finishedRun?.result || '完成所有步骤后将生成最终结果并供审批。'}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RunTraceView({ trace }: { trace: RunTrace | null }) {
+  if (!trace || trace.steps.length === 0) return null;
+  return (
+    <>
+      <div className="sg-card">
+        <div className="sg-card-head">
+          Agent 执行轨迹
+          <span className="sg-card-extra">{trace.steps.length} 步</span>
+        </div>
+        <div className="sg-trace-list">
+          {trace.steps.map((step, index) => {
+            const durationMs =
+              step.kind === 'tool' && step.proposeTs && step.ts
+                ? Math.max(0, Date.parse(step.ts) - Date.parse(step.proposeTs))
+                : null;
+            return (
+              <div className="sg-trace-step" key={`${step.seq}-${index}`}>
+                <span className={`sg-trace-kind sg-trace-kind--${step.kind}`}>
+                  {step.kind === 'tool' ? '工具' : '推理'}
+                </span>
+                <div className="sg-trace-body">
+                  <div className="sg-trace-name">
+                    {step.name === 'final' ? '生成最终结果' : step.name}
+                    {durationMs !== null ? (
+                      <span className="sg-trace-duration">
+                        {durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`}
+                      </span>
+                    ) : null}
+                  </div>
+                  {step.summary ? <div className="sg-trace-summary">{step.summary}</div> : null}
+                  {step.preview ? <div className="sg-trace-summary sg-trace-preview">{step.preview}</div> : null}
+                </div>
+                <span className="sg-trace-time">{timelineTime(step.ts)}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {trace.checkpoints.length > 0 ? (
+        <div className="sg-card">
+          <div className="sg-card-head">
+            检查点
+            <span className="sg-card-extra">{trace.checkpoints.length} 个</span>
+          </div>
+          <div style={{ padding: '8px 14px 12px', display: 'grid', gap: 6 }}>
+            {trace.checkpoints.map((c) => (
+              <div key={c.seq} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+                <span className="sg-chip">seq {c.seq}</span>
+                <span>已保存中间结果</span>
+                <span className="sg-muted" style={{ marginLeft: 'auto' }}>
+                  {timelineTime(c.createdAt)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/* ---------------- 选中关详情悬浮框（可缩为胶囊） ---------------- */
+
+function GateDetailFloat({
+  gate,
+  stagesByGate,
+  gateOpen,
+  minimized,
+  onToggleMinimized,
+  onOpenGate,
+}: {
+  gate: Gate;
+  stagesByGate: Map<string, StageInfo>;
+  gateOpen: boolean;
+  minimized: boolean;
+  onToggleMinimized: () => void;
+  onOpenGate: () => void;
+}) {
+  const state = stagesByGate.get(gate)?.state;
+  const started = state !== undefined && state !== 'not_started' && state !== 'pending';
+  const steps: { name: string; done: boolean | null }[] = [
+    { name: '完成本关产物', done: state === 'passed' ? true : started ? false : null },
+    { name: '通过就绪检查', done: state === 'passed' ? true : started ? false : null },
+    { name: '评审通过并放行', done: state === 'passed' ? true : null },
+  ];
+  const nextAction =
+    state === 'passed'
+      ? '本关已通过，等待进入下一关。'
+      : state === 'in_progress'
+        ? '完成本关产物并通过就绪检查后提交放行。'
+        : state === 'blocked'
+          ? '先处理阻塞原因，再继续执行本关。'
+          : state === 'failed'
+            ? '修正失败原因后重新执行本关。'
+            : '完成前置关卡后进入本关。';
+  const chipCls =
+    state === 'passed'
+      ? 'sg-chip--ok'
+      : state === 'in_progress'
+        ? 'sg-chip--info'
+        : state === 'blocked' || state === 'failed'
+          ? 'sg-chip--danger'
+          : '';
+  const stateText = GATE_STATE_LABELS[state ?? 'pending'] ?? state ?? '';
+
+  if (minimized) {
+    return (
+      <button className="sg-detail-capsule" onClick={onToggleMinimized} title="展开关卡详情">
+        <IconTarget size={13} />
+        <span>
+          {gateLabel(gate)}
+          {stateText ? ` · ${stateText}` : ''}
+        </span>
+        <span className="sg-detail-capsule-caret">⌃</span>
+      </button>
+    );
+  }
+
+  return (
+    <div className="sg-detail-float">
+      <div className="sg-detail-float-head">
+        <strong>{gateLabel(gate)}</strong>
+        {stateText ? <span className={`sg-chip ${chipCls}`}>{stateText}</span> : null}
+        <button
+          className="sg-detail-collapse"
+          onClick={onToggleMinimized}
+          title="收起为胶囊"
+          aria-label="收起关卡详情"
+        >
+          <IconChevronDown size={14} />
+        </button>
+      </div>
+      <div className="sg-gate-detail-label">执行步骤</div>
+      {steps.map((s) => (
+        <div className="sg-gate-detail-step" key={s.name}>
+          <span className={`sg-check-icon ${s.done === true ? 'sg-check-icon--ok' : ''}`}>
+            {s.done === true ? <IconCheck size={10} /> : null}
+          </span>
+          <span className={s.done === null ? 'sg-muted' : ''}>{s.name}</span>
+          <span className="sg-gate-detail-state">
+            {s.done === true ? '已完成' : s.done === false ? '进行中' : '待执行'}
+          </span>
+        </div>
+      ))}
+      <div className="sg-gate-detail-label">执行 Agent</div>
+      <div className="sg-gate-detail-agent">{GATE_AGENT[gate]}</div>
+      <div className="sg-gate-detail-label">下一步行动</div>
+      <div className="sg-gate-detail-next">{nextAction}</div>
+      <div className={`sg-detail-float-note ${gateOpen ? '' : 'sg-detail-float-note--action'}`}>
+        {gateOpen ? (
+          `正在查看${gateLabel(gate)}，完成草稿与检查后再提交放行。`
+        ) : (
+          <button className="sg-link-btn" onClick={onOpenGate}>
+            进入当前关：{gateLabel(gate)}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -459,8 +959,20 @@ function Composer({
 }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [runId, setRunId] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+
+  // 长任务可取消（推理型模型一次生成可达数分钟）：调 agent.cancel，
+  // 轮询会在下一拍见到 cancelled 终态。已终态时取消是 no-op。
+  const cancelRun = async () => {
+    if (!runId) return;
+    try {
+      await rpc('agent.cancel', { runId });
+    } catch {
+      /* run 已终态或 core 繁忙：忽略，轮询会收尾 */
+    }
+  };
 
   const submit = async () => {
     const message = text.trim();
@@ -470,11 +982,22 @@ function Composer({
     setNotice(currentGate === 'requirements' ? '正在根据补充说明起草 PRD…' : 'Agent 正在处理…');
     try {
       if (currentGate === 'requirements') {
-        await draftPrd(
+        const id = await startPrdDraft(
           workItemId,
           `${requirementText}\n\n用户补充：\n${message}`,
           `composer-prd-${workItemId}-${Date.now()}`,
         );
+        setRunId(id);
+        const run = await waitForRunTerminal(id);
+        setRunId('');
+        if (run.status === 'cancelled') {
+          setNotice('已取消本次起草；你输入的内容已保留，可修改后重发。');
+          return;
+        }
+        if (run.status !== 'completed_execution') {
+          throw new Error(friendlyAgentError(`Agent 状态 ${run.status}：${run.result}`));
+        }
+        await finishPrdDraft(workItemId, id);
         setNotice('PRD 草稿已生成并保存，等待你的审阅。');
         setText('');
         await onChanged();
@@ -487,7 +1010,13 @@ function Composer({
           toolAllowlist: ['read_file', 'search_knowledge'],
           idempotencyKey: `composer-${workItemId}-${currentGate}-${Date.now()}`,
         });
+        setRunId(started.runId);
         const run = await waitForRunTerminal(started.runId);
+        setRunId('');
+        if (run.status === 'cancelled') {
+          setNotice('已取消本次处理；你输入的内容已保留，可修改后重发。');
+          return;
+        }
         if (run.status !== 'completed_execution') {
           throw new Error(`Agent 状态 ${run.status}：${run.result}`);
         }
@@ -500,6 +1029,7 @@ function Composer({
       setNotice('');
       setError(friendlyAgentError(reason));
     } finally {
+      setRunId('');
       setBusy(false);
     }
   };
@@ -512,8 +1042,18 @@ function Composer({
           <button className="sg-link-btn" onClick={onOpenModels}>检查模型</button>
         </div>
       ) : null}
-      {notice ? <div className="sg-composer-status" role="status">{notice}</div> : null}
+      {notice ? (
+        <div className="sg-composer-status" role="status">
+          <span>{notice}</span>
+          {busy && runId ? (
+            <button className="sg-link-btn" style={{ marginLeft: 8 }} onClick={() => void cancelRun()}>
+              取消
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="sg-composer-chips">
+        <ModelPicker />
         <span className="sg-composer-chip">
           <IconBook size={12} />
           本次上下文：知识库（{knowledgeCount} 个来源）
@@ -569,76 +1109,6 @@ function Composer({
 
 /* ---------------- 右侧目标面板（六关总览） ---------------- */
 
-function GoalPanel({
-  progress,
-  workItem,
-  stagesByGate,
-  currentGate,
-  gateOpen,
-  onOpenGate,
-}: {
-  progress: ProgressInfo | null;
-  workItem: WorkItemDetail | null;
-  stagesByGate: Map<string, StageInfo>;
-  currentGate: Gate;
-  gateOpen: boolean;
-  onOpenGate: () => void;
-}) {
-  const passedCount = GATES.filter((g) => stagesByGate.get(g)?.state === 'passed').length;
-  const allPassed = passedCount === GATES.length;
-  return (
-    <aside className="sg-inspector">
-      <div className="sg-inspector-block">
-        <div className="sg-inspector-title">
-          <IconTarget size={14} />
-          本次目标
-        </div>
-        <div className="sg-inspector-goal">{workItem?.title ?? '加载中…'}</div>
-        <div className="sg-inspector-progress">{progress ? `${passedCount}/6 关已通过` : '—'}</div>
-      </div>
-
-      <div className="sg-inspector-block">
-        <div className="sg-inspector-label">六关总览</div>
-        {GATES.map((g) => {
-          const state = stagesByGate.get(g)?.state;
-          const v = stageVisual(state);
-          const cls = v === 'idle' ? '' : ` sg-stage-item--${v}`;
-          return (
-            <div
-              className={`sg-stage-item${cls}${g === currentGate ? ' sg-stage-item--current' : ''}`}
-              key={g}
-            >
-              <span className={`sg-stage-icon sg-stage-icon--${v}`}>{gateIconContent(v)}</span>
-              <div>
-                <div className="sg-stage-name">{gateLabel(g)}</div>
-                <div className="sg-stage-sub">{GATE_SUBS[g]}</div>
-              </div>
-              <span className="sg-stage-state">{GATE_STATE_LABELS[state ?? 'pending']}</span>
-            </div>
-          );
-        })}
-      </div>
-
-      <div style={{ padding: '0 16px 16px' }}>
-        {allPassed ? (
-          <div className="sg-banner sg-banner--ok">
-            <IconCheck size={14} />
-            <span>六关全部通过，本任务可进入归档。</span>
-          </div>
-        ) : gateOpen ? (
-          <div className="sg-inspector-current">
-            正在查看{gateLabel(currentGate)}，完成草稿与检查后再提交放行。
-          </div>
-        ) : (
-          <button className="sg-btn sg-btn--primary" style={{ width: '100%' }} onClick={onOpenGate}>
-            进入当前关：{gateLabel(currentGate)}
-          </button>
-        )}
-      </div>
-    </aside>
-  );
-}
-
 function gateIconContent(v: StageVisual): ReactNode {
   if (v === 'done') return <IconCheck size={11} />;
   if (v === 'active') return <span className="sg-stage-pulse" />;
@@ -654,6 +1124,13 @@ function GateWorkspace({
   progress,
   evidences,
   workItemId,
+  events,
+  runs,
+  docs,
+  trace,
+  knowledgeCount,
+  tab,
+  onTab,
   onChanged,
   onBack,
   onOpenApprovals,
@@ -663,10 +1140,26 @@ function GateWorkspace({
   progress: ProgressInfo | null;
   evidences: EvidenceInfo[];
   workItemId: string;
+  events: TimelineEvent[];
+  runs: AgentRunInfo[];
+  docs: string[];
+  trace: RunTrace | null;
+  knowledgeCount: number;
+  tab: 'process' | 'materials' | 'evidence' | 'review';
+  onTab: (t: 'process' | 'materials' | 'evidence' | 'review') => void;
   onChanged: () => void;
   onBack: () => void;
   onOpenApprovals: () => void;
 }) {
+  // 仅当最新一次 Run 失败时才显示错误卡（历史失败不追溯展示）。
+  const failedRun = runs[0]?.status === 'failed' ? runs[0] : undefined;
+  const tabs = [
+    { id: 'process', label: '执行过程' },
+    { id: 'materials', label: `材料 ${docs.length}` },
+    { id: 'evidence', label: `证据 ${evidences.length}` },
+    { id: 'review', label: '评审与放行' },
+  ] as const;
+
   return (
     <div className="sg-workbench-center">
       <div className="sg-gate-head">
@@ -678,71 +1171,220 @@ function GateWorkspace({
             当前关：{gateLabel(gate)} · {GATE_SUBS[gate]}
           </span>
         </div>
-        <span
-          className={`sg-chip ${
-            stage?.state === 'passed'
-              ? 'sg-chip--ok'
-              : stage?.state === 'in_progress'
-                ? 'sg-chip--info'
-                : stage?.state === 'blocked' || stage?.state === 'failed'
-                  ? 'sg-chip--danger'
-                  : ''
-          }`}
-        >
-          {GATE_STATE_LABELS[stage?.state ?? 'pending']}
-        </span>
       </div>
 
-      <div className="sg-gate-workspace">
-        <GateStepper stage={stage} />
-        <GateChecksCard stage={stage} progress={progress} />
+      {/* 门禁头卡：图标 + 本关要求 + 本关状态 */}
+      <div className="sg-gate-summary">
+        <span className="sg-gate-summary-icon">
+          <IconTarget size={20} />
+        </span>
+        <div className="sg-gate-summary-name">
+          <strong>{gateLabel(gate)}</strong>
+          <span>{GATE_SUBS[gate]}</span>
+        </div>
+        <div className="sg-gate-summary-reqs">
+          <div className="sg-gate-summary-label">本关要求</div>
+          {GATE_REQUIREMENTS[gate].map((req) => (
+            <div className="sg-gate-req" key={req}>
+              <IconCheck size={12} />
+              {req}
+            </div>
+          ))}
+        </div>
+        <div className="sg-gate-summary-status">
+          <div className="sg-gate-summary-label">本关状态</div>
+          <span
+            className={`sg-chip ${
+              stage?.state === 'passed'
+                ? 'sg-chip--ok'
+                : stage?.state === 'in_progress'
+                  ? 'sg-chip--info'
+                  : stage?.state === 'blocked' || stage?.state === 'failed'
+                    ? 'sg-chip--danger'
+                    : ''
+            }`}
+          >
+            {GATE_STATE_LABELS[stage?.state ?? 'pending']}
+          </span>
+          {stage?.updated_at ? (
+            <div className="sg-gate-summary-elapsed">最近推进 {relativeTime(stage.updated_at)}</div>
+          ) : null}
+        </div>
+      </div>
 
-        {gate === 'development' && <DevGatePanel workItemId={workItemId} onDone={onChanged} />}
-        {gate === 'deployment' && (
-          <DeployGatePanel workItemId={workItemId} onDone={onChanged} onOpenApprovals={onOpenApprovals} />
-        )}
-        <DocGatePanel workItemId={workItemId} gate={gate} onDone={onChanged} />
-        {gate === 'verification' && <AcceptancePanel workItemId={workItemId} progress={progress} />}
-
-        <TracePanel workItemId={workItemId} />
-
-        <div className="sg-card">
-          <div className="sg-card-head">
-            本关证据
-            <span className="sg-card-extra">{evidences.length} 条</span>
-          </div>
-          {evidences.length === 0 ? (
-            <div className="sg-empty" style={{ padding: '20px 24px' }}>
-              暂无证据。完成上方步骤后会自动记录。
+      {/* Agent 执行详情横条：只展示最新一次 Run；历史次数收进标题行小字 */}
+      <div className="sg-agent-strip-wrap">
+        <div className="sg-agent-strip-title">
+          Agent 执行详情
+          {runs.length > 1 ? (
+            <span className="sg-agent-strip-meta">共 {runs.length} 次执行（最新一次如下）</span>
+          ) : null}
+        </div>
+        <div className="sg-agent-strip">
+          {runs.length === 0 ? (
+            <div className="sg-agent-card sg-agent-card--current">
+              <span className="sg-agent-avatar">
+                <IconCpu size={14} />
+              </span>
+              <span className="sg-agent-card-name">{GATE_AGENT[gate]}</span>
+              <span className="sg-agent-card-status">尚未启动</span>
+              <span className="sg-agent-card-goal">在下方输入补充说明即可启动本关 Agent</span>
             </div>
           ) : (
-            <div style={{ padding: '8px 14px 12px', display: 'grid', gap: 6 }}>
-              {evidences.map((e) => (
-                <div
-                  key={e.id}
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
-                >
-                  <span className={`sg-chip ${e.verified ? 'sg-chip--ok' : ''}`}>
-                    {e.verified ? '已核验' : '待核验'}
+            (() => {
+              const run = runs[0];
+              const st = RUN_STATUS[run.status] ?? { label: run.status, cls: 'pending' };
+              const durationMin =
+                run.created_at && run.updated_at
+                  ? Math.max(
+                      1,
+                      Math.round((Date.parse(run.updated_at) - Date.parse(run.created_at)) / 60000),
+                    )
+                  : null;
+              const failedCount = runs.slice(1).filter((r) => r.status === 'failed').length;
+              return (
+                <div className="sg-agent-card sg-agent-card--current" title={run.goal}>
+                  <span className="sg-agent-avatar">
+                    <IconCpu size={14} />
                   </span>
-                  <span style={{ fontWeight: 500 }}>{e.title}</span>
-                  <span className="sg-muted">{e.kind}</span>
-                  <span className="sg-muted" style={{ marginLeft: 'auto' }}>
-                    {relativeTime(e.created_at)}
-                  </span>
+                  <span className="sg-agent-card-name">{GATE_AGENT[gate]}</span>
+                  <span className={`sg-agent-card-status sg-agent-status--${st.cls}`}>{st.label}</span>
+                  {durationMin !== null ? (
+                    <span className="sg-agent-card-goal">{durationMin} 分钟</span>
+                  ) : null}
+                  <span className="sg-agent-card-time">{relativeTime(run.created_at)}</span>
+                  {failedCount > 0 ? (
+                    <span className="sg-agent-card-goal">此前失败 {failedCount} 次</span>
+                  ) : null}
                 </div>
-              ))}
-            </div>
+              );
+            })()
           )}
         </div>
       </div>
 
-      <div className="sg-gate-foot">
-        <span className="sg-sub">
-          就绪检查全部通过后可评估本关；评估依据为冻结产物与已核验证据。
-        </span>
-        <EvaluateButton workItemId={workItemId} gate={gate} busy={false} onDone={onChanged} />
+      {/* 页签：执行过程 / 材料 / 证据 / 评审与放行 */}
+      <div className="sg-gate-tabs">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            className={`sg-gate-tab${tab === t.id ? ' sg-gate-tab--active' : ''}`}
+            onClick={() => onTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
+
+      <div className="sg-gate-workspace">
+        {tab === 'process' ? (
+          <>
+            <ExecutionProcessView
+              gate={gate}
+              stage={stage}
+              progress={progress}
+              events={events}
+              runs={runs}
+              trace={trace}
+              docs={docs}
+              knowledgeCount={knowledgeCount}
+            />            {failedRun ? (
+              <div className="sg-card">
+                <div className="sg-card-head">错误与警告</div>
+                <div className="sg-banner sg-banner--error" style={{ margin: '0 14px 12px' }}>
+                  {failedRun.result || '最近一次执行失败'}
+                </div>
+              </div>
+            ) : null}
+          </>
+        ) : tab === 'materials' ? (
+          <div className="sg-card">
+            <div className="sg-card-head">
+              本关材料
+              <span className="sg-card-extra">{docs.length} 个文件</span>
+            </div>
+            {docs.length === 0 ? (
+              <div className="sg-empty" style={{ padding: '20px 24px' }}>
+                暂无材料。需求文档与 Agent 产出会自动归档到这里。
+              </div>
+            ) : (
+              <div style={{ padding: '8px 14px 12px', display: 'grid', gap: 6 }}>
+                {docs.map((name) => (
+                  <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+                    <IconDoc size={13} />
+                    <span style={{ fontWeight: 500 }}>{name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : tab === 'evidence' ? (
+          <div className="sg-card">
+            <div className="sg-card-head">
+              本关证据
+              <span className="sg-card-extra">{evidences.length} 条</span>
+            </div>
+            {evidences.length === 0 ? (
+              <div className="sg-empty" style={{ padding: '20px 24px' }}>
+                暂无证据。完成上方步骤后会自动记录。
+              </div>
+            ) : (
+              <div style={{ padding: '8px 14px 12px', display: 'grid', gap: 6 }}>
+                {evidences.map((e) => (
+                  <div
+                    key={e.id}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
+                  >
+                    <span className={`sg-chip ${e.verified ? 'sg-chip--ok' : ''}`}>
+                      {e.verified ? '已核验' : '待核验'}
+                    </span>
+                    <span style={{ fontWeight: 500 }}>{e.title}</span>
+                    <span className="sg-muted">{e.kind}</span>
+                    <span className="sg-muted" style={{ marginLeft: 'auto' }}>
+                      {relativeTime(e.created_at)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            {gate === 'development' && <DevGatePanel workItemId={workItemId} onDone={onChanged} />}
+            {gate === 'deployment' && (
+              <DeployGatePanel workItemId={workItemId} onDone={onChanged} onOpenApprovals={onOpenApprovals} />
+            )}
+            <DocGatePanel workItemId={workItemId} gate={gate} onDone={onChanged} />
+            {gate === 'verification' && <AcceptancePanel workItemId={workItemId} progress={progress} />}
+
+            <TracePanel workItemId={workItemId} />
+
+            <RollbackCard workItemId={workItemId} onChanged={onChanged} />
+
+            <div className="sg-gate-foot">
+              <span className="sg-sub">
+                就绪检查全部通过后可评估本关；评估依据为冻结产物与已核验证据。
+              </span>
+              <EvaluateButton workItemId={workItemId} gate={gate} busy={false} onDone={onChanged} />
+            </div>
+          </>
+        )}
+      </div>
+
+      {progress && progress.pendingApprovals > 0 ? (
+        <div className="sg-approval-banner">
+          <div className="sg-approval-banner-text">
+            <strong>等待你的放行审批</strong>
+            <span>请前往审批中心查看并放行本关产物，批准后将进入下一关。</span>
+          </div>
+          <div className="sg-approval-banner-actions">
+            <span className="sg-chip">待审批 {progress.pendingApprovals} 项</span>
+            <button className="sg-btn sg-btn--primary" onClick={onOpenApprovals}>
+              前往审批中心
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -778,7 +1420,6 @@ function GateStepper({ stage }: { stage?: StageInfo }) {
 function GateChecksCard({ stage, progress }: { stage?: StageInfo; progress: ProgressInfo | null }) {
   const checks: { name: string; ok: boolean | null }[] = [
     { name: '输入基线已冻结', ok: stage?.input_baseline_sha ? true : null },
-    { name: '产物已生成并通过校验', ok: null },
     {
       name: '证据已核验',
       ok: progress && progress.evidenceCount > 0 ? true : null,
@@ -864,7 +1505,7 @@ function AcceptancePanel({
           <div className="sg-banner sg-banner--ok">
             <IconCheck size={14} />
             <span>
-              通关凭证已签发：{passport.id}（{passport.created_at}）
+              通关凭证已签发：{passport.id}（{formatDateTime(passport.created_at)}）
             </span>
           </div>
         ) : (
@@ -877,6 +1518,149 @@ function AcceptancePanel({
             {busy ? '签发中…' : '签发通关凭证'}
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- 关前快照回滚（AC-SW-06/07 用户入口） ---------------- */
+
+interface SnapshotRow {
+  id: string;
+  stage_attempt_id: string;
+  kind: string;
+  created_at: string;
+}
+
+interface AttemptRow {
+  id: string;
+  gate: string;
+  attempt_no: number;
+}
+
+/** 回滚到某关执行前：preview → request（自动建安全快照+审批）→ decide 执行，全链路复用后端 M3 能力。 */
+function RollbackCard({ workItemId, onChanged }: { workItemId: string; onChanged: () => void }) {
+  const [targets, setTargets] = useState<
+    { id: string; gate: string; no: number; created_at: string }[]
+  >([]);
+  const [busyId, setBusyId] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [pendingConfirm, requestConfirm] = useTwoStepConfirm();
+
+  const load = useCallback(async () => {
+    try {
+      const [snaps, atts] = await Promise.all([
+        rpc<{ items: SnapshotRow[] }>('snapshot.list', { workItemId }),
+        rpc<{ items: AttemptRow[] }>('stage.attempts', { workItemId }).catch(() => ({ items: [] })),
+      ]);
+      const gateByAttempt = new Map((atts.items ?? []).map((a) => [a.id, a]));
+      const rows = (snaps.items ?? [])
+        .filter((s) => s.kind === 'stage_entry')
+        .map((s) => {
+          const a = gateByAttempt.get(s.stage_attempt_id);
+          return {
+            id: s.id,
+            gate: a?.gate ?? '',
+            no: a?.attempt_no ?? 0,
+            created_at: s.created_at,
+          };
+        })
+        .sort((x, y) => (x.created_at < y.created_at ? 1 : -1));
+      setTargets(rows);
+    } catch {
+      // 只读列表失败不阻塞关卡主流程；展开错误在下发回滚时仍会暴露。
+    }
+  }, [workItemId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const rollback = async (target: { id: string; gate: string; no: number }) => {
+    setBusyId(target.id);
+    setError('');
+    setNotice('');
+    try {
+      await rpc('rollback.preview', { workItemId, targetSnapshotId: target.id });
+      const res = await rpc<{ approvalId: string }>('rollback.request', {
+        workItemId,
+        targetSnapshotId: target.id,
+        requestedBy: 'local-user',
+      });
+      // 回滚是高风险操作：request 只建审批与安全快照，执行必须再经用户决定。
+      const decided = await rpc<{ operation?: { state?: string }; blocked_reason?: string }>(
+        'rollback.decide',
+        {
+          approvalId: res.approvalId,
+          decision: 'approved',
+          decidedBy: 'local-user',
+          reason: '工作台发起：回滚到该关执行前',
+        },
+      );
+      const state = decided.operation?.state ?? '';
+      if (state === 'blocked') {
+        setNotice(
+          `回滚已批准，但有需要人工处理的外部资源（${decided.blocked_reason || '详见日志'}）；其余控制面已恢复。`,
+        );
+      } else {
+        setNotice(`已回滚到${gateLabel(target.gate)}第 ${target.no} 次执行前的状态。`);
+      }
+      await load();
+      onChanged();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusyId('');
+    }
+  };
+
+  if (targets.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="sg-card">
+      <div className="sg-card-head">
+        回滚
+        <span className="sg-card-extra">回到某关执行前的状态</span>
+      </div>
+      <div style={{ padding: '8px 14px 12px', display: 'grid', gap: 6 }}>
+        {error ? <div className="sg-banner sg-banner--error">{error}</div> : null}
+        {notice ? <div className="sg-banner sg-banner--info">{notice}</div> : null}
+        {targets.map((t) => (
+          <div
+            key={t.id}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
+          >
+            <span style={{ fontWeight: 500 }}>
+              {t.gate ? gateLabel(t.gate) : '关卡快照'}
+              {t.no > 0 ? ` · 第 ${t.no} 次执行前` : ''}
+            </span>
+            <span className="sg-muted">{formatDateTime(t.created_at)}</span>
+            <button
+              className="sg-btn sg-btn--sm sg-btn--danger"
+              style={{ marginLeft: 'auto' }}
+              disabled={busyId !== ''}
+              onClick={() =>
+                requestConfirm(t.id, () => {
+                  void rollback(t);
+                })
+              }
+              title={
+                pendingConfirm === t.id
+                  ? '再次点击确认回滚（将恢复该时点控制面，历史保留）'
+                  : '回滚到此关执行前'
+              }
+            >
+              {busyId === t.id
+                ? '回滚中…'
+                : pendingConfirm === t.id
+                  ? '确认回滚？'
+                  : '回滚到此'}
+            </button>
+          </div>
+        ))}
       </div>
     </div>
   );

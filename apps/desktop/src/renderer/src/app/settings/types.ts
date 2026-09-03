@@ -43,6 +43,7 @@ export interface ProjectRow {
   default_branch: string;
   local_root: string;
   status: string;
+  archived_at?: string | null;
   created_at?: string;
   updated_at?: string;
 }

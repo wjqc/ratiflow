@@ -15,6 +15,8 @@ pub struct ModelProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_ref_id: Option<String>,
     pub default_model: String,
+    /// 同步得到的可用模型列表（models_json）；空 = 未同步，前端回退预设列表。
+    pub models: Vec<String>,
     pub capabilities: Value,
     pub limits: Value,
     pub data_policy: Value,
@@ -171,7 +173,7 @@ pub fn model_get(store: &Store, id: &str) -> SettingsResult<ModelProfile> {
     store.with_conn(|conn| Ok(conn.query_row(
             "SELECT id, revision, name, provider_kind, base_url, COALESCE(credential_ref_id,''), default_model,
                     capabilities_json, limits_json, data_policy_json, COALESCE(managed_source,''), status,
-                    COALESCE(last_tested_at,''), created_at, updated_at
+                    COALESCE(last_tested_at,''), created_at, updated_at, models_json
              FROM model_profiles WHERE id=?1",
             [id],
             row_model,
@@ -209,6 +211,7 @@ fn row_model(r: &ModelRow<'_>) -> rusqlite::Result<ModelProfile> {
         },
         created_at: r.get(13)?,
         updated_at: r.get(14)?,
+        models: serde_json::from_str(&r.get::<_, String>(15)?).unwrap_or_default(),
     })
 }
 
@@ -232,11 +235,16 @@ pub fn model_create(store: &Store, p: &Value) -> SettingsResult<ModelProfile> {
     let id = ids::new_id("mp");
     let now = timefmt::now();
     let base_url = resolve_base_url(&kind, opt(p, "baseUrl").unwrap_or_default().as_str());
+    let models = p
+        .get("models")
+        .filter(|v| v.is_array())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "[]".into());
     store.with_conn(|conn| {
         conn.execute(
             "INSERT INTO model_profiles(id, name, provider_kind, base_url, credential_ref_id, default_model,
-                capabilities_json, limits_json, data_policy_json, status, revision, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'configured',1,?10,?10)",
+                capabilities_json, limits_json, data_policy_json, models_json, status, revision, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'configured',1,?11,?11)",
             rusqlite::params![
                 id, name, kind,
                 base_url,
@@ -245,6 +253,7 @@ pub fn model_create(store: &Store, p: &Value) -> SettingsResult<ModelProfile> {
                 p.get("capabilities").unwrap_or(&Value::Null).to_string(),
                 p.get("limits").unwrap_or(&Value::Null).to_string(),
                 p.get("dataPolicy").unwrap_or(&Value::Null).to_string(),
+                models,
                 now,
             ],
         )?;
@@ -276,23 +285,67 @@ pub fn model_update(
         ));
     }
     let now = timefmt::now();
+    // 仅改默认模型/模型列表不动连接配置：保留既有测试状态，不回退 configured。
+    let touches_connection =
+        p.get("name").is_some() || p.get("baseUrl").is_some() || p.get("credentialRefId").is_some();
+    let status_sql = if touches_connection {
+        "'configured'"
+    } else {
+        "status"
+    };
+    let models = p
+        .get("models")
+        .filter(|v| v.is_array())
+        .map(|v| v.to_string());
     store.with_conn(|conn| {
         conn.execute(
-            "UPDATE model_profiles SET
+            &format!(
+                "UPDATE model_profiles SET
                 name=COALESCE(?1,name), base_url=COALESCE(?2,base_url),
                 credential_ref_id=COALESCE(?3,credential_ref_id), default_model=COALESCE(?4,default_model),
                 limits_json=COALESCE(?5,limits_json), data_policy_json=COALESCE(?6,data_policy_json),
-                status='configured', revision=revision+1, updated_at=?7
-             WHERE id=?8",
+                models_json=COALESCE(?7,models_json),
+                status={status_sql}, revision=revision+1, updated_at=?8
+             WHERE id=?9"
+            ),
             rusqlite::params![
                 opt(p, "name"), opt(p, "baseUrl"), fk_opt(p, "credentialRefId"), opt(p, "defaultModel"),
                 p.get("limits").map(|v| v.to_string()), p.get("dataPolicy").map(|v| v.to_string()),
-                now, id,
+                models, now, id,
             ],
         )?;
         Ok(())
     }).map_err(store_err)?;
     model_get(store, id)
+}
+
+/// 持久化同步到的模型列表（syncModels 专用）：不触碰连接配置与测试状态，仅递增 revision。
+pub fn model_set_models(store: &Store, id: &str, models: &[String]) -> SettingsResult<()> {
+    // 与 model_update/model_remove 同一不变量：托管 Profile 任何写路径都拒绝。
+    let current = model_get(store, id)?;
+    if current.managed_source.is_some() {
+        return Err(SettingsError::new(
+            codes::MANAGED_READ_ONLY,
+            "环境导入的 Profile 只读；同步模型列表请先创建自有 Profile",
+        ));
+    }
+    let now = timefmt::now();
+    let changed = store
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE model_profiles SET models_json=?1, revision=revision+1, updated_at=?2 WHERE id=?3",
+                rusqlite::params![serde_json::to_string(models).unwrap_or_else(|_| "[]".into()), now, id],
+            )?;
+            Ok(conn.changes())
+        })
+        .map_err(store_err)?;
+    if changed == 0 {
+        return Err(SettingsError::new(
+            "NOT_FOUND",
+            format!("模型 Profile {id} 不存在"),
+        ));
+    }
+    Ok(())
 }
 
 /// 删除前检查路由引用。
@@ -348,24 +401,29 @@ pub fn model_mark_tested(store: &Store, id: &str, status: &str) -> SettingsResul
 // --- model_routes ---
 
 pub fn route_get(store: &Store) -> SettingsResult<Value> {
-    let rows: Vec<(String, String, String, String, Value, i64)> = store.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, scope, task_kind, primary_profile_id, budget_json, revision FROM model_routes",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-                r.get::<_, i64>(5)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
-    }).map_err(store_err)?;
+    let rows: Vec<(String, String, String, String, Value, i64)> = store
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, scope, task_kind, primary_profile_id, budget_json, revision
+             FROM model_routes ORDER BY updated_at",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                    r.get::<_, i64>(5)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .map_err(store_err)?;
     Ok(serde_json::json!(rows.iter().map(|(id, scope, kind, primary, budget, rev)| {
         serde_json::json!({"id": id, "scope": scope, "taskKind": kind, "primaryProfileId": primary, "budget": budget, "revision": rev})
     }).collect::<Vec<_>>()))

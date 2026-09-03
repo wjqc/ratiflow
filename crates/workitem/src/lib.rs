@@ -161,6 +161,8 @@ pub struct WorkItem {
     pub description: String,
     pub labels: Vec<String>,
     pub current_gate: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -215,7 +217,7 @@ pub fn create(
 pub fn get(store: &Store, id: &str) -> Result<WorkItem, Error> {
     store.with_conn(|conn| {
         conn.query_row(
-            "SELECT id, project_id, gitlab_issue_iid, title, description, labels, current_gate, created_at, updated_at
+            "SELECT id, project_id, gitlab_issue_iid, title, description, labels, current_gate, archived_at, created_at, updated_at
              FROM workitems WHERE id = ?1",
             [id],
             |r| {
@@ -227,8 +229,9 @@ pub fn get(store: &Store, id: &str) -> Result<WorkItem, Error> {
                     description: r.get(4)?,
                     labels: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
                     current_gate: r.get(6)?,
-                    created_at: r.get(7)?,
-                    updated_at: r.get(8)?,
+                    archived_at: flexible_opt_string(&r.get::<_, rusqlite::types::Value>(7)?),
+                    created_at: r.get(8)?,
+                    updated_at: r.get(9)?,
                 })
             },
         )
@@ -257,7 +260,7 @@ pub fn list(
 ) -> Result<(Vec<WorkItem>, String), Error> {
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, gitlab_issue_iid, title, labels, current_gate, created_at, updated_at, (created_at || id) AS ck
+            "SELECT id, project_id, gitlab_issue_iid, title, labels, current_gate, archived_at, created_at, updated_at, (created_at || id) AS ck
              FROM workitems WHERE project_id = ?1 AND (?4 OR archived_at IS NULL) AND (?2 = '' OR ck < ?2)
              ORDER BY created_at DESC, id DESC LIMIT ?3",
         )?;
@@ -272,8 +275,9 @@ pub fn list(
                     description: String::new(),
                     labels: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
                     current_gate: r.get(5)?,
-                    created_at: r.get(6)?,
-                    updated_at: r.get(7)?,
+                    archived_at: flexible_opt_string(&r.get::<_, rusqlite::types::Value>(6)?),
+                    created_at: r.get(7)?,
+                    updated_at: r.get(8)?,
                 })
             },
         )?;

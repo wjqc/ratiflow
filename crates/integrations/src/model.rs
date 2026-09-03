@@ -106,26 +106,42 @@ impl ModelProvider for ModelHttp {
             messages.push(serde_json::json!({"role": "system", "content": req.system_prompt}));
         }
         for msg in &req.messages {
-            messages.push(serde_json::json!({"role": msg.role, "content": msg.content}));
+            // 兼容性降级（语义保留）：
+            // - developer 是 OpenAI 新式角色，兼容端点（DeepSeek 等）只认 system 等；
+            // - harness 的 tool 消息是扁平文本、不带 tool_call_id，严格端点会 400，
+            //   统一转成 user 消息承载工具输出。
+            let role = match msg.role.as_str() {
+                "developer" => "system",
+                "tool" => "user",
+                other => other,
+            };
+            messages.push(serde_json::json!({"role": role, "content": msg.content}));
         }
         let body =
             serde_json::json!({"model": model, "messages": messages, "max_tokens": req.max_tokens});
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        // 限流是长任务（如 PRD 起草）最常撞上的瞬态错误：429 退避后重试一次。
         let send = |body: &serde_json::Value| {
             classify_ureq(
                 "model_unavailable",
                 ureq::post(&url)
                     .set("Authorization", &format!("Bearer {}", self.api_key))
-                    .timeout(std::time::Duration::from_secs(120))
+                    // 推理型模型非流式生成可达数分钟（16k token 预算），给足读超时。
+                    .timeout(std::time::Duration::from_secs(300))
                     .send_json(body.clone()),
             )
         };
-        let mut response = send(&body)?;
-        if response.status() == 429 {
+        // 限流是长任务（如 PRD 起草）最常撞上的瞬态错误：429 退避后重试一次。
+        // ureq 对 4xx 一律返回 Err——重试只能挂在错误分支上，Ok 分支里判状态码是死代码。
+        let mut result = send(&body);
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e == "model_rate_limited")
+        {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            response = send(&body)?;
+            result = send(&body);
         }
+        let response = result?;
         let parsed: serde_json::Value = response
             .into_json()
             .map_err(|e| format!("model_invalid_json: {e}"))?;
@@ -134,7 +150,19 @@ impl ModelProvider for ModelHttp {
             .unwrap_or_default()
             .to_string();
         if content.is_empty() {
-            return Err("model_unavailable: no choices".into());
+            let finish = parsed["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or("unknown");
+            // 独立错误码：finish_reason=length 是输出上限耗尽而非上下文过大，
+            // 错误串不得含 "length" 等关键词，否则被上游误归类为 context_too_large。
+            let hint = if finish == "length" {
+                "输出 token 预算耗尽：请换用支持更长输出的模型"
+            } else {
+                "请重试或更换模型"
+            };
+            return Err(format!(
+                "model_empty_output: 模型未返回正文（finish_reason={finish}）；{hint}"
+            ));
         }
         Ok(CompletionResponse {
             content,
@@ -223,5 +251,97 @@ impl ModelProvider for FakeModel {
             .unwrap()
             .pop_front()
             .ok_or_else(|| "model_unavailable: script exhausted".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    /// 本地 HTTP stub：按脚本逐请求返回原始响应（覆盖 ureq 真实传输路径）。
+    fn serve(script: Vec<String>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for body in script {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut content_length = 0usize;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_lowercase().strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                if content_length > 0 {
+                    let mut buf = vec![0u8; content_length];
+                    reader.read_exact(&mut buf).unwrap();
+                }
+                let mut socket = stream;
+                socket.write_all(body.as_bytes()).unwrap();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn stub_req() -> CompletionRequest {
+        CompletionRequest {
+            model: "m".into(),
+            system_prompt: String::new(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            max_tokens: 16,
+            response_schema: None,
+        }
+    }
+
+    #[test]
+    fn rate_limited_retries_once_then_succeeds() {
+        // 429 → 退避重试 → 200。这是上轮"429 重试是死代码"缺陷的回归测试。
+        let ok = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        let base = serve(vec![
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", ok.len(), ok),
+        ]);
+        let provider = ModelHttp {
+            name_value: "stub".into(),
+            base_url: base,
+            api_key: "k".into(),
+            model: "m".into(),
+        };
+        let resp = provider.complete(&stub_req()).unwrap();
+        assert_eq!(resp.content, "ok");
+        assert_eq!(resp.finish_reason, "stop");
+    }
+
+    #[test]
+    fn empty_content_uses_dedicated_code_without_length_keyword() {
+        // finish_reason=length 的空正文是输出上限耗尽：错误串不得含 "length"，
+        // 否则 agent 侧分类器会误判为 context_too_large。
+        let body =
+            r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}],"usage":{}}"#;
+        let base = serve(vec![format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )]);
+        let provider = ModelHttp {
+            name_value: "stub".into(),
+            base_url: base,
+            api_key: "k".into(),
+            model: "m".into(),
+        };
+        let err = provider.complete(&stub_req()).unwrap_err();
+        // 独立前缀 + 面向用户的处置提示；agent 分类器按前缀优先匹配，
+        // 因此串中的 finish_reason=length 不会落入 context_too_large。
+        assert!(err.starts_with("model_empty_output"), "{err}");
+        assert!(err.contains("输出 token 预算耗尽"), "{err}");
     }
 }

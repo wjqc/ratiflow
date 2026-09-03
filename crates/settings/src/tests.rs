@@ -185,6 +185,16 @@ fn model_profile_managed_readonly_and_route_reference() {
         .unwrap_err();
     assert_eq!(err.code, codes::MANAGED_READ_ONLY);
     assert!(profiles::model_remove(&s, "mp_env_model", 1).is_err());
+    // 托管只读覆盖全部写路径：syncModels 落库（model_set_models）同样拒绝。
+    let sync_err =
+        profiles::model_set_models(&s, "mp_env_model", &["glm-5.3".to_string()]).unwrap_err();
+    assert_eq!(sync_err.code, codes::MANAGED_READ_ONLY);
+    // 非 managed Profile 的同步落库正常推进。
+    profiles::model_set_models(&s, &updated.id, &["m1".to_string()]).unwrap();
+    assert_eq!(
+        profiles::model_get(&s, &updated.id).unwrap().models,
+        vec!["m1"]
+    );
     std::env::remove_var("SIXGATES_MODEL_BASE_URL");
 }
 

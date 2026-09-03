@@ -132,6 +132,17 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
             eprintln!("{{\"level\":\"warn\",\"msg\":\"rollback resume failed: {e}\"}}");
         }
     }
+    // Agent Run 启动对账：崩溃/重启遗留的 queued/running 标 failed(interrupted)，
+    // 前端轮询立即见终态，不再挂满超时窗口。
+    match sg_agent::reconcile_interrupted(&store) {
+        Ok(n) if n > 0 => {
+            eprintln!("{{\"level\":\"info\",\"msg\":\"agent run reconcile: {n} interrupted\"}}");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("{{\"level\":\"warn\",\"msg\":\"agent run reconcile failed: {e}\"}}");
+        }
+    }
     let schema_version = store.schema_version().unwrap_or(0);
     let initial_seq = outbox::latest_sequence(&store).unwrap_or(0);
 

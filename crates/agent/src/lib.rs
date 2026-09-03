@@ -322,7 +322,9 @@ pub fn execute_run(
             model: String::new(),
             system_prompt: system_prompt.clone(),
             messages: messages.clone(),
-            max_tokens: 4096,
+            // 推理型模型（如 deepseek-v4 系列）的推理也计入 max_tokens，
+            // 上限太小会 finish_reason=length 且正文为空——给足余量。
+            max_tokens: 16384,
             response_schema: None,
         };
         log_rollout(
@@ -340,7 +342,11 @@ pub fn execute_run(
                     return Err(Error::Message(e));
                 }
                 let lower = e.to_lowercase();
-                run.result = if lower.contains("context")
+                run.result = if lower.contains("model_empty_output") {
+                    // 输出上限耗尽（finish_reason=length）≠ 上下文过大：
+                    // 按独立前缀优先归类，避免误导排查方向。
+                    format!("model_output_empty: {e}")
+                } else if lower.contains("context")
                     || lower.contains("too large")
                     || lower.contains("length")
                 {
@@ -494,7 +500,7 @@ fn compact_history(
         model: String::new(),
         system_prompt: compress_system.into(),
         messages: messages.clone(),
-        max_tokens: 2048,
+        max_tokens: 8192,
         response_schema: None,
     };
     let resp = match gateway.call(store, &run.id, budget, &request) {
@@ -773,6 +779,92 @@ pub fn get_run(store: &Store, id: &str) -> Result<AgentRun, Error> {
     })
 }
 
+/// 某工作项的近期 Run（工作台 Agent 执行详情横条用），新→旧。
+pub fn list_recent(store: &Store, workitem_id: &str, limit: i64) -> Result<Vec<AgentRun>, Error> {
+    store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, workitem_id, COALESCE(task_id,''), goal, status, COALESCE(result,''), created_at, updated_at
+             FROM agent_runs WHERE workitem_id=?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![workitem_id, limit], |r| {
+            Ok(AgentRun {
+                id: r.get(0)?, workitem_id: r.get(1)?, task_id: r.get(2)?,
+                goal: r.get(3)?, status: r.get(4)?, result: r.get(5)?,
+                created_at: r.get(6)?, updated_at: r.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    })
+}
+
+/// 执行轨迹（工作台「执行过程」页签）：从 rollout JSONL 提取推理摘要与工具调用。
+/// tool 步骤带 proposeTs，时长由前端按时间戳差值计算（避免引入 RFC3339 解析依赖）。
+pub fn trace(store: &Store, run_id: &str) -> Result<serde_json::Value, Error> {
+    let path = rollout::Rollout::path_for(&store.data_dir, run_id);
+    let body = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut steps: Vec<serde_json::Value> = Vec::new();
+    // 待配对的 tool_proposed（tool 名, ts）：tool_result 按序配对计算耗时。
+    let mut pending_tools: std::collections::VecDeque<(String, String)> = Default::default();
+    for line in body.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = v["kind"].as_str().unwrap_or("");
+        let ts = v["ts"].as_str().unwrap_or("").to_string();
+        let data = &v["data"];
+        match kind {
+            "model_response" => steps.push(serde_json::json!({
+                "kind": "reasoning",
+                "seq": v["seq"],
+                "ts": ts,
+                "name": data["action"].as_str().unwrap_or("推理"),
+                "summary": data["summary"].as_str().unwrap_or(""),
+            })),
+            "tool_proposed" => {
+                if let Some(t) = data["tool"].as_str() {
+                    pending_tools.push_back((t.to_string(), ts));
+                }
+            }
+            "tool_result" => {
+                let (tool, propose_ts) = pending_tools.pop_front().unwrap_or_else(|| {
+                    (
+                        data["tool"].as_str().unwrap_or("tool").to_string(),
+                        ts.clone(),
+                    )
+                });
+                steps.push(serde_json::json!({
+                    "kind": "tool",
+                    "seq": v["seq"],
+                    "ts": ts,
+                    "name": tool,
+                    "proposeTs": propose_ts,
+                    "preview": data["preview"].as_str().map(|p| p.chars().take(240).collect::<String>()),
+                }));
+            }
+            _ => {}
+        }
+    }
+    let checkpoints = store
+        .with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT seq, created_at FROM agent_checkpoints WHERE agent_run_id=?1 ORDER BY seq")?;
+            let rows = stmt.query_map([run_id], |r| {
+                Ok(serde_json::json!({"seq": r.get::<_, i64>(0)?, "createdAt": r.get::<_, String>(1)?}))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .map_err(|e| Error::Message(e.to_string()))?;
+    Ok(serde_json::json!({"steps": steps, "checkpoints": checkpoints}))
+}
+
 pub fn cancel(store: &Store, id: &str) -> Result<(), Error> {
     let mut run = get_run(store, id)?;
     if matches!(
@@ -907,6 +999,44 @@ pub fn fail_paused_run(store: &Store, run_id: &str, message: &str) -> Result<Age
     set_status(store, &mut run, "failed", "run.failed")?;
     finish(store, &run)?;
     Ok(run)
+}
+
+/// 启动对账（ADR-028 崩溃恢复）：进程每次启动都是全新执行循环，
+/// 上一进程遗留的 queued/running Run 已无人在推进，统一标 failed，
+/// 前端轮询立即见到终态而不是干等超时。paused 是合法的等待审批态，不动。
+pub fn reconcile_interrupted(store: &Store) -> Result<usize, Error> {
+    let stale: Vec<String> = store.with_conn(|conn| {
+        let mut stmt =
+            conn.prepare("SELECT id FROM agent_runs WHERE status IN ('queued','running')")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    })?;
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    let n = store.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE agent_runs SET status='failed',
+                    result='运行中断：应用重启时未完成（请重新发起）',
+                    updated_at=?1
+             WHERE status IN ('queued','running')",
+            rusqlite::params![timefmt::now()],
+        )? as usize)
+    })?;
+    for id in &stale {
+        let _ = outbox::emit(
+            store,
+            "agent_run",
+            id,
+            "run.failed",
+            json!({"status": "failed", "reason": "interrupted"}),
+        );
+    }
+    Ok(n)
 }
 
 pub fn proposals(store: &Store, run_id: &str) -> Result<Vec<Proposal>, Error> {
@@ -1323,6 +1453,218 @@ mod tests {
         };
         assert_eq!(count("run.started"), 1, "run.started 恰好一条");
         assert_eq!(count("run.cancelled"), 1, "run.cancelled 恰好一条");
+    }
+
+    #[test]
+    fn empty_output_error_classified_as_output_not_context() {
+        // 回归：finish_reason=length 的空正文是输出上限耗尽，
+        // 不得因错误串含 "length" 被误归类为 context_too_large。
+        let store = setup();
+        let fake = FakeModel::default();
+        fake.push_error(
+            "model_empty_output: 模型未返回正文（finish_reason=length）；输出 token 预算耗尽",
+        );
+        let gateway = Gateway::new(Box::new(fake));
+        let err = match start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-empty-out",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("空输出错误必须使 Run failed"),
+        };
+        let run = get_run(&store, &err_run_id(&store, "key-empty-out")).unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(
+            run.result.starts_with("model_output_empty"),
+            "实际归类：{}（err={err}）",
+            run.result
+        );
+        assert!(!run.result.contains("context_too_large"));
+    }
+
+    /// 按 idempotency_key 反查 run id（错误路径断言用）。
+    fn err_run_id(store: &Store, key: &str) -> String {
+        store
+            .with_conn(|conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT id FROM agent_runs WHERE idempotency_key=?1",
+                        [key],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok())
+            })
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn default_request_carries_output_budget() {
+        // 主请求 max_tokens 固定 16384（推理型模型推理也计入）；压缩调用为 8192。
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.push_response(r#"{"action":"final","summary":"s"}"#, 5, 3);
+        let gateway = Gateway::new(Box::new(SharedFake(fake.clone())));
+        start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-max-tokens",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        )
+        .unwrap();
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].max_tokens, 16384);
+    }
+
+    #[test]
+    fn budget_tokens_out_stops_calls() {
+        // D7：max_tokens_out 台账真实消费——超出后下一调用预算拒绝，Run failed。
+        let store = setup();
+        let fake = FakeModel::default();
+        fake.push_response(
+            r#"{"action":"read_file","arguments":{"path":"a"},"summary":"r"}"#,
+            5,
+            100,
+        );
+        let gateway = Gateway::new(Box::new(fake));
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = executed.clone();
+        let executor = move |_p: &Proposal| -> Result<String, String> {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("ok".into())
+        };
+        let mut budget = RunBudget::default();
+        budget.model.max_tokens_out = 50;
+        let err = match start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-budget-out",
+                budget: &budget,
+                max_iterations: 5,
+            },
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("输出预算超出必须使 Run failed"),
+        };
+        assert!(err.to_string().contains("tokens_out"), "{err}");
+        let run = get_run(&store, &err_run_id(&store, "key-budget-out")).unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run.result.contains("budget_exceeded: tokens_out"));
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn reconcile_interrupted_fails_only_queued_and_running() {
+        let store = setup();
+        let fake = FakeModel::default();
+        // 一个完成（final）、一个暂停（高风险待审批）、一个孤儿 running（崩溃遗留）。
+        fake.push_response(r#"{"action":"final","summary":"done"}"#, 5, 3);
+        fake.push_response(
+            r#"{"action":"run_command","arguments":{"argv":["ls"]},"summary":"x"}"#,
+            5,
+            3,
+        );
+        let gateway = Gateway::new(Box::new(fake));
+        let executor = |_p: &Proposal| -> Result<String, String> { Ok(String::new()) };
+        let allow_read = ["read_file".to_string()];
+        let allow_cmd = ["run_command".to_string()];
+        let done = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &allow_read,
+                idempotency_key: "key-rec-done",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(done.run.status, "completed_execution");
+        let paused = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &allow_cmd,
+                idempotency_key: "key-rec-paused",
+                budget: &RunBudget::default(),
+                max_iterations: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(paused.run.status, "paused");
+        // 手工造一个 running 遗留行。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                        tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+                     VALUES ('run_orphan','wi','','g','','ctx1','[]','{}','default','key-rec-orphan','running','t','t')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reconcile_interrupted(&store).unwrap(), 1);
+        assert_eq!(get_run(&store, "run_orphan").unwrap().status, "failed");
+        assert!(get_run(&store, "run_orphan")
+            .unwrap()
+            .result
+            .contains("运行中断"));
+        assert_eq!(
+            get_run(&store, &paused.run.id).unwrap().status,
+            "paused",
+            "paused 是合法等待审批态，对账不得触碰"
+        );
+        assert_eq!(
+            get_run(&store, &done.run.id).unwrap().status,
+            "completed_execution",
+            "已完成 Run 对账不得触碰"
+        );
+        // 幂等：再次对账为 no-op。
+        assert_eq!(reconcile_interrupted(&store).unwrap(), 0);
     }
 
     /// 共享 FakeModel：请求捕获（calls）对测试可见。
