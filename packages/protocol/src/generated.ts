@@ -177,7 +177,11 @@ export type RpcMethodName =
   | 'memory.captureStart'
   | 'memory.captureGet'
   | 'memory.candidateList'
-  | 'memory.candidateDecide';
+  | 'memory.candidateDecide'
+  | 'knowledge.manifestCreate'
+  | 'knowledge.manifestUpdate'
+  | 'knowledge.manifestRemove'
+  | 'knowledge.syncFromRepo';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -355,6 +359,10 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'memory.captureGet',
   'memory.candidateList',
   'memory.candidateDecide',
+  'knowledge.manifestCreate',
+  'knowledge.manifestUpdate',
+  'knowledge.manifestRemove',
+  'knowledge.syncFromRepo',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -1386,4 +1394,35 @@ export interface MemoryCandidateDecideParams {
   decision: string;
   idempotencyKey: string;
   editedContent?: string;
+}
+
+export interface KnowledgeManifestCreateParams {
+  projectId: string;
+  opId: string;
+  kind: string;
+  name: string;
+  expectedAbsent: boolean;
+  locator?: string;
+  body?: string;
+  enabled?: boolean;
+}
+
+export interface KnowledgeManifestUpdateParams {
+  projectId: string;
+  opId: string;
+  stableId: string;
+  expectedManifestSha256: string;
+  name?: string;
+  enabled?: boolean;
+}
+
+export interface KnowledgeManifestRemoveParams {
+  projectId: string;
+  opId: string;
+  stableId: string;
+  expectedManifestSha256: string;
+}
+
+export interface KnowledgeSyncFromRepoParams {
+  projectId: string;
 }

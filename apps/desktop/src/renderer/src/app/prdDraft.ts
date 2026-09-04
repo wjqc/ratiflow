@@ -34,7 +34,15 @@ export function friendlyAgentError(value: unknown): string {
     return '模型响应超时。需求已经保存，你可以直接重试起草。';
   }
   if (raw.includes('model_unavailable') || raw.includes('MODEL_UNAVAILABLE')) {
-    return '当前模型无法生成内容。请测试连接、切换模型后重试。';
+    // 保留服务端真实原因（HTTP 401/402/500、api key missing 等）——只报“不可用”
+    // 会把可自查的问题（欠费、密钥失效）伪装成模型故障。
+    const detail = raw
+      .replace(/^Agent 状态\s+\S+[:：]\s*/i, '')
+      .replace(/.*?model_unavailable[:：]?\s*/, '')
+      .trim();
+    return detail
+      ? `模型请求被拒绝（${detail}）。请检查模型配置或切换模型后重试。`
+      : '当前模型无法生成内容。请测试连接、切换模型后重试。';
   }
   return raw.replace(/^Agent 状态\s+failed[:：]\s*/i, '');
 }

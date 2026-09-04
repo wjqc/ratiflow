@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { rpc, rpcErrorMessage } from '../rpc/client';
-import { IconDoc, IconImage, IconIssue, IconSend, IconText } from '../components/Icons';
+import { IconDoc, IconImage, IconIssue, IconPaperclip, IconPlus, IconSend, IconText } from '../components/Icons';
+import { ModelPicker } from './ModelPicker';
 import {
   friendlyAgentError,
   rememberAutomaticPrd,
@@ -61,6 +62,18 @@ export default function NewTaskPage({
   const [issueIid, setIssueIid] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
+
+  // 点外部收起“+”来源菜单（与工作台输入器同一交互）。
+  useEffect(() => {
+    if (!modeMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!modeMenuRef.current?.contains(event.target as Node)) setModeMenuOpen(false);
+    };
+    window.addEventListener('mousedown', close);
+    return () => window.removeEventListener('mousedown', close);
+  }, [modeMenuOpen]);
 
   useEffect(() => setWorkspaceId(projectId), [projectId]);
 
@@ -165,6 +178,22 @@ export default function NewTaskPage({
     setFile({ ...selected, content });
   };
 
+  // “+”菜单的添加附件：按文件类型自动落到 图片（多模态附件）或 文档 模式。
+  const attachFromMenu = async () => {
+    setModeMenuOpen(false);
+    const selected = await window.sixgates.selectFile();
+    if (!selected) {
+      return;
+    }
+    let content: string | undefined;
+    if (selected.size < 2 << 20 && /\.(md|markdown|txt)$/i.test(selected.filename)) {
+      content = atob(selected.contentBase64);
+    }
+    setFile({ ...selected, content });
+    const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(selected.filename);
+    setMode(isImage ? 'image' : 'document');
+  };
+
   return (
     <>
       <header className="sg-page-head">
@@ -194,9 +223,9 @@ export default function NewTaskPage({
             <span className="sg-muted">PRD 将结合此工作区的代码与知识库起草</span>
           </div>
 
-          <div className="sg-nt-card">
+          <div className="sg-composer-main sg-nt-composer">
             <textarea
-              className="sg-nt-textarea"
+              className="sg-composer-input"
               placeholder={
                 mode === 'issue'
                   ? '补充说明（可选）…'
@@ -253,30 +282,59 @@ export default function NewTaskPage({
               </div>
             )}
 
-            <div className="sg-nt-bar">
-              <div className="sg-nt-chips" role="tablist" aria-label="需求来源">
-                {MODE_CHIPS.map(({ mode: m, label, icon }) => (
+            <div className="sg-composer-bar">
+              <div className="sg-composer-bar-left">
+                <div className="sg-compose-add" ref={modeMenuRef}>
                   <button
-                    key={m}
-                    role="tab"
-                    aria-selected={mode === m}
-                    className={`sg-nt-chip ${mode === m ? 'sg-nt-chip--active' : ''}`}
-                    onClick={() => setMode(m)}
+                    className="sg-compose-add-btn"
+                    title="添加"
+                    aria-label="添加"
+                    aria-expanded={modeMenuOpen}
+                    onClick={() => setModeMenuOpen((v) => !v)}
                   >
-                    {icon}
-                    {label}
+                    <IconPlus size={15} />
                   </button>
-                ))}
+                  {modeMenuOpen ? (
+                    <div className="sg-compose-add-menu" role="menu">
+                      <button
+                        className="sg-compose-add-item"
+                        role="menuitem"
+                        onClick={() => void attachFromMenu()}
+                      >
+                        <IconPaperclip size={14} />
+                        <span>添加附件</span>
+                      </button>
+                      <button
+                        className="sg-compose-add-item"
+                        role="menuitem"
+                        onClick={() => {
+                          setMode('issue');
+                          setModeMenuOpen(false);
+                        }}
+                      >
+                        <IconIssue size={14} />
+                        <span>导入 GitLab Issue</span>
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+                <span className="sg-composer-chip sg-composer-chip--flat">
+                  {MODE_CHIPS.find(({ mode: m }) => m === mode)?.icon}
+                  来源：{MODE_CHIPS.find(({ mode: m }) => m === mode)?.label}
+                </span>
               </div>
-              <button
-                className="sg-nt-send"
-                disabled={busy}
-                onClick={() => void submit()}
-                title={busy ? '创建中…' : '创建并进入需求关'}
-                aria-label="创建并进入需求关"
-              >
-                <IconSend size={15} />
-              </button>
+              <div className="sg-composer-bar-right">
+                <ModelPicker />
+                <button
+                  className="sg-compose-send"
+                  disabled={busy}
+                  onClick={() => void submit()}
+                  title={busy ? '创建中…' : '创建并进入需求关'}
+                  aria-label="创建并进入需求关"
+                >
+                  <IconSend size={15} />
+                </button>
+              </div>
             </div>
           </div>
 

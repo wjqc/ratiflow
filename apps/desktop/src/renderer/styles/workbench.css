@@ -137,3 +137,117 @@
 .sg-kbv2-edit { flex: 1; min-height: 0; border: none; outline: none; resize: none; padding: 20px 24px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.7; color: var(--sg-text-primary); background: var(--sg-bg-canvas, #fafafa); }
 .sg-kbv2-note { padding: 8px 20px; border-top: 1px solid var(--sg-border-default); font-size: 12px; color: var(--sg-text-secondary); }
 .sg-kbv2-note--error { color: var(--sg-status-error); }
+
+/* Composer 执行可见化：实时步骤 + 结果正文 */
+.sg-composer-live { margin: 0 0 8px; padding: 10px 14px; border: 1px solid var(--sg-border-default); border-radius: 10px; background: var(--sg-bg-card, #fff); display: grid; gap: 6px; }
+.sg-composer-live-head { font-size: 12px; font-weight: 600; color: var(--sg-text-secondary); }
+.sg-composer-live-step { display: flex; align-items: center; gap: 8px; font-size: 12.5px; min-width: 0; }
+.sg-composer-live-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.sg-composer-result { margin: 0 0 8px; }
+.sg-composer-result-body { padding: 0 14px 14px; max-height: 340px; overflow-y: auto; }
+
+/* Composer v2：单容器（占位在上，底部工具行），对齐设计稿 */
+.sg-composer-main {
+  border: 1px solid var(--sg-border-default);
+  border-radius: 14px;
+  background: var(--sg-bg-card, #fff);
+  padding: 10px 12px 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+.sg-composer-main:focus-within { border-color: var(--sg-action-primary); }
+.sg-composer-main .sg-composer-input { min-height: 52px; font-size: 13.5px; }
+.sg-composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; }
+.sg-composer-bar-left, .sg-composer-bar-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sg-composer-chip--flat { display: inline-flex; align-items: center; gap: 6px; border: none; background: transparent; padding: 4px 6px; font-size: 12px; color: var(--sg-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* “+”添加菜单 */
+.sg-compose-add { position: relative; }
+.sg-compose-add-btn { width: 30px; height: 30px; border: none; border-radius: 8px; background: transparent; color: var(--sg-text-primary); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.sg-compose-add-btn:hover { background: var(--sg-bg-subtle); }
+.sg-compose-add-menu { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 40; min-width: 230px; padding: 6px; border: 1px solid var(--sg-border-default); border-radius: 12px; background: var(--sg-bg-card, #fff); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); display: grid; gap: 2px; }
+.sg-compose-add-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: none; border-radius: 8px; background: transparent; color: var(--sg-text-primary); font-family: inherit; font-size: 13px; cursor: pointer; text-align: left; }
+.sg-compose-add-item svg { color: var(--sg-text-secondary); flex-shrink: 0; }
+.sg-compose-add-item:hover:not(:disabled) { background: var(--sg-bg-subtle); }
+.sg-compose-add-item:disabled { cursor: default; opacity: 0.75; }
+/* 模型选择器在 composer 内为扁平样式；菜单对齐右缘 */
+.sg-composer-bar-right .sg-model-picker-btn { border: none; background: transparent; padding: 5px 8px; font-size: 12.5px; }
+.sg-composer-bar-right .sg-model-picker { position: relative; }
+.sg-composer-bar-right .sg-model-picker-menu { left: auto; right: 0; }
+/* 方形上箭头发送钮 */
+.sg-compose-send { width: 32px; height: 32px; border: none; border-radius: 9px; background: var(--sg-action-primary); color: #fff; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.sg-compose-send:hover:not(:disabled) { background: var(--sg-action-primary-hover); }
+.sg-compose-send:disabled { opacity: 0.4; cursor: default; }
+
+/* 修复双框：sg-composer 只是布局容器，边框由内层 sg-composer-main 承担 */
+.sg-composer {
+  border: none;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+.sg-composer:focus-within { border: none; }
+
+/* 新建任务输入框对齐 composer v2 样式 */
+.sg-nt-card {
+  border-radius: 14px;
+  background: var(--sg-bg-card, #fff);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition: border-color 0.15s ease;
+}
+.sg-nt-card:focus-within { border-color: var(--sg-action-primary); }
+.sg-nt-textarea { resize: none; min-height: 64px; font-size: 13.5px; }
+.sg-nt-send { border-radius: 999px; }
+
+/* “+”菜单：子视图标题 / 空态 / 附件状态行 */
+.sg-compose-add-title { padding: 6px 10px 4px; font-size: 11px; color: var(--sg-text-secondary); }
+.sg-compose-add-empty { padding: 12px 10px; font-size: 12.5px; color: var(--sg-text-secondary); max-width: 230px; }
+.sg-compose-add-status { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: 12px; color: var(--sg-action-primary); }
+
+/* 对话视图：用户消息 / Agent 思考与回复 / 产出变更卡片 */
+.sg-conv { display: grid; gap: 18px; padding: 4px 4px 12px; }
+.sg-conv-turn { display: grid; gap: 10px; }
+.sg-conv-row { display: flex; }
+.sg-conv-row--user { justify-content: flex-end; }
+.sg-conv-row--agent { justify-content: flex-start; }
+.sg-conv-bubble { max-width: 86%; border-radius: 14px; padding: 10px 14px; font-size: 13px; line-height: 1.65; min-width: 0; }
+.sg-conv-bubble--user { background: color-mix(in srgb, var(--sg-action-primary) 10%, #ffffff); border: 1px solid color-mix(in srgb, var(--sg-action-primary) 25%, #ffffff); white-space: pre-wrap; word-break: break-word; }
+.sg-conv-bubble--agent { background: var(--sg-bg-card, #fff); border: 1px solid var(--sg-border-default); flex: 1; max-width: 100%; }
+.sg-conv-agent-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--sg-text-secondary); margin-bottom: 8px; }
+.sg-conv-thinking { display: grid; gap: 6px; padding: 8px 10px; border-radius: 10px; background: var(--sg-bg-subtle); margin-bottom: 8px; font-size: 12.5px; }
+.sg-conv-step { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sg-conv-step-name { font-weight: 500; flex-shrink: 0; }
+.sg-conv-step-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sg-conv-reason { margin: 4px 0 8px; }
+.sg-conv-collapse { border: none; background: transparent; color: var(--sg-text-secondary); font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 4px 0; }
+.sg-conv-collapse:hover { color: var(--sg-text-primary); }
+.sg-conv-reason-body { margin-top: 4px; padding: 8px 12px; border-left: 2px solid var(--sg-border-default); display: grid; gap: 6px; }
+.sg-conv-reason-item { font-size: 12.5px; color: var(--sg-text-secondary); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.sg-conv-result { padding: 0; font-size: 13px; }
+.sg-conv-changes { margin-top: 10px; border: 1px solid var(--sg-border-default); border-radius: 10px; overflow: hidden; }
+.sg-conv-changes-toggle { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; border: none; background: var(--sg-bg-subtle); font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--sg-text-secondary); cursor: pointer; text-align: left; }
+.sg-conv-changes-toggle:hover { color: var(--sg-text-primary); }
+.sg-conv-chevron { width: 12px; display: inline-flex; justify-content: center; color: var(--sg-text-secondary); }
+.sg-conv-diff { color: var(--sg-status-ok, #1a7f37); font-variant-numeric: tabular-nums; }
+.sg-conv-diff-del { color: var(--sg-status-error, #d33); font-variant-numeric: tabular-nums; }
+.sg-conv-change + .sg-conv-change { border-top: 1px solid var(--sg-border-default); }
+.sg-conv-change-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; border: none; background: transparent; font-family: inherit; font-size: 12.5px; color: var(--sg-text-primary); text-align: left; }
+.sg-conv-change-name { font-weight: 500; flex-shrink: 0; }
+.sg-conv-change-path { color: var(--sg-text-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.sg-conv-change-open { margin-left: auto; flex-shrink: 0; padding: 3px 10px; border: 1px solid var(--sg-border-default); border-radius: 6px; background: transparent; color: var(--sg-text-primary); font-family: inherit; font-size: 12px; cursor: pointer; }
+.sg-conv-change-open:hover { background: var(--sg-bg-subtle); }
+
+/* 工作台分栏查看器：左对话 / 可拖拽分割线 / 右产出内容 */
+.sg-split { flex: 1; min-height: 0; display: flex; align-items: stretch; }
+.sg-split-left { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.sg-split-divider { width: 5px; margin: 0 2px; border-radius: 3px; background: var(--sg-border-default); cursor: col-resize; flex-shrink: 0; }
+.sg-split-divider:hover { background: var(--sg-action-primary); }
+.sg-split-viewer { flex: 1; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--sg-border-default); background: var(--sg-bg-card, #fff); }
+.sg-split-viewer-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--sg-border-default); font-size: 13px; position: sticky; top: 0; background: var(--sg-bg-card, #fff); z-index: 5; }
+.sg-split-viewer-head strong { font-weight: 600; }
+.sg-split-viewer-head .sg-split-close { margin-left: auto; }
+.sg-split-viewer-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 20px; }
+.sg-split-viewer-body .sg-md-body { padding: 0; font-size: 13px; line-height: 1.7; }
+
+/* 新建任务输入器：复用工作台 composer v2 结构 */
+.sg-nt-composer { margin-top: 20px; }
+.sg-compose-add-check { margin-left: auto; color: var(--sg-action-primary); }
+.sg-compose-add-item[aria-checked='true'] { color: var(--sg-action-primary); font-weight: 500; }

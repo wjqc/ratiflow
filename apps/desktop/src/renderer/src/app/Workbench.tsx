@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { rpc, waitForRunTerminal } from '../rpc/client';
 import type { TimelineEvent } from '../rpc/client';
 import { gateLabel } from './ProjectSidebar';
@@ -23,12 +23,10 @@ import {
   IconShield,
   IconTarget,
   IconText,
+  IconX,
 } from '../components/Icons';
-import DocGatePanel, { EvaluateButton } from './DocGatePanel';
-import DevGatePanel from './DevGatePanel';
-import DeployGatePanel from './DeployGatePanel';
-import TracePanel from './TracePanel';
 import { ModelPicker } from './ModelPicker';
+import { renderMarkdown } from '../lib/markdown';
 import { useTwoStepConfirm } from './settings/components/useTwoStepConfirm';
 import {
   clearAutomaticPrd,
@@ -216,7 +214,6 @@ export function Workbench({
   const [trace, setTrace] = useState<RunTrace | null>(null);
   const [error, setError] = useState('');
   const [view, setView] = useState<'timeline' | 'gate'>('timeline');
-  const [gateTab, setGateTab] = useState<'process' | 'materials' | 'evidence' | 'review'>('process');
   // 右下角悬浮详情卡（跟随当前关）：胶囊化状态。
   const [detailMinimized, setDetailMinimized] = useState(false);
   const [prdState, setPrdState] = useState<'idle' | 'drafting' | 'ready' | 'failed'>('idle');
@@ -255,6 +252,9 @@ export function Workbench({
     const pending = readAutomaticPrd(workItemId);
     if (!pending) return;
     if (pending.state === 'failed' || !pending.runId) {
+      // 失败是终态：展示一次后即清除残留记录，避免每次进入任务都重复报“模型不可用”
+      // （后续 run 可能早已成功）。失败详情仍可在任务进展时间线中追溯。
+      clearAutomaticPrd(workItemId);
       setPrdState('failed');
       setPrdMessage(pending.error || '自动起草未能启动，请检查模型后重试。');
       return;
@@ -270,7 +270,6 @@ export function Workbench({
         setPrdState('ready');
         setPrdMessage('PRD 草稿已生成并保存，等待你的审阅。');
         await loadAll();
-        setGateTab('review');
         setView('gate');
       })
       .catch((reason) => {
@@ -297,23 +296,28 @@ export function Workbench({
     };
   }, [loadAll]);
 
-  // 最新 Run 的执行轨迹（推理摘要 + 工具调用 + 检查点）。
+  // 最新 Run 的执行轨迹：运行中每 1.5s 轮询（对话区实时展示推理/工具步骤），终态后拉一次。
   useEffect(() => {
-    const runId = runs[0]?.id;
-    if (!runId) {
+    const latest = runs[0];
+    if (!latest) {
       setTrace(null);
       return;
     }
     let cancelled = false;
-    rpc<RunTrace>('agent.trace', { runId })
-      .then((t) => {
-        if (!cancelled) setTrace(t);
-      })
-      .catch(() => {
-        if (!cancelled) setTrace(null);
-      });
+    const fetchOnce = () => {
+      rpc<RunTrace>('agent.trace', { runId: latest.id })
+        .then((t) => {
+          if (!cancelled) setTrace(t);
+        })
+        .catch(() => {});
+    };
+    void fetchOnce();
+    const active = latest.status === 'running' || latest.status === 'queued';
+    if (!active) return () => { cancelled = true; };
+    const timer = setInterval(fetchOnce, 1500);
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
   }, [runs]);
 
@@ -324,6 +328,36 @@ export function Workbench({
   const currentStage = stagesByGate.get(currentGate);
   const gateEvidences = evidences.filter((e) => e.gate === currentGate);
 
+  // 产出查看器：点对话区变更卡的“打开”后，工作台左右分栏展示内容；分割线可拖拽。
+  const [openedDoc, setOpenedDoc] = useState<{ revisionId: string; title: string; meta: string } | null>(null);
+  const [docContent, setDocContent] = useState('');
+  const [splitRatio, setSplitRatio] = useState(0.55);
+  const splitRef = useRef<HTMLDivElement>(null);
+
+  const openRevision = (revisionId: string, title: string, meta: string) => {
+    setOpenedDoc({ revisionId, title, meta });
+    setDocContent('');
+    rpc<{ content: string }>('artifact.revisionContent', { revisionId })
+      .then((res) => setDocContent(res.content))
+      .catch(() => setDocContent('（内容读取失败）'));
+  };
+
+  const startSplitDrag = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    const onMove = (move: MouseEvent) => {
+      const rect = splitRef.current?.getBoundingClientRect();
+      if (!rect || rect.width === 0) return;
+      const ratio = (move.clientX - rect.left) / rect.width;
+      setSplitRatio(Math.min(0.8, Math.max(0.25, ratio)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   if (error && !workItem) {
     return (
       <div className="sg-scroll">
@@ -331,6 +365,70 @@ export function Workbench({
       </div>
     );
   }
+
+  const centerBody = (
+    <>
+      <div className="sg-workbench-scroll">
+        {error && <div className="sg-banner sg-banner--error">{error}</div>}
+        {prdState !== 'idle' ? (
+          <div
+            className={`sg-banner ${prdState === 'failed' ? 'sg-banner--error' : 'sg-banner--info'}`}
+            role={prdState === 'failed' ? 'alert' : 'status'}
+          >
+            <span>{prdMessage}</span>
+            {prdState === 'failed' ? (
+              <>
+                <button
+                  className="sg-link-btn"
+                  onClick={() => onNavigate({ page: 'settings', section: 'models' })}
+                >
+                  检查模型
+                </button>
+                <button
+                  className="sg-link-btn"
+                  onClick={() => {
+                    setPrdState('idle');
+                    setPrdMessage('');
+                  }}
+                >
+                  关闭
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {progress?.blockedReason && (
+          <div className="sg-banner sg-banner--warn">
+            <IconAlert size={14} />
+            <span>
+              任务被阻塞：{progress.blockedReason}
+              {progress.pendingApprovals > 0 && (
+                <button
+                  className="sg-link-btn"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => onNavigate({ page: 'approvals' })}
+                >
+                  去审批中心处理（{progress.pendingApprovals}）
+                </button>
+              )}
+            </span>
+          </div>
+        )}
+        <Conversation runs={runs} trace={trace} workItemId={workItemId} onOpenRevision={openRevision} />
+      </div>
+
+      <Composer
+        workItemId={workItemId}
+        projectId={projectId}
+        currentGate={currentGate}
+        requirementText={[workItem?.title, workItem?.description].filter(Boolean).join('\n')}
+        knowledgeCount={knowledgeCount}
+        onChanged={loadAll}
+        onOpenGate={() => setView('gate')}
+        onOpenModels={() => onNavigate({ page: 'settings', section: 'models' })}
+      />
+    </>
+  );
 
   return (
     <div className="sg-workbench">
@@ -360,57 +458,43 @@ export function Workbench({
             </div>
           </header>
 
-          <div className="sg-workbench-scroll">
-            {error && <div className="sg-banner sg-banner--error">{error}</div>}
-            {prdState !== 'idle' ? (
+          {openedDoc ? (
+            <div className="sg-split" ref={splitRef}>
+              <div className="sg-split-left" style={{ flexBasis: `${splitRatio * 100}%` }}>
+                {centerBody}
+              </div>
               <div
-                className={`sg-banner ${prdState === 'failed' ? 'sg-banner--error' : 'sg-banner--info'}`}
-                role={prdState === 'failed' ? 'alert' : 'status'}
-              >
-                <span>{prdMessage}</span>
-                {prdState === 'failed' ? (
+                className="sg-split-divider"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="拖拽调整布局"
+                onMouseDown={startSplitDrag}
+              />
+              <div className="sg-split-viewer">
+                <div className="sg-split-viewer-head">
+                  <IconDoc size={14} />
+                  <strong>{openedDoc.title}</strong>
+                  <span className="sg-muted">{openedDoc.meta}</span>
                   <button
-                    className="sg-link-btn"
-                    onClick={() => onNavigate({ page: 'settings', section: 'models' })}
+                    className="sg-icon-btn sg-split-close"
+                    aria-label="关闭查看器"
+                    title="关闭"
+                    onClick={() => setOpenedDoc(null)}
                   >
-                    检查模型
+                    <IconX size={14} />
                   </button>
-                ) : null}
+                </div>
+                <div className="sg-split-viewer-body">
+                  <div
+                    className="sg-md-body"
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(docContent || '加载中…') }}
+                  />
+                </div>
               </div>
-            ) : null}
-            {progress?.blockedReason && (
-              <div className="sg-banner sg-banner--warn">
-                <IconAlert size={14} />
-                <span>
-                  任务被阻塞：{progress.blockedReason}
-                  {progress.pendingApprovals > 0 && (
-                    <button
-                      className="sg-link-btn"
-                      style={{ marginLeft: 8 }}
-                      onClick={() => onNavigate({ page: 'approvals' })}
-                    >
-                      去审批中心处理（{progress.pendingApprovals}）
-                    </button>
-                  )}
-                </span>
-              </div>
-            )}
-            {workItem && <RequirementCard workItem={workItem} attachments={attachments} />}
-            <Timeline events={events} />
-          </div>
-
-          <Composer
-            workItemId={workItemId}
-            currentGate={currentGate}
-            requirementText={[workItem?.title, workItem?.description].filter(Boolean).join('\n')}
-            knowledgeCount={knowledgeCount}
-            onChanged={loadAll}
-            onOpenGate={() => {
-              setGateTab('review');
-              setView('gate');
-            }}
-            onOpenModels={() => onNavigate({ page: 'settings', section: 'models' })}
-          />
+            </div>
+          ) : (
+            centerBody
+          )}
         </div>
       ) : (
         <GateWorkspace
@@ -424,8 +508,6 @@ export function Workbench({
           docs={docs}
           trace={trace}
           knowledgeCount={knowledgeCount}
-          tab={gateTab}
-          onTab={setGateTab}
           onChanged={loadAll}
           onBack={() => setView('timeline')}
           onOpenApprovals={() => onNavigate({ page: 'approvals' })}
@@ -838,48 +920,6 @@ function GateDetailFloat({
   );
 }
 
-/* ---------------- 用户需求卡 ---------------- */
-
-function RequirementCard({
-  workItem,
-  attachments,
-}: {
-  workItem: WorkItemDetail;
-  attachments: AttachmentInfo[];
-}) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div className="sg-req-card">
-      <div className="sg-req-card-head">
-        <span className="sg-req-card-title">{workItem.title}</span>
-        <span className="sg-req-card-meta">{relativeTime(workItem.created_at)} 创建</span>
-      </div>
-      {workItem.description && (
-        <p className={`sg-req-card-body ${expanded ? 'sg-req-card-body--expanded' : ''}`}>
-          {workItem.description}
-        </p>
-      )}
-      {attachments.length > 0 && (
-        <div className="sg-req-card-attachments">
-          {attachments.map((a) => (
-            <span className="sg-attach-chip" key={a.id} title={a.filename}>
-              {a.content_type.startsWith('image/') ? <IconImage size={13} /> : <IconDoc size={13} />}
-              {a.filename}
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="sg-req-card-foot">
-        {workItem.description && (
-          <button className="sg-link-btn" onClick={() => setExpanded((v) => !v)}>
-            {expanded ? '收起' : '查看完整需求'}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /* ---------------- 时间线 ---------------- */
 
 function Timeline({ events }: { events: TimelineEvent[] }) {
@@ -920,6 +960,316 @@ function timelineTime(iso: string): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+/* ---------------- 对话视图：我发送的 → 模型思考 → 完整回复 → 产出变更 ---------------- */
+
+/** 从 run.goal 提取用户真正输入的文本（起草模板把需求/补充拼进了 goal）。 */
+function extractUserMessage(goal: string): string {
+  const supplement = goal.split(/用户补充：\s*/)[1];
+  if (supplement) return supplement.trim();
+  const requirement = goal.split(/用户需求：\s*/)[1];
+  if (requirement) return requirement.trim();
+  return goal.trim();
+}
+
+function Conversation({
+  runs,
+  trace,
+  workItemId,
+  onOpenRevision,
+}: {
+  runs: AgentRunInfo[];
+  trace: RunTrace | null;
+  workItemId: string;
+  onOpenRevision: (revisionId: string, title: string, meta: string) => void;
+}) {
+  const ordered = [...runs].reverse();
+  if (ordered.length === 0) {
+    return (
+      <div className="sg-empty" style={{ padding: '32px 24px' }}>
+        还没有执行记录。在下方输入框发送消息，Agent 将开始处理并在此展示完整过程。
+      </div>
+    );
+  }
+  return (
+    <div className="sg-conv">
+      {ordered.map((run, index) => (
+        <ConversationTurn
+          key={run.id}
+          run={run}
+          isLatest={index === ordered.length - 1}
+          latestTrace={trace}
+          workItemId={workItemId}
+          onOpenRevision={onOpenRevision}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ConversationTurn({
+  run,
+  isLatest,
+  latestTrace,
+  workItemId,
+  onOpenRevision,
+}: {
+  run: AgentRunInfo;
+  isLatest: boolean;
+  latestTrace: RunTrace | null;
+  workItemId: string;
+  onOpenRevision: (revisionId: string, title: string, meta: string) => void;
+}) {
+  const [showReasoning, setShowReasoning] = useState(isLatest);
+  const [turnTrace, setTurnTrace] = useState<RunTrace | null>(isLatest ? latestTrace : null);
+  const running = run.status === 'running' || run.status === 'queued';
+
+  useEffect(() => {
+    if (isLatest) {
+      setTurnTrace(latestTrace);
+      return;
+    }
+  }, [isLatest, latestTrace]);
+
+  // 历史 run 的思考轨迹按需拉取（展开“模型思考”时）。
+  useEffect(() => {
+    if (isLatest || !showReasoning || turnTrace) return;
+    let cancelled = false;
+    rpc<RunTrace>('agent.trace', { runId: run.id })
+      .then((t) => {
+        if (!cancelled) setTurnTrace(t);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isLatest, showReasoning, turnTrace, run.id]);
+
+  const reasonSteps = (turnTrace?.steps ?? []).filter((s) => s.kind === 'reasoning');
+  const toolSteps = (turnTrace?.steps ?? []).filter((s) => s.kind === 'tool');
+  const liveSteps = [...reasonSteps, ...toolSteps].sort((a, b) => a.seq - b.seq);
+
+  return (
+    <div className="sg-conv-turn">
+      <div className="sg-conv-row sg-conv-row--user">
+        <div className="sg-conv-bubble sg-conv-bubble--user">{extractUserMessage(run.goal)}</div>
+      </div>
+      <div className="sg-conv-row sg-conv-row--agent">
+        <div className="sg-conv-bubble sg-conv-bubble--agent">
+          <div className="sg-conv-agent-head">
+            <IconCpu size={12} />
+            <span>需求分析 Agent</span>
+            <span className="sg-muted">
+              {run.status === 'completed_execution'
+                ? '已完成'
+                : running
+                  ? '思考与执行中…'
+                  : run.status === 'failed'
+                    ? '执行失败'
+                    : '已取消'}
+            </span>
+          </div>
+
+          {running ? (
+            <div className="sg-conv-thinking">
+              {liveSteps.length > 0 ? (
+                liveSteps.slice(-4).map((s) => (
+                  <div key={s.seq} className="sg-conv-step">
+                    <span className={`sg-chip ${s.kind === 'tool' ? '' : 'sg-chip--ok'}`}>
+                      {s.kind === 'tool' ? '工具' : '推理'}
+                    </span>
+                    <span className="sg-conv-step-name">{s.name}</span>
+                    {s.summary ? <span className="sg-muted sg-conv-step-summary">{s.summary}</span> : null}
+                  </div>
+                ))
+              ) : (
+                <span className="sg-muted">模型推理中，首次产出可能需要一到两分钟…</span>
+              )}
+            </div>
+          ) : null}
+
+          {run.status === 'failed' ? (
+            <div className="sg-banner sg-banner--error">
+              {friendlyAgentError(`Agent 状态 ${run.status}：${run.result}`)}
+            </div>
+          ) : null}
+          {run.status === 'cancelled' ? (
+            <div className="sg-muted">已取消本次执行；你输入的内容已保留，可修改后重发。</div>
+          ) : null}
+
+          {reasonSteps.length > 0 ? (
+            <div className="sg-conv-reason">
+              <button className="sg-conv-collapse" onClick={() => setShowReasoning((v) => !v)}>
+                {showReasoning ? '⌄' : '›'} 模型思考（{reasonSteps.length}）
+              </button>
+              {showReasoning ? (
+                <div className="sg-conv-reason-body">
+                  {reasonSteps.map((s) => (
+                    <div key={s.seq} className="sg-conv-reason-item">
+                      {s.summary || s.name}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {run.status === 'completed_execution' && run.result ? (
+            <div className="sg-md-body sg-conv-result" dangerouslySetInnerHTML={{ __html: renderMarkdown(run.result) }} />
+          ) : null}
+
+          {run.status === 'completed_execution' ? (
+            <ChangedArtifacts workItemId={workItemId} since={run.created_at} onOpen={onOpenRevision} />
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface RevisionRow {
+  id: string;
+  rev_no: number;
+  status: string;
+  size: number;
+  content_sha256?: string;
+  created_at: string;
+}
+
+/** 行级差异估算：按行多重集合比较（新增=新文本多出的行，删除=旧文本多出的行）。 */
+function diffLineCounts(oldText: string, newText: string): { added: number; deleted: number } {
+  const tally = (text: string) => {
+    const map = new Map<string, number>();
+    for (const line of text.split('\n')) map.set(line, (map.get(line) ?? 0) + 1);
+    return map;
+  };
+  const oldLines = tally(oldText);
+  const newLines = tally(newText);
+  let added = 0;
+  let deleted = 0;
+  for (const [line, n] of newLines) {
+    const base = oldLines.get(line) ?? 0;
+    if (n > base) added += n - base;
+  }
+  for (const [line, n] of oldLines) {
+    const base = newLines.get(line) ?? 0;
+    if (n > base) deleted += n - base;
+  }
+  return { added, deleted };
+}
+
+/** 本次执行更新的产出卡片：默认收起只显示“N 个产出已更新 +A -D”，展开后逐修订展示路径与行级变更。 */
+function ChangedArtifacts({
+  workItemId,
+  since,
+  onOpen,
+}: {
+  workItemId: string;
+  since: string;
+  onOpen: (revisionId: string, title: string, meta: string) => void;
+}) {
+  const [entries, setEntries] = useState<
+    { key: string; title: string; path: string; revLabel: string; added: number; deleted: number; revisionId: string; meta: string }[] | null
+  >(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const page = await rpc<{ items: { id: string; kind: string; title: string }[] }>(
+          'artifact.list',
+          { workItemId },
+        );
+        const out: {
+          key: string;
+          title: string;
+          path: string;
+          revLabel: string;
+          added: number;
+          deleted: number;
+          revisionId: string;
+          meta: string;
+        }[] = [];
+        for (const art of page.items ?? []) {
+          const revs = await rpc<{ items: RevisionRow[] }>('artifact.listRevisions', {
+            artifactId: art.id,
+          }).catch(() => ({ items: [] as RevisionRow[] }));
+          const sorted = [...(revs.items ?? [])].sort((a, b) => a.rev_no - b.rev_no);
+          for (const rev of sorted.filter((r) => r.created_at >= since)) {
+            const prev = sorted.find((r) => r.rev_no === rev.rev_no - 1) ?? null;
+            const [current, previous] = await Promise.all([
+              rpc<{ content: string }>('artifact.revisionContent', { revisionId: rev.id }).catch(() => ({ content: '' })),
+              prev
+                ? rpc<{ content: string }>('artifact.revisionContent', { revisionId: prev.id }).catch(() => ({ content: '' }))
+                : Promise.resolve({ content: '' }),
+            ]);
+            const { added, deleted } = diffLineCounts(previous.content, current.content);
+            const sha = rev.content_sha256 ?? '';
+            out.push({
+              key: `${art.id}/${rev.id}`,
+              title: art.title || art.kind,
+              path: sha ? `objects/${sha.slice(0, 2)}/${sha}` : `artifacts/${art.kind}`,
+              revLabel: `rev${rev.rev_no} · ${rev.status}`,
+              added,
+              deleted,
+              revisionId: rev.id,
+              meta: `rev${rev.rev_no} · ${rev.status}`,
+            });
+          }
+        }
+        if (!cancelled) setEntries(out);
+      } catch {
+        if (!cancelled) setEntries([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [workItemId, since]);
+
+  if (entries === null || entries.length === 0) return null;
+  const totalAdded = entries.reduce((n, e) => n + e.added, 0);
+  const totalDeleted = entries.reduce((n, e) => n + e.deleted, 0);
+
+  return (
+    <div className="sg-conv-changes">
+      <button
+        className="sg-conv-changes-head sg-conv-changes-toggle"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className="sg-conv-chevron">{expanded ? '⌄' : '›'}</span>
+        <IconDoc size={13} />
+        <span>
+          {entries.length} 个产出已更新
+        </span>
+        <span className="sg-conv-diff">+{totalAdded}</span>
+        <span className="sg-conv-diff-del">-{totalDeleted}</span>
+      </button>
+      {expanded
+        ? entries.map((e) => (
+            <div key={e.key} className="sg-conv-change">
+              <div className="sg-conv-change-row">
+                <IconDoc size={13} />
+                <span className="sg-conv-change-name">{e.title}</span>
+                <span className="sg-conv-change-path">{e.path}</span>
+                <span className="sg-conv-diff">+{e.added}</span>
+                <span className="sg-conv-diff-del">-{e.deleted}</span>
+                <button
+                  className="sg-conv-change-open"
+                  onClick={() => onOpen(e.revisionId, e.title, e.meta)}
+                >
+                  打开
+                </button>
+              </div>
+            </div>
+          ))
+        : null}
+    </div>
+  );
+}
+
+
 function eventVisual(type: string): [string, ReactNode] {
   if (type.includes('create') || type.includes('create_with_source')) return ['', <IconPlus size={13} />];
   if (type.includes('context')) return ['sg-timeline-icon--info', <IconSearch size={13} />];
@@ -942,6 +1292,7 @@ function eventVisual(type: string): [string, ReactNode] {
 
 function Composer({
   workItemId,
+  projectId,
   currentGate,
   requirementText,
   knowledgeCount,
@@ -950,6 +1301,7 @@ function Composer({
   onOpenModels,
 }: {
   workItemId: string;
+  projectId: string;
   currentGate: Gate;
   requirementText: string;
   knowledgeCount: number;
@@ -962,6 +1314,55 @@ function Composer({
   const [runId, setRunId] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  // “+”添加菜单：附件导入与 @ 知识来源引用（均接真实 RPC）。
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [addMenuView, setAddMenuView] = useState<'root' | 'context'>('root');
+  const [contextSources, setContextSources] = useState<{ id: string; name: string }[]>([]);
+  const [addStatus, setAddStatus] = useState('');
+  const addMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!addMenuRef.current?.contains(event.target as Node)) setAddMenuOpen(false);
+    };
+    window.addEventListener('mousedown', close);
+    return () => window.removeEventListener('mousedown', close);
+  }, [addMenuOpen]);
+
+  // 附件：原生文件对话框 → attachment.import（对象存储 + 附件记录）。
+  const importAttachment = async () => {
+    setAddMenuOpen(false);
+    const file = await window.sixgates.selectFile();
+    if (!file) return;
+    try {
+      await rpc('attachment.import', {
+        workItemId,
+        filename: file.filename,
+        contentBase64: file.contentBase64,
+      });
+      setAddStatus(`附件已添加：${file.filename}`);
+      await onChanged();
+    } catch (reason) {
+      setAddStatus(`附件添加失败：${reason instanceof Error ? reason.message : String(reason)}`);
+    }
+  };
+
+  // @ 上下文：列出项目知识来源，点选后以 @名称 写入输入，随消息一起交给 Agent 检索。
+  const openContextMenu = async () => {
+    setAddMenuView('context');
+    try {
+      const res = await rpc<{ items: { id: string; name: string }[] }>('knowledge.list', { projectId });
+      setContextSources(res.items ?? []);
+    } catch {
+      setContextSources([]);
+    }
+  };
+
+  const mentionSource = (name: string) => {
+    setAddMenuOpen(false);
+    setText((prev) => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}@${name} `);
+  };
 
   // 长任务可取消（推理型模型一次生成可达数分钟）：调 agent.cancel，
   // 轮询会在下一拍见到 cancelled 终态。已终态时取消是 no-op。
@@ -1020,10 +1421,9 @@ function Composer({
         if (run.status !== 'completed_execution') {
           throw new Error(`Agent 状态 ${run.status}：${run.result}`);
         }
-        setNotice('Agent 已完成处理。请进入当前关查看并确认产出。');
+        setNotice('Agent 已完成处理。结果如下，可进入当前关查看产出。');
         setText('');
         await onChanged();
-        onOpenGate();
       }
     } catch (reason) {
       setNotice('');
@@ -1052,17 +1452,18 @@ function Composer({
           ) : null}
         </div>
       ) : null}
-      <div className="sg-composer-chips">
-        <ModelPicker />
-        <span className="sg-composer-chip">
-          <IconBook size={12} />
-          本次上下文：知识库（{knowledgeCount} 个来源）
-        </span>
-      </div>
-      <div className="sg-composer-box">
+      <div className="sg-composer-main">
+        {addStatus ? (
+          <div className="sg-compose-add-status" role="status">
+            <span>{addStatus}</span>
+            <button className="sg-link-btn" onClick={() => setAddStatus('')}>
+              关闭
+            </button>
+          </div>
+        ) : null}
         <textarea
           className="sg-composer-input"
-          placeholder="对当前任务补充说明，或提出修改意见…"
+          placeholder="提出后续修改要求"
           rows={2}
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -1074,33 +1475,86 @@ function Composer({
           }}
           aria-label="补充说明"
         />
-        <div className="sg-composer-tools">
-          <div className="sg-composer-tool-group">
-            <button className="sg-composer-tool" title="粘贴附件（规划中）" aria-label="附件" disabled>
-              <IconPaperclip size={15} />
-            </button>
-            <button className="sg-composer-tool" title="插入文本（规划中）" aria-label="文本" disabled>
-              <IconText size={15} />
-            </button>
-            <button className="sg-composer-tool" title="插入截图（规划中）" aria-label="截图" disabled>
-              <IconImage size={15} />
-            </button>
-            <button className="sg-composer-tool" title="插入文档（规划中）" aria-label="文档" disabled>
-              <IconDoc size={15} />
-            </button>
-            <button className="sg-composer-tool" title="引用知识库（规划中）" aria-label="知识库" disabled>
-              <IconBook size={15} />
+        <div className="sg-composer-bar">
+          <div className="sg-composer-bar-left">
+            <div className="sg-compose-add" ref={addMenuRef}>
+              <button
+                className="sg-compose-add-btn"
+                title="添加"
+                aria-label="添加"
+                aria-expanded={addMenuOpen}
+                onClick={() => {
+                  setAddMenuOpen((v) => {
+                    if (!v) setAddMenuView('root');
+                    return !v;
+                  });
+                }}
+              >
+                <IconPlus size={15} />
+              </button>
+              {addMenuOpen ? (
+                <div className="sg-compose-add-menu" role="menu">
+                  {addMenuView === 'root' ? (
+                    <>
+                      <button
+                        className="sg-compose-add-item"
+                        role="menuitem"
+                        onClick={() => void importAttachment()}
+                      >
+                        <IconPaperclip size={14} />
+                        <span>添加附件</span>
+                      </button>
+                      <button
+                        className="sg-compose-add-item"
+                        role="menuitem"
+                        onClick={() => void openContextMenu()}
+                      >
+                        <IconText size={14} />
+                        <span>使用 @ 添加上下文</span>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="sg-compose-add-title">引用知识来源</div>
+                      {contextSources.length === 0 ? (
+                        <div className="sg-compose-add-empty">
+                          项目暂无知识来源，可到「知识库」添加后引用。
+                        </div>
+                      ) : (
+                        contextSources.map((source) => (
+                          <button
+                            key={source.id}
+                            className="sg-compose-add-item"
+                            role="menuitem"
+                            onClick={() => mentionSource(source.name)}
+                          >
+                            <IconBook size={14} />
+                            <span>@{source.name}</span>
+                          </button>
+                        ))
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : null}
+            </div>
+            <span className="sg-composer-chip sg-composer-chip--flat">
+              <IconBook size={12} />
+              本次上下文：知识库（{knowledgeCount} 个来源）
+            </span>
+          </div>
+          <div className="sg-composer-bar-right">
+            <ModelPicker />
+            <button
+              className="sg-compose-send"
+              title={busy ? '处理中…' : '发送（⌘↵）'}
+              aria-label={busy ? '处理中' : '发送'}
+              disabled={busy || text.trim() === ''}
+              onClick={() => void submit()}
+            >
+              <IconSend size={15} />
             </button>
           </div>
-          <button
-            className="sg-btn sg-btn--primary sg-btn--sm"
-            title={busy ? '处理中…' : '发送（⌘↵）'}
-            disabled={busy || text.trim() === ''}
-            onClick={() => void submit()}
-          >
-            <IconSend size={13} />
-            {busy ? '处理中…' : '发送'}
-          </button>
         </div>
       </div>
     </div>
@@ -1129,8 +1583,6 @@ function GateWorkspace({
   docs,
   trace,
   knowledgeCount,
-  tab,
-  onTab,
   onChanged,
   onBack,
   onOpenApprovals,
@@ -1145,21 +1597,12 @@ function GateWorkspace({
   docs: string[];
   trace: RunTrace | null;
   knowledgeCount: number;
-  tab: 'process' | 'materials' | 'evidence' | 'review';
-  onTab: (t: 'process' | 'materials' | 'evidence' | 'review') => void;
   onChanged: () => void;
   onBack: () => void;
   onOpenApprovals: () => void;
 }) {
   // 仅当最新一次 Run 失败时才显示错误卡（历史失败不追溯展示）。
   const failedRun = runs[0]?.status === 'failed' ? runs[0] : undefined;
-  const tabs = [
-    { id: 'process', label: '执行过程' },
-    { id: 'materials', label: `材料 ${docs.length}` },
-    { id: 'evidence', label: `证据 ${evidences.length}` },
-    { id: 'review', label: '评审与放行' },
-  ] as const;
-
   return (
     <div className="sg-workbench-center">
       <div className="sg-gate-head">
@@ -1263,112 +1706,26 @@ function GateWorkspace({
         </div>
       </div>
 
-      {/* 页签：执行过程 / 材料 / 证据 / 评审与放行 */}
-      <div className="sg-gate-tabs">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            className={`sg-gate-tab${tab === t.id ? ' sg-gate-tab--active' : ''}`}
-            onClick={() => onTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
+      {/* 执行过程（输入 → Agent 执行 → 输出 → 证据） */}
       <div className="sg-gate-workspace">
-        {tab === 'process' ? (
-          <>
-            <ExecutionProcessView
-              gate={gate}
-              stage={stage}
-              progress={progress}
-              events={events}
-              runs={runs}
-              trace={trace}
-              docs={docs}
-              knowledgeCount={knowledgeCount}
-            />            {failedRun ? (
-              <div className="sg-card">
-                <div className="sg-card-head">错误与警告</div>
-                <div className="sg-banner sg-banner--error" style={{ margin: '0 14px 12px' }}>
-                  {failedRun.result || '最近一次执行失败'}
-                </div>
-              </div>
-            ) : null}
-          </>
-        ) : tab === 'materials' ? (
+        <ExecutionProcessView
+          gate={gate}
+          stage={stage}
+          progress={progress}
+          events={events}
+          runs={runs}
+          trace={trace}
+          docs={docs}
+          knowledgeCount={knowledgeCount}
+        />
+        {failedRun ? (
           <div className="sg-card">
-            <div className="sg-card-head">
-              本关材料
-              <span className="sg-card-extra">{docs.length} 个文件</span>
+            <div className="sg-card-head">错误与警告</div>
+            <div className="sg-banner sg-banner--error" style={{ margin: '0 14px 12px' }}>
+              {failedRun.result || '最近一次执行失败'}
             </div>
-            {docs.length === 0 ? (
-              <div className="sg-empty" style={{ padding: '20px 24px' }}>
-                暂无材料。需求文档与 Agent 产出会自动归档到这里。
-              </div>
-            ) : (
-              <div style={{ padding: '8px 14px 12px', display: 'grid', gap: 6 }}>
-                {docs.map((name) => (
-                  <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
-                    <IconDoc size={13} />
-                    <span style={{ fontWeight: 500 }}>{name}</span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
-        ) : tab === 'evidence' ? (
-          <div className="sg-card">
-            <div className="sg-card-head">
-              本关证据
-              <span className="sg-card-extra">{evidences.length} 条</span>
-            </div>
-            {evidences.length === 0 ? (
-              <div className="sg-empty" style={{ padding: '20px 24px' }}>
-                暂无证据。完成上方步骤后会自动记录。
-              </div>
-            ) : (
-              <div style={{ padding: '8px 14px 12px', display: 'grid', gap: 6 }}>
-                {evidences.map((e) => (
-                  <div
-                    key={e.id}
-                    style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
-                  >
-                    <span className={`sg-chip ${e.verified ? 'sg-chip--ok' : ''}`}>
-                      {e.verified ? '已核验' : '待核验'}
-                    </span>
-                    <span style={{ fontWeight: 500 }}>{e.title}</span>
-                    <span className="sg-muted">{e.kind}</span>
-                    <span className="sg-muted" style={{ marginLeft: 'auto' }}>
-                      {relativeTime(e.created_at)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : (
-          <>
-            {gate === 'development' && <DevGatePanel workItemId={workItemId} onDone={onChanged} />}
-            {gate === 'deployment' && (
-              <DeployGatePanel workItemId={workItemId} onDone={onChanged} onOpenApprovals={onOpenApprovals} />
-            )}
-            <DocGatePanel workItemId={workItemId} gate={gate} onDone={onChanged} />
-            {gate === 'verification' && <AcceptancePanel workItemId={workItemId} progress={progress} />}
-
-            <TracePanel workItemId={workItemId} />
-
-            <RollbackCard workItemId={workItemId} onChanged={onChanged} />
-
-            <div className="sg-gate-foot">
-              <span className="sg-sub">
-                就绪检查全部通过后可评估本关；评估依据为冻结产物与已核验证据。
-              </span>
-              <EvaluateButton workItemId={workItemId} gate={gate} busy={false} onDone={onChanged} />
-            </div>
-          </>
-        )}
+        ) : null}
       </div>
 
       {progress && progress.pendingApprovals > 0 ? (
@@ -1449,219 +1806,3 @@ function GateChecksCard({ stage, progress }: { stage?: StageInfo; progress: Prog
 
 /* ---------------- 验证关 ---------------- */
 
-interface PassportInfo {
-  id: string;
-  workitem_id: string;
-  object_sha256: string;
-  created_at: string;
-  gates: { gate: string; passed: boolean; evidence_ids: string[]; failed_inputs: string[] }[];
-}
-
-function AcceptancePanel({
-  workItemId,
-  progress,
-}: {
-  workItemId: string;
-  progress: ProgressInfo | null;
-}) {
-  const [passport, setPassport] = useState<PassportInfo | null>(null);
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const stagesByGate = new Map((progress?.stages ?? []).map((s) => [s.gate, s]));
-  const allPassed = GATES.every((g) => stagesByGate.get(g)?.state === 'passed');
-
-  const issue = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      const p = await rpc<PassportInfo>('passport.issue', { workItemId });
-      setPassport(p);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="sg-card">
-      <div className="sg-card-head">验收与通关凭证</div>
-      <div style={{ padding: '12px 14px', display: 'grid', gap: 10 }}>
-        <div className="sg-checks">
-          {GATES.map((g) => {
-            const passed = stagesByGate.get(g)?.state === 'passed';
-            return (
-              <div className="sg-check" key={g}>
-                <span className={`sg-check-icon ${passed ? 'sg-check-icon--ok' : ''}`}>
-                  {passed && <IconCheck size={10} />}
-                </span>
-                {gateLabel(g)} {GATE_STATE_LABELS[stagesByGate.get(g)?.state ?? 'pending']}
-              </div>
-            );
-          })}
-        </div>
-        {error && <div className="sg-banner sg-banner--error">{error}</div>}
-        {passport ? (
-          <div className="sg-banner sg-banner--ok">
-            <IconCheck size={14} />
-            <span>
-              通关凭证已签发：{passport.id}（{formatDateTime(passport.created_at)}）
-            </span>
-          </div>
-        ) : (
-          <button
-            className="sg-btn sg-btn--primary"
-            disabled={!allPassed || busy}
-            title={allPassed ? '签发通关凭证' : '六关全部通过后可签发'}
-            onClick={() => void issue()}
-          >
-            {busy ? '签发中…' : '签发通关凭证'}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- 关前快照回滚（AC-SW-06/07 用户入口） ---------------- */
-
-interface SnapshotRow {
-  id: string;
-  stage_attempt_id: string;
-  kind: string;
-  created_at: string;
-}
-
-interface AttemptRow {
-  id: string;
-  gate: string;
-  attempt_no: number;
-}
-
-/** 回滚到某关执行前：preview → request（自动建安全快照+审批）→ decide 执行，全链路复用后端 M3 能力。 */
-function RollbackCard({ workItemId, onChanged }: { workItemId: string; onChanged: () => void }) {
-  const [targets, setTargets] = useState<
-    { id: string; gate: string; no: number; created_at: string }[]
-  >([]);
-  const [busyId, setBusyId] = useState('');
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [pendingConfirm, requestConfirm] = useTwoStepConfirm();
-
-  const load = useCallback(async () => {
-    try {
-      const [snaps, atts] = await Promise.all([
-        rpc<{ items: SnapshotRow[] }>('snapshot.list', { workItemId }),
-        rpc<{ items: AttemptRow[] }>('stage.attempts', { workItemId }).catch(() => ({ items: [] })),
-      ]);
-      const gateByAttempt = new Map((atts.items ?? []).map((a) => [a.id, a]));
-      const rows = (snaps.items ?? [])
-        .filter((s) => s.kind === 'stage_entry')
-        .map((s) => {
-          const a = gateByAttempt.get(s.stage_attempt_id);
-          return {
-            id: s.id,
-            gate: a?.gate ?? '',
-            no: a?.attempt_no ?? 0,
-            created_at: s.created_at,
-          };
-        })
-        .sort((x, y) => (x.created_at < y.created_at ? 1 : -1));
-      setTargets(rows);
-    } catch {
-      // 只读列表失败不阻塞关卡主流程；展开错误在下发回滚时仍会暴露。
-    }
-  }, [workItemId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const rollback = async (target: { id: string; gate: string; no: number }) => {
-    setBusyId(target.id);
-    setError('');
-    setNotice('');
-    try {
-      await rpc('rollback.preview', { workItemId, targetSnapshotId: target.id });
-      const res = await rpc<{ approvalId: string }>('rollback.request', {
-        workItemId,
-        targetSnapshotId: target.id,
-        requestedBy: 'local-user',
-      });
-      // 回滚是高风险操作：request 只建审批与安全快照，执行必须再经用户决定。
-      const decided = await rpc<{ operation?: { state?: string }; blocked_reason?: string }>(
-        'rollback.decide',
-        {
-          approvalId: res.approvalId,
-          decision: 'approved',
-          decidedBy: 'local-user',
-          reason: '工作台发起：回滚到该关执行前',
-        },
-      );
-      const state = decided.operation?.state ?? '';
-      if (state === 'blocked') {
-        setNotice(
-          `回滚已批准，但有需要人工处理的外部资源（${decided.blocked_reason || '详见日志'}）；其余控制面已恢复。`,
-        );
-      } else {
-        setNotice(`已回滚到${gateLabel(target.gate)}第 ${target.no} 次执行前的状态。`);
-      }
-      await load();
-      onChanged();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusyId('');
-    }
-  };
-
-  if (targets.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="sg-card">
-      <div className="sg-card-head">
-        回滚
-        <span className="sg-card-extra">回到某关执行前的状态</span>
-      </div>
-      <div style={{ padding: '8px 14px 12px', display: 'grid', gap: 6 }}>
-        {error ? <div className="sg-banner sg-banner--error">{error}</div> : null}
-        {notice ? <div className="sg-banner sg-banner--info">{notice}</div> : null}
-        {targets.map((t) => (
-          <div
-            key={t.id}
-            style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
-          >
-            <span style={{ fontWeight: 500 }}>
-              {t.gate ? gateLabel(t.gate) : '关卡快照'}
-              {t.no > 0 ? ` · 第 ${t.no} 次执行前` : ''}
-            </span>
-            <span className="sg-muted">{formatDateTime(t.created_at)}</span>
-            <button
-              className="sg-btn sg-btn--sm sg-btn--danger"
-              style={{ marginLeft: 'auto' }}
-              disabled={busyId !== ''}
-              onClick={() =>
-                requestConfirm(t.id, () => {
-                  void rollback(t);
-                })
-              }
-              title={
-                pendingConfirm === t.id
-                  ? '再次点击确认回滚（将恢复该时点控制面，历史保留）'
-                  : '回滚到此关执行前'
-              }
-            >
-              {busyId === t.id
-                ? '回滚中…'
-                : pendingConfirm === t.id
-                  ? '确认回滚？'
-                  : '回滚到此'}
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
