@@ -27,6 +27,8 @@ pub fn snapshot(store: &Store) -> Result<Snapshot, Error> {
     let (objects_root, objects_count) = objects_root_hash(store)?;
     // M1/F04：rollout 会话日志随备份走——拷贝 logs/runs/*.jsonl 到 <name>.rollouts/ 并记根哈希。
     let (rollouts_count, rollouts_root) = bundle_rollouts(store, &target)?;
+    // 项目记忆（ADR-032）：manifest 记录记忆条目数与带正文对象数，供恢复后对账。
+    let (memory_entries, memory_objects) = memory_stats(store)?;
     let version = store.schema_version()?;
     let manifest = json!({
         "schemaVersion": version,
@@ -35,6 +37,8 @@ pub fn snapshot(store: &Store) -> Result<Snapshot, Error> {
         "objectsRootHash": objects_root,
         "rolloutsCount": rollouts_count,
         "rolloutsRootHash": rollouts_root,
+        "memoryEntries": memory_entries,
+        "memoryObjects": memory_objects,
         "sixgatesVersion": store.version,
         "createdAt": crate::timefmt::now(),
     });
@@ -68,6 +72,28 @@ fn objects_root_hash(store: &Store) -> Result<(String, i64), Error> {
             count += 1;
         }
         Ok((crate::ids::hex(&hasher.finalize()), count))
+    })
+}
+
+/// 项目记忆统计：条目数与带正文对象的修订数（表不存在时按 0 计，兼容旧库）。
+fn memory_stats(store: &Store) -> Result<(i64, i64), Error> {
+    store.with_conn(|conn| {
+        let has_table: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_entries'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_table == 0 {
+            return Ok((0, 0));
+        }
+        let entries: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |r| r.get(0))?;
+        let objects: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_revisions WHERE object_sha256 IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((entries, objects))
     })
 }
 

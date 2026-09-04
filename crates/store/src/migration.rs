@@ -36,6 +36,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         22,
         include_str!("../migrations/0022_model_profile_models.sql"),
     ),
+    (23, include_str!("../migrations/0023_project_memory.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

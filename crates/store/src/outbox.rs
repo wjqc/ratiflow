@@ -11,22 +11,31 @@ pub fn emit(
     event_type: &str,
     payload: Value,
 ) -> Result<i64, Error> {
+    store.with_conn(|conn| emit_at(conn, aggregate_type, aggregate_id, event_type, payload))
+}
+
+/// 事务作用域写入：供「业务状态 + 事件」同事务提交的领域使用（如项目记忆 §6.8）。
+pub fn emit_at(
+    conn: &rusqlite::Connection,
+    aggregate_type: &str,
+    aggregate_id: &str,
+    event_type: &str,
+    payload: Value,
+) -> Result<i64, Error> {
     let now = timefmt::now();
     let _ = ids::new_id("ev");
-    store.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO events_outbox(aggregate_type, aggregate_id, type, payload, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                aggregate_type,
-                aggregate_id,
-                event_type,
-                payload.to_string(),
-                now
-            ],
-        )?;
-        Ok(conn.last_insert_rowid())
-    })
+    conn.execute(
+        "INSERT INTO events_outbox(aggregate_type, aggregate_id, type, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            payload.to_string(),
+            now
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
 }
 
 /// sequence > after_seq 的事件（Last-Event-ID / timeline 补发）。

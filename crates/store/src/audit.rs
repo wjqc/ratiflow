@@ -11,26 +11,36 @@ pub fn append(
     target_id: &str,
     detail: Value,
 ) -> Result<i64, Error> {
+    store.with_conn(|conn| append_at(conn, actor, action, target_type, target_id, detail))
+}
+
+/// 事务作用域写入：供「业务状态 + 审计」同事务提交的领域使用（如项目记忆 §6.8）。
+pub fn append_at(
+    conn: &rusqlite::Connection,
+    actor: &str,
+    action: &str,
+    target_type: &str,
+    target_id: &str,
+    detail: Value,
+) -> Result<i64, Error> {
     if actor.is_empty() || action.is_empty() || target_type.is_empty() || target_id.is_empty() {
         return Err(Error::Message(
             "audit entry requires actor/action/target".into(),
         ));
     }
-    store.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO audit_log(actor, action, target_type, target_id, detail, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                actor,
-                action,
-                target_type,
-                target_id,
-                detail.to_string(),
-                crate::timefmt::now()
-            ],
-        )?;
-        Ok(conn.last_insert_rowid())
-    })
+    conn.execute(
+        "INSERT INTO audit_log(actor, action, target_type, target_id, detail, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            actor,
+            action,
+            target_type,
+            target_id,
+            detail.to_string(),
+            crate::timefmt::now()
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
 }
 
 /// seq 降序分页（after_seq 为上一页最小 seq，0 表示第一页）。
