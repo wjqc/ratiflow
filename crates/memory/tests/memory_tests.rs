@@ -72,11 +72,11 @@ fn assert_err_token<T>(result: Result<T, sg_store::Error>, token: &str) {
     assert!(msg.starts_with(token), "期望错误 token {token}，实际 {msg}");
 }
 
-/// 迁移：空库直达 v23；外键检查通过（migration::run 内置）。
+/// 迁移：空库直达最新版本（v24）；外键检查通过（migration::run 内置）。
 #[test]
 fn migration_empty_db_reaches_v23() {
     let (store, _t) = open_store("sg-mem-mig");
-    assert_eq!(store.schema_version().unwrap(), 23);
+    assert_eq!(store.schema_version().unwrap(), 25);
     // v23 表存在。
     let n: i64 = store
         .with_conn(|c| {
@@ -103,7 +103,7 @@ fn migration_empty_db_reaches_v23() {
     assert_eq!(n, 8);
 }
 
-/// 迁移：populated v22 → v23 增量升级。
+/// 迁移：populated v22 → 增量升级到最新。
 #[test]
 fn migration_populated_v22_to_v23() {
     let t = tempdir("sg-mem-mig22");
@@ -128,7 +128,7 @@ fn migration_populated_v22_to_v23() {
         add_project_raw(&conn, "pj");
     }
     let store = Store::open(&t.path, "test").unwrap();
-    assert_eq!(store.schema_version().unwrap(), 23);
+    assert_eq!(store.schema_version().unwrap(), 25);
     store.quick_check().unwrap();
 }
 
@@ -638,7 +638,7 @@ fn purge_blocked_by_shared_object() {
                 [sg_store::timefmt::now()],
             )?;
             c.execute(
-                "INSERT INTO knowledge_chunks(id, source_id, ordinal, object_sha256) VALUES ('kc_x', 'ks_x', 0, ?1)",
+                "INSERT INTO knowledge_chunks(id, source_id, ordinal, object_sha256, project_id) VALUES ('kc_x', 'ks_x', 0, ?1, 'pj')",
                 [&sha],
             )?;
             Ok(())
