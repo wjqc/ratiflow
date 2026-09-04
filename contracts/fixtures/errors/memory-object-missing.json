@@ -1,0 +1,8 @@
+{
+  "code": "MEMORY_OBJECT_MISSING",
+  "message": "记忆正文对象缺失或哈希不符",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_mem01",
+  "details": null
+}

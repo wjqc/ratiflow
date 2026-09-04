@@ -1,0 +1,37 @@
+{
+  "id": "mem_01j7leakedkey",
+  "projectId": "prj_fixtures",
+  "slug": "rotated-deploy-key-note",
+  "kind": "fact",
+  "status": "purged",
+  "pinned": false,
+  "validUntil": null,
+  "confirmedAt": "2026-07-01T10:00:00Z",
+  "confirmedBy": "user:wenjian3",
+  "revisionNo": 1,
+  "revision": 1,
+  "title": "已轮换的部署密钥说明",
+  "summary": "用户已清除正文；仅保留不含正文的审计墓碑。",
+  "bodyState": "purged",
+  "body": null,
+  "objectSha256": null,
+  "contentSha256": "sha256:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+  "tags": ["deploy"],
+  "sources": [
+    {
+      "sourceKind": "run",
+      "sourceId": "run_01j7capture",
+      "locator": "rollout 摘要（脱敏）",
+      "sourceDigest": "sha256:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+      "relation": "summarizes"
+    }
+  ],
+  "revisions": [
+    { "revisionNo": 1, "title": "已轮换的部署密钥说明", "contentSha256": "sha256:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4", "createdAt": "2026-07-01T10:00:00Z", "purgedAt": "2026-09-04T08:12:00Z" }
+  ],
+  "usage": [
+    { "manifestId": "cm_01j7run10", "runId": "run_01j7run10", "revisionNo": 1, "selectedAt": "2026-07-02T09:00:00Z" }
+  ],
+  "purgedAt": "2026-09-04T08:12:00Z",
+  "purgeNote": "正文与 FTS 已清除；旧备份与共享对象中的同内容不受本次清除影响。"
+}

@@ -40,6 +40,11 @@ const api = {
   openLogs(): Promise<void> {
     return ipcRenderer.invoke('sg:openLogs');
   },
+  // S12 项目记忆：仅接受业务导出 ID（memexp_ 前缀），main 侧校验后经 shell 打开访达；
+  // renderer 永远不能提交任意路径（ADR-032 §11.2）。
+  revealMemoryExport(exportId: string): Promise<boolean> {
+    return ipcRenderer.invoke('sg:revealMemoryExport', exportId);
+  },
   // F02 只读事件订阅：main 转发的 sg:event 通知，返回退订函数。
   onEvent(callback: (event: CoreEvent) => void): () => void {
     const listener = (_e: unknown, event: CoreEvent): void => callback(event);

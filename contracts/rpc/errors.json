@@ -12,7 +12,8 @@
     "BACKUP": { "codes": ["BACKUP_INCOMPATIBLE", "BACKUP_CORRUPT", "BACKUP_VERIFY_FAILED"], "retryable": false },
     "CORE": { "codes": ["CORE_UNAVAILABLE", "TIMEOUT"], "retryable": true },
     "NOT_FOUND": { "codes": ["NOT_FOUND"], "retryable": false },
-    "CONFLICT": { "codes": ["CONFLICT", "ETAG_MISMATCH", "REVISION_FROZEN", "INVALID_STAGE_TRANSITION", "DIGEST_DRIFT"], "retryable": false }
+    "CONFLICT": { "codes": ["CONFLICT", "ETAG_MISMATCH", "REVISION_FROZEN", "INVALID_STAGE_TRANSITION", "DIGEST_DRIFT"], "retryable": false },
+    "MEMORY": { "codes": ["MEMORY_DISABLED", "MEMORY_CONFLICT", "MEMORY_SECRET_DETECTED", "MEMORY_INVALID_STATE", "MEMORY_OBJECT_MISSING", "MEMORY_PURGE_BLOCKED", "MEMORY_CAPTURE_UNKNOWN", "MEMORY_QUOTA_EXCEEDED"], "retryable": false }
   },
   "envelope": {
     "required": ["code", "message", "retryable"],

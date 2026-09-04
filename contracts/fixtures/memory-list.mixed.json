@@ -1,0 +1,77 @@
+{
+  "projectId": "prj_fixtures",
+  "items": [
+    {
+      "id": "mem_01j9localfirst",
+      "slug": "local-first-authority",
+      "kind": "decision",
+      "status": "active",
+      "pinned": true,
+      "title": "本机数据权威优先",
+      "summary": "SQLite 与 app data objects 为本机权威，跨机同步后置。",
+      "revisionNo": 3,
+      "revision": 5,
+      "tags": ["architecture", "storage"],
+      "updatedAt": "2026-09-04T17:37:00Z",
+      "sourceCount": 2
+    },
+    {
+      "id": "mem_01j9electron",
+      "slug": "electron-china-setup",
+      "kind": "lesson",
+      "status": "active",
+      "pinned": false,
+      "title": "Electron 国内镜像安装",
+      "summary": "使用 npmmirror 下载二进制并手写 path.txt。",
+      "revisionNo": 1,
+      "revision": 2,
+      "tags": ["electron", "setup"],
+      "updatedAt": "2026-08-25T10:12:00Z",
+      "sourceCount": 1
+    },
+    {
+      "id": "mem_01j9ftsquery",
+      "slug": "fts-trigram-tokenizer",
+      "kind": "fact",
+      "status": "conflicted",
+      "pinned": false,
+      "title": "FTS5 trigram 分词对中文的行为",
+      "summary": "两条 active 结论互相矛盾，停止自动注入直至用户裁决。",
+      "revisionNo": 2,
+      "revision": 4,
+      "tags": ["fts"],
+      "updatedAt": "2026-09-01T08:00:00Z",
+      "sourceCount": 1
+    },
+    {
+      "id": "mem_01j9candidate",
+      "slug": "release-delay-note",
+      "kind": "lesson",
+      "status": "proposed",
+      "pinned": false,
+      "title": "放行审批超时的候选结论",
+      "summary": "来自 run_01j9capture 的候选，等待人工接受或拒绝。",
+      "revisionNo": 1,
+      "revision": 1,
+      "tags": [],
+      "updatedAt": "2026-09-03T21:05:00Z",
+      "sourceCount": 1
+    },
+    {
+      "id": "mem_01j8oldconv",
+      "slug": "old-branch-naming",
+      "kind": "convention",
+      "status": "archived",
+      "pinned": false,
+      "title": "旧分支命名约定",
+      "summary": "已被新约定取代，归档保留版本史。",
+      "revisionNo": 1,
+      "revision": 1,
+      "tags": ["git"],
+      "updatedAt": "2026-07-12T09:00:00Z",
+      "sourceCount": 1
+    }
+  ],
+  "counts": { "active": 2, "proposed": 1, "conflicted": 1, "archived": 1, "purged": 0 },
+  "cursor": null
+}

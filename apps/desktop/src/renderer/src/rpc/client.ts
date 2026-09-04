@@ -9,6 +9,7 @@ declare global {
       selectDirectory(): Promise<string | null>;
       appInfo(): Promise<{ desktopVersion: string; logDir: string; userDataDir: string }>;
       openLogs(): Promise<void>;
+      revealMemoryExport(exportId: string): Promise<boolean>;
       onEvent(callback: (event: TimelineEvent) => void): () => void;
     };
   }

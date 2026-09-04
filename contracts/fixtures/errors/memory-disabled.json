@@ -1,0 +1,8 @@
+{
+  "code": "MEMORY_DISABLED",
+  "message": "项目记忆功能未开启或已被管理员关闭",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_mem01",
+  "details": null
+}

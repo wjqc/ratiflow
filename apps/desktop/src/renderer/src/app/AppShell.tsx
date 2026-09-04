@@ -140,6 +140,34 @@ export default function AppShell() {
     if (activeProjectId) void loadProjectData(activeProjectId);
   }, [activeProjectId, loadProjectData]);
 
+  // 外观主题（M5：dark/light 落地）：app.appearance.theme → <html data-theme>。
+  useEffect(() => {
+    let disposed = false;
+    rpc<{ items: Array<{ key: string; value: Record<string, unknown> }> }>('settings.get', {
+      scope: 'global',
+      keys: ['app.appearance'],
+    })
+      .then((res) => {
+        if (disposed) return;
+        const entry = res.items?.find((i) => i.key === 'app.appearance');
+        const theme = entry?.value?.theme === 'dark' ? 'dark' : 'light';
+        document.documentElement.dataset.theme = theme;
+      })
+      .catch(() => {
+        if (!disposed) document.documentElement.dataset.theme = 'light';
+      });
+    const onAppearance = (event: Event) => {
+      const detail = (event as CustomEvent<{ key?: string; value?: Record<string, unknown> }>).detail;
+      if (detail?.key !== 'app.appearance') return;
+      document.documentElement.dataset.theme = detail.value?.theme === 'dark' ? 'dark' : 'light';
+    };
+    window.addEventListener('sg:appearance-changed', onAppearance);
+    return () => {
+      disposed = true;
+      window.removeEventListener('sg:appearance-changed', onAppearance);
+    };
+  }, []);
+
   // 设置内新建/归档项目后刷新侧栏列表（与 sg:settings-navigate 同一事件约定）。
   useEffect(() => {
     const onProjectsChanged = () => {

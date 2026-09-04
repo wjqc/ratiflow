@@ -1,0 +1,42 @@
+{
+  "projectId": "prj_fixtures",
+  "workItemId": "wi_01j9ftsfix",
+  "goal": "修复 FTS 中文检索并补齐协议 E2E",
+  "gate": "G3",
+  "activityKey": "implement",
+  "manifestFrozen": false,
+  "included": [
+    {
+      "memoryId": "mem_01j9localfirst",
+      "revisionId": "memr_01j9localfirst3",
+      "revisionNo": 3,
+      "title": "本机数据权威优先",
+      "kind": "decision",
+      "pinned": true,
+      "score": 3.5,
+      "bytes": 940,
+      "tokenEstimate": 260,
+      "reason": "matched"
+    },
+    {
+      "memoryId": "mem_01j9electron",
+      "revisionId": "memr_01j9electron1",
+      "revisionNo": 1,
+      "title": "Electron 国内镜像安装",
+      "kind": "lesson",
+      "pinned": false,
+      "score": 1.0,
+      "bytes": 512,
+      "tokenEstimate": 140,
+      "reason": "matched"
+    }
+  ],
+  "excluded": [
+    { "memoryId": "mem_01j8archived", "revisionId": "memr_01j8archived1", "revisionNo": 1, "reason": "stale", "bytes": 621, "tokenEstimate": 170 },
+    { "memoryId": "mem_01j9ftsquery", "revisionId": "memr_01j9ftsquery2", "revisionNo": 2, "reason": "conflicted", "bytes": 700, "tokenEstimate": 190 },
+    { "memoryId": "mem_01j9bigbudget", "revisionId": "memr_01j9bigbudget1", "revisionNo": 1, "reason": "over_budget", "bytes": 20480, "tokenEstimate": 5600 }
+  ],
+  "totalBytes": 1452,
+  "totalTokenEstimate": 400,
+  "policy": { "maxEntries": 8, "maxBytes": 12288 }
+}

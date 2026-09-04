@@ -40,6 +40,8 @@ export function AppearancePage() {
     setSaving(true); setError(null); setNotice(null);
     try {
       await rpc('settings.update', { scope: 'global', patches: [{ key: KEY, value: draft, expectedRevision: revision }] });
+      // 主题即时生效（M5 dark/light）：广播给 AppShell 应用 data-theme。
+      window.dispatchEvent(new CustomEvent('sg:appearance-changed', { detail: { key: KEY, value: draft } }));
       setNotice('外观设置已保存');
       await load();
     } catch (err) {

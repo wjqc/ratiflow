@@ -1,0 +1,23 @@
+{
+  "memoryId": "mem_01j9localfirst",
+  "projectId": "prj_fixtures",
+  "entryStatus": "active",
+  "canPurge": false,
+  "blockers": [
+    {
+      "code": "SHARED_OBJECT_REFERENCED",
+      "detail": "正文对象 sha256:3f7a91… 仍被 1 个知识库对象引用，本次仅能解除记忆侧引用，不能物理删除对象。"
+    }
+  ],
+  "objectRefs": {
+    "sharedWithKnowledge": 1,
+    "sharedWithArtifacts": 0,
+    "sharedWithAttachments": 0,
+    "orphansAfterPurge": 0
+  },
+  "manifestRefs": { "count": 4, "latestRunId": "run_01j9run42", "latestSelectedAt": "2026-09-03T09:00:00Z" },
+  "backupRefs": { "likelyContained": 2, "note": "历史备份可能仍含原文；清除不等于从所有备份中抹除。" },
+  "physicalDeletion": "none",
+  "confirmationToken": null,
+  "confirmationTokenExpiresAt": null
+}

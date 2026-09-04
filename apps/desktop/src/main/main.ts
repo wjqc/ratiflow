@@ -2,7 +2,7 @@
 // 安全红线：renderer sandbox + contextIsolation，preload 只暴露确定方法。
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from 'electron';
 import { ChildProcess, spawn } from 'node:child_process';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
 import * as readline from 'node:readline';
@@ -339,6 +339,29 @@ function registerIpc(): void {
   ipcMain.handle('sg:openLogs', async () => {
     await shell.openPath(join(homedir(), 'Library', 'Logs', 'sixgates'));
   });
+
+  // S12 项目记忆导出 reveal（ADR-032 §11.2）：只接受满足固定 ID 正则的 exportId，
+  // 在已知 userData data 根下拼路径并做 containment + 存在性校验后 showItemInFolder；
+  // 拒绝路径穿越/未知 ID/缺失 index，renderer 永远不能提交任意路径。
+  ipcMain.handle('sg:revealMemoryExport', async (_event, exportId: unknown) => {
+    if (typeof exportId !== 'string' || !/^memexp_[0-9a-f]{24}$/.test(exportId)) {
+      return false;
+    }
+    // 与 bootstrap 同源的数据目录推导（E2E 显式覆盖优先）。
+    const dataRoot = join(process.env.SIXGATES_E2E_DATA_DIR || app.getPath('userData'), 'data');
+    const exportsRoot = join(dataRoot, 'exports', 'memory');
+    const index = join(exportsRoot, exportId, '_index.json');
+    const resolvedIndex = resolve(index);
+    const resolvedRoot = resolve(exportsRoot);
+    if (!resolvedIndex.startsWith(resolvedRoot + sep)) {
+      return false;
+    }
+    if (!existsSync(resolvedIndex)) {
+      return false;
+    }
+    shell.showItemInFolder(resolvedIndex);
+    return true;
+  });
 }
 
 function buildMenu(): void {
@@ -380,7 +403,10 @@ function buildMenu(): void {
 
 // D5 多实例防线：双开会各自拉起 core 进程打开同一 SQLite，
 // 迁移窗口期的并发 ALTER 会 duplicate column 拒启——单实例锁 fail-closed。
-if (!app.requestSingleInstanceLock()) {
+// E2E 实例使用独立 SIXGATES_E2E_DATA_DIR（不共享库），豁免单实例锁，
+// 否则与用户在用的桌面实例互斥，自动化无法启动。
+const isE2eInstance = Boolean(process.env.SIXGATES_E2E_DATA_DIR);
+if (!isE2eInstance && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {

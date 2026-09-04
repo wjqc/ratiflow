@@ -12,10 +12,18 @@ import { redactSecrets, REDACTED } from '../../lib/redact';
 import type { DiagnosticsReport } from './types';
 
 describe('settings-routes', () => {
-  it('18 页路由全部注册且 id 唯一', () => {
+  it('19 页路由全部注册且 id 唯一', () => {
     const ids = SETTINGS_NAV.flatMap((g) => g.items.map((i) => i.id));
-    expect(ids.length).toBe(18);
-    expect(new Set(ids).size).toBe(18);
+    expect(ids.length).toBe(19);
+    expect(new Set(ids).size).toBe(19);
+  });
+
+  it('S12 项目记忆路由真实接入且位于工作区分组', () => {
+    const memory = SETTINGS_NAV.flatMap((g) => g.items).find((i) => i.id === 'memory');
+    expect(memory?.code).toBe('S12');
+    expect(memory?.name).toBe('项目记忆');
+    expect(memory?.availability).toBe('real');
+    expect(isSettingsRouteId('memory')).toBe(true);
   });
 
   it('每页都有中文名与 S 编号，分组非空', () => {

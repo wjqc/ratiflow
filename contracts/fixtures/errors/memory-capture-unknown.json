@@ -1,0 +1,8 @@
+{
+  "code": "MEMORY_CAPTURE_UNKNOWN",
+  "message": "模型提取结果未知，需要人工重试",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_mem01",
+  "details": null
+}

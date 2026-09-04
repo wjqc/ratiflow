@@ -1,0 +1,44 @@
+{
+  "id": "mem_01j9localfirst",
+  "projectId": "prj_fixtures",
+  "slug": "local-first-authority",
+  "kind": "decision",
+  "status": "active",
+  "pinned": true,
+  "validUntil": null,
+  "confirmedAt": "2026-09-04T17:37:00Z",
+  "confirmedBy": "user:wenjian3",
+  "revisionNo": 3,
+  "revision": 5,
+  "title": "本机数据权威优先",
+  "summary": "SQLite 与 app data objects 为本机权威，跨机同步后置。",
+  "bodyState": "available",
+  "body": "## 决策\n\nSixGates 的项目记忆以本机 SQLite 元数据加 content-addressed object 为权威；FTS 仅为可重建投影。跨机共享记忆待 ADR-031 投影化完成后另立决策。\n\n依据：ADR-032 备选方案 C。",
+  "contentSha256": "sha256:3f7a91c4d2e8b6051a2c4d8e9f0b7a3c5d6e1f2a4b8c0d9e7f3a5b1c2d4e6f8a",
+  "tags": ["architecture", "storage"],
+  "sources": [
+    {
+      "sourceKind": "artifact",
+      "sourceId": "ar_01j9adr032",
+      "locator": "docs/adr/ADR-032-project-memory-authority-and-context-injection.md",
+      "sourceDigest": "sha256:aa12bb34cc56dd78ee90ff00aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00",
+      "relation": "derived_from"
+    },
+    {
+      "sourceKind": "manual",
+      "sourceId": "user:wenjian3",
+      "locator": "S12 项目记忆页手工修订",
+      "sourceDigest": "sha256:bb23cc45dd67ee89ff00aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00ee11",
+      "relation": "corrects"
+    }
+  ],
+  "revisions": [
+    { "revisionNo": 1, "title": "本机数据权威优先", "contentSha256": "sha256:c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1", "createdAt": "2026-08-20T11:00:00Z", "purgedAt": null },
+    { "revisionNo": 2, "title": "本机数据权威优先", "contentSha256": "sha256:c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", "createdAt": "2026-08-28T15:30:00Z", "purgedAt": null },
+    { "revisionNo": 3, "title": "本机数据权威优先", "contentSha256": "sha256:3f7a91c4d2e8b6051a2c4d8e9f0b7a3c5d6e1f2a4b8c0d9e7f3a5b1c2d4e6f8a", "createdAt": "2026-09-04T17:37:00Z", "purgedAt": null }
+  ],
+  "usage": [
+    { "manifestId": "cm_01j9run42", "runId": "run_01j9run42", "revisionNo": 2, "selectedAt": "2026-09-03T09:00:00Z" },
+    { "manifestId": "cm_01j9run40", "runId": "run_01j9run40", "revisionNo": 2, "selectedAt": "2026-09-02T14:20:00Z" }
+  ]
+}

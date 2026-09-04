@@ -1,0 +1,8 @@
+{
+  "code": "MEMORY_CONFLICT",
+  "message": "记忆已被其他会话修改或幂等键内容不一致",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_mem01",
+  "details": null
+}

@@ -1,0 +1,8 @@
+{
+  "code": "MEMORY_INVALID_STATE",
+  "message": "记忆生命周期状态转换不合法",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_mem01",
+  "details": null
+}

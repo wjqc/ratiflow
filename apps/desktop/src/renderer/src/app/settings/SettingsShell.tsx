@@ -20,6 +20,7 @@ import { PendingSettingsPage } from './PendingPages';
 import { GeneralPage } from './pages/GeneralPage';
 import { AppearancePage } from './pages/AppearancePage';
 import { KnowledgeDefaultsPage } from './pages/KnowledgeDefaultsPage';
+import { MemoryPage } from './pages/MemoryPage';
 import { ModelsPage } from './pages/ModelsPage';
 import { ToolsPage } from './pages/ToolsPage';
 import { AgentCenterPage } from './pages/AgentCenterPage';
@@ -78,6 +79,8 @@ export default function SettingsShell({ section }: { section?: string }) {
         return <AppearancePage />;
       case 'knowledge-defaults':
         return <KnowledgeDefaultsPage />;
+      case 'memory':
+        return <MemoryPage />;
       case 'models':
         return <ModelsPage />;
       case 'tools':

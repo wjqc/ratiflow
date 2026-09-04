@@ -16,7 +16,9 @@ buildSync({
   bundle: true, format: 'esm', target: 'node18',
   outfile: join(outDir, 'decoders.mjs'),
 });
-const { decodeSettingsSummary, decodeTestReport, decodeOperation, decodeError } =
+const { decodeSettingsSummary, decodeTestReport, decodeOperation, decodeError,
+  decodeMemorySettings, decodeMemoryList, decodeMemoryDetail, decodeMemoryContextPreview,
+  decodeMemoryCaptureJob, decodeMemoryPurgePreview } =
   await import(join(outDir, 'decoders.mjs'));
 
 let pass = 0;
@@ -37,6 +39,13 @@ for (const file of readdirSync(fixturesDir)) {
     else if (file.startsWith('backup.running')) decodeOperation(body.operation);
     else if (file.startsWith('backup.corrupt')) check(body.verified === false && body.problems[0].code === 'BACKUP_CORRUPT', `${file} problems`);
     else if (file.startsWith('audit.')) check(body.entry.metadataRedacted === true, `${file} redacted 标记`);
+    else if (file.startsWith('memory-settings.')) { const s = decodeMemorySettings(body); check(s.enabled === true && s.maxEntries >= 1 && s.maxEntries <= 32, `${file} 设置范围`); }
+    else if (file.startsWith('memory-list.')) { const l = decodeMemoryList(body); check(l.items.some((i) => i.status === 'conflicted') && l.items.some((i) => i.status === 'proposed') && l.items.some((i) => i.status === 'archived'), `${file} 混合状态覆盖`); }
+    else if (file.startsWith('memory-detail.active.')) { const d = decodeMemoryDetail(body); check(typeof d.body === 'string' && d.sources.length >= 1 && d.revisions.length >= 1, `${file} active 正文与来源`); }
+    else if (file.startsWith('memory-detail.purged.')) { const d = decodeMemoryDetail(body); check(d.body === null && d.objectSha256 === null && d.contentSha256.length > 0, `${file} 墓碑语义`); }
+    else if (file.startsWith('memory-context-preview.')) { const p = decodeMemoryContextPreview(body); check(p.included.length > 0 && p.excluded.length > 0 && p.manifestFrozen === false, `${file} included/excluded 双侧与预览非冻结`); }
+    else if (file.startsWith('memory-capture.')) { const c = decodeMemoryCaptureJob(body); check(c.job.status === 'unknown' && c.candidates.length === 0, `${file} unknown 无候选`); }
+    else if (file.startsWith('memory-purge-preview.')) { const pv = decodeMemoryPurgePreview(body); check(pv.canPurge === false && pv.blockers.length > 0 && pv.confirmationToken === null && pv.backupRefs.likelyContained >= 0, `${file} blocked 与备份边界`); }
     check(true, `${file} 解码通过`);
   } catch (error) {
     check(false, `${file} 解码失败: ${error.message}`);

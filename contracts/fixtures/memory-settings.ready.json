@@ -1,0 +1,12 @@
+{
+  "projectId": "prj_fixtures",
+  "featureEnabled": true,
+  "enabled": true,
+  "captureMode": "suggest",
+  "maxEntries": 8,
+  "maxBytes": 12288,
+  "staleAfterDays": 180,
+  "revision": 3,
+  "updatedAt": "2026-09-04T09:30:00Z",
+  "updatedBy": "user:wenjian3"
+}

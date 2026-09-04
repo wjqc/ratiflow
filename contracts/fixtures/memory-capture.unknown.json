@@ -1,0 +1,19 @@
+{
+  "job": {
+    "jobId": "memjob_01j9capture7",
+    "projectId": "prj_fixtures",
+    "runId": "run_01j9capture7",
+    "status": "unknown",
+    "attemptCount": 1,
+    "errorCode": "MEMORY_CAPTURE_UNKNOWN",
+    "providerRequestId": null,
+    "promptSchemaVersion": 1,
+    "modelProfileId": "mp_local_glm",
+    "modelRevision": 2,
+    "sourceDigest": "sha256:f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+    "startedAt": "2026-09-03T21:04:00Z",
+    "updatedAt": "2026-09-03T21:05:30Z",
+    "finishedAt": null
+  },
+  "candidates": []
+}

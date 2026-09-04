@@ -26,6 +26,7 @@ export type SettingsRouteId =
   | 'updates'
   | 'projects'
   | 'knowledge-defaults'
+  | 'memory'
   | 'models'
   | 'tools'
   | 'execution'
@@ -76,6 +77,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     items: [
       { id: 'projects', code: 'S10', name: '项目与目录', availability: 'real', icon: IconFolder },
       { id: 'knowledge-defaults', code: 'S11', name: '知识库默认策略', availability: 'real', icon: IconBook },
+      { id: 'memory', code: 'S12', name: '项目记忆', availability: 'real', icon: IconDb },
     ],
   },
   {

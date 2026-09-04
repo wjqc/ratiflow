@@ -12,6 +12,7 @@ import { ExecutionPage } from './ExecutionPage';
 import { GitlabPage } from './GitlabPage';
 import { SshPage } from './SshPage';
 import { CredentialsPage } from './CredentialsPage';
+import { MemoryPage } from './MemoryPage';
 
 const rpcMock = vi.fn();
 function ok(body: unknown) { return Promise.resolve(body); }
@@ -29,6 +30,15 @@ describe('设置页接线', () => {
         case 'modelProvider.presets':
           return ok({ items: [] });
         case 'executor.settings.get': return ok({ revision: 0 });
+        case 'project.list': return ok({ items: [{ id: 'prj_1', name: '示例项目', archivedAt: null }] });
+        case 'memory.settingsGet':
+          return ok({
+            projectId: 'prj_1', featureEnabled: true, enabled: false, captureMode: 'off',
+            maxEntries: 8, maxBytes: 12288, staleAfterDays: 180, revision: 1,
+            updatedAt: '2026-09-04T09:30:00.000Z', updatedBy: 'local',
+          });
+        case 'memory.list':
+          return ok({ projectId: 'prj_1', items: [], counts: { active: 0 }, cursor: null });
         default: return ok({});
       }
     });
@@ -59,6 +69,34 @@ describe('设置页接线', () => {
   it('凭据页空状态显示引导', async () => {
     render(<CredentialsPage />);
     await waitFor(() => expect(screen.getByText(/暂无凭据引用/)).toBeInTheDocument());
+  });
+
+  it('S12 记忆页：开关/计数/空状态与禁用态', async () => {
+    render(<MemoryPage />);
+    await waitFor(() => expect(screen.getByRole('switch', { name: /启用记忆注入/ })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/已确认 0/)).toBeInTheDocument());
+    // 默认项目未开启 → 开关未勾选（enabled=false 来自 settingsGet）。
+    const sw = screen.getByRole('switch', { name: /启用记忆注入/ }) as HTMLInputElement;
+    expect(sw.checked).toBe(false);
+    await waitFor(() => expect(screen.getByText(/当前项目未开启记忆/)).toBeInTheDocument());
+  });
+
+  it('S12 记忆页：全局关闭时开关只读并给出说明', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'project.list') return ok({ items: [{ id: 'prj_1', name: '示例项目', archivedAt: null }] });
+      if (method === 'memory.settingsGet')
+        return ok({
+          projectId: 'prj_1', featureEnabled: false, enabled: false, captureMode: 'off',
+          maxEntries: 8, maxBytes: 12288, staleAfterDays: 180, revision: 1,
+          updatedAt: '2026-09-04T09:30:00.000Z', updatedBy: 'local',
+        });
+      if (method === 'memory.list') return ok({ projectId: 'prj_1', items: [], counts: {}, cursor: null });
+      return ok({});
+    });
+    render(<MemoryPage />);
+    await waitFor(() => expect(screen.getByText('功能由当前版本/管理员关闭')).toBeInTheDocument());
+    const sw = screen.getByRole('switch', { name: /启用记忆注入/ }) as HTMLInputElement;
+    expect(sw.disabled).toBe(true);
   });
 
   it('工具页策略行来自 tool.list', async () => {

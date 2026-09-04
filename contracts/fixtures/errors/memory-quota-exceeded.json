@@ -1,0 +1,8 @@
+{
+  "code": "MEMORY_QUOTA_EXCEEDED",
+  "message": "记忆条数或字节预算超限",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_mem01",
+  "details": null
+}

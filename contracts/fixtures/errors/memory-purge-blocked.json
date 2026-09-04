@@ -1,0 +1,8 @@
+{
+  "code": "MEMORY_PURGE_BLOCKED",
+  "message": "清除确认已过期或影响范围发生变化",
+  "retryable": false,
+  "fieldErrors": null,
+  "correlationId": "corr_mem01",
+  "details": null
+}

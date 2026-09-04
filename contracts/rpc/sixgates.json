@@ -2635,6 +2635,525 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "memory.settingsGet",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.settingsUpdate",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "settings",
+          "type": "object",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.list",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "statuses",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "kinds",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.get",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "revisionId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.create",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "tags",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "sourceRefs",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.update",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "tags",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.pin",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "pinned",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.archive",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.restore",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.purgePreview",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.purge",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "confirmationToken",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.search",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "kinds",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.contextPreview",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "goal",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "activityKey",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "maxBytes",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.import",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "filename",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "contentBase64",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.export",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryIds",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "includeArchived",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "format",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.captureStart",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "runId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.captureGet",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.candidateList",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "memory.candidateDecide",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "candidateId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "editedContent",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [
@@ -2671,6 +3190,20 @@
     "gitlabProfile.changed",
     "knowledge.scanned",
     "knowledge.settingsChanged",
+    "memory.archived",
+    "memory.candidate_accepted",
+    "memory.candidate_created",
+    "memory.candidate_rejected",
+    "memory.capture_failed",
+    "memory.capture_started",
+    "memory.capture_succeeded",
+    "memory.capture_unknown",
+    "memory.created",
+    "memory.pinned",
+    "memory.purged",
+    "memory.restored",
+    "memory.settings_changed",
+    "memory.updated",
     "modelProfile.changed",
     "modelRoute.changed",
     "operation.progress",

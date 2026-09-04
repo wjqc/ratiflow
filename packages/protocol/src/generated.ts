@@ -25,7 +25,8 @@ export type RpcMethodName =
   | 'attachment.parse'
   | 'attachment.remove'
   | 'workitem.list'
-  | 'workitem.get'
+  | 'workitem.archive'
+  | 'workitem.archive'
   | 'workitem.create'
   | 'workitem.progress'
   | 'workitem.documents'
@@ -157,7 +158,26 @@ export type RpcMethodName =
   | 'agentBinding.list'
   | 'agentBinding.set'
   | 'agentBinding.remove'
-  | 'agentBinding.resolvePreview';
+  | 'agentBinding.resolvePreview'
+  | 'memory.settingsGet'
+  | 'memory.settingsUpdate'
+  | 'memory.list'
+  | 'memory.get'
+  | 'memory.create'
+  | 'memory.update'
+  | 'memory.pin'
+  | 'memory.archive'
+  | 'memory.restore'
+  | 'memory.purgePreview'
+  | 'memory.purge'
+  | 'memory.search'
+  | 'memory.contextPreview'
+  | 'memory.import'
+  | 'memory.export'
+  | 'memory.captureStart'
+  | 'memory.captureGet'
+  | 'memory.candidateList'
+  | 'memory.candidateDecide';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -182,7 +202,8 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'attachment.parse',
   'attachment.remove',
   'workitem.list',
-  'workitem.get',
+  'workitem.archive',
+  'workitem.archive',
   'workitem.create',
   'workitem.progress',
   'workitem.documents',
@@ -315,6 +336,25 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'agentBinding.set',
   'agentBinding.remove',
   'agentBinding.resolvePreview',
+  'memory.settingsGet',
+  'memory.settingsUpdate',
+  'memory.list',
+  'memory.get',
+  'memory.create',
+  'memory.update',
+  'memory.pin',
+  'memory.archive',
+  'memory.restore',
+  'memory.purgePreview',
+  'memory.purge',
+  'memory.search',
+  'memory.contextPreview',
+  'memory.import',
+  'memory.export',
+  'memory.captureStart',
+  'memory.captureGet',
+  'memory.candidateList',
+  'memory.candidateDecide',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -351,6 +391,20 @@ export const EVENT_TYPES: readonly string[] = [
   'gitlabProfile.changed',
   'knowledge.scanned',
   'knowledge.settingsChanged',
+  'memory.archived',
+  'memory.candidate_accepted',
+  'memory.candidate_created',
+  'memory.candidate_rejected',
+  'memory.capture_failed',
+  'memory.capture_started',
+  'memory.capture_succeeded',
+  'memory.capture_unknown',
+  'memory.created',
+  'memory.pinned',
+  'memory.purged',
+  'memory.restored',
+  'memory.settings_changed',
+  'memory.updated',
   'modelProfile.changed',
   'modelRoute.changed',
   'operation.progress',
@@ -518,10 +572,16 @@ export interface WorkitemListParams {
   projectId: string;
   cursor?: string;
   limit?: number;
+  includeArchived?: boolean;
 }
 
-export interface WorkitemGetParams {
+export interface WorkitemArchiveParams {
   workItemId: string;
+}
+
+export interface WorkitemArchiveParams {
+  workItemId: string;
+  archived?: boolean;
 }
 
 export interface WorkitemCreateParams {
@@ -1188,4 +1248,142 @@ export interface AgentBindingResolvePreviewParams {
   gate: string;
   activityKey: string;
   requiredCapabilities?: unknown[];
+}
+
+export interface MemorySettingsGetParams {
+  projectId: string;
+}
+
+export interface MemorySettingsUpdateParams {
+  projectId: string;
+  settings: unknown;
+  expectedRevision: number;
+  idempotencyKey: string;
+}
+
+export interface MemoryListParams {
+  projectId: string;
+  query?: string;
+  statuses?: unknown[];
+  kinds?: unknown[];
+  cursor?: string;
+  limit?: number;
+}
+
+export interface MemoryGetParams {
+  projectId: string;
+  memoryId: string;
+  revisionId?: string;
+}
+
+export interface MemoryCreateParams {
+  projectId: string;
+  title: string;
+  kind: string;
+  body: string;
+  idempotencyKey: string;
+  tags?: unknown[];
+  sourceRefs?: unknown[];
+}
+
+export interface MemoryUpdateParams {
+  projectId: string;
+  memoryId: string;
+  expectedRevision: number;
+  idempotencyKey: string;
+  title?: string;
+  body?: string;
+  tags?: unknown[];
+}
+
+export interface MemoryPinParams {
+  projectId: string;
+  memoryId: string;
+  pinned: boolean;
+  expectedRevision: number;
+  idempotencyKey: string;
+}
+
+export interface MemoryArchiveParams {
+  projectId: string;
+  memoryId: string;
+  expectedRevision: number;
+  idempotencyKey: string;
+}
+
+export interface MemoryRestoreParams {
+  projectId: string;
+  memoryId: string;
+  expectedRevision: number;
+  idempotencyKey: string;
+}
+
+export interface MemoryPurgePreviewParams {
+  projectId: string;
+  memoryId: string;
+}
+
+export interface MemoryPurgeParams {
+  projectId: string;
+  memoryId: string;
+  expectedRevision: number;
+  confirmationToken: string;
+  idempotencyKey: string;
+}
+
+export interface MemorySearchParams {
+  projectId: string;
+  query: string;
+  kinds?: unknown[];
+  limit?: number;
+}
+
+export interface MemoryContextPreviewParams {
+  projectId: string;
+  goal: string;
+  workItemId?: string;
+  gate?: string;
+  activityKey?: string;
+  maxBytes?: number;
+}
+
+export interface MemoryImportParams {
+  projectId: string;
+  filename: string;
+  contentBase64: string;
+  mode: string;
+  idempotencyKey: string;
+}
+
+export interface MemoryExportParams {
+  projectId: string;
+  format: string;
+  memoryIds?: unknown[];
+  includeArchived?: boolean;
+}
+
+export interface MemoryCaptureStartParams {
+  projectId: string;
+  runId: string;
+  idempotencyKey: string;
+}
+
+export interface MemoryCaptureGetParams {
+  projectId: string;
+  jobId: string;
+}
+
+export interface MemoryCandidateListParams {
+  projectId: string;
+  status?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface MemoryCandidateDecideParams {
+  projectId: string;
+  candidateId: string;
+  decision: string;
+  idempotencyKey: string;
+  editedContent?: string;
 }
