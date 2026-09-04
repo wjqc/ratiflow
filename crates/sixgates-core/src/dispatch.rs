@@ -41,6 +41,7 @@ fn store_err(e: Error) -> RpcError {
         ("digest_drift", ErrorCode::Conflict),
         ("deployment", ErrorCode::Conflict),
         ("object_contains_secrets", ErrorCode::ObjectSecrets),
+        ("manifest_workitem_mismatch", ErrorCode::InvalidParams),
         ("not_found", ErrorCode::NotFound),
         ("path_outside_project", ErrorCode::PathOutsideProject),
         ("budget_exhausted", ErrorCode::BudgetExceeded),
@@ -348,12 +349,14 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         .collect()
                 })
                 .unwrap_or_default();
-            sg_knowledge::create_manifest(
+            sg_context::build_manifest(
                 store,
-                &str_param(params, "projectId")?,
-                &str_param(params, "workItemId")?,
-                &str_param(params, "query")?,
-                &selected,
+                &sg_context::BuildInput {
+                    project_id: &str_param(params, "projectId")?,
+                    workitem_id: &str_param(params, "workItemId")?,
+                    goal: &str_param(params, "query")?,
+                    selected_sources: &selected,
+                },
             )
             .map_err(store_err)
         }
@@ -870,12 +873,38 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "agent.start" => {
             let workitem_id = str_param(params, "workItemId")?;
             let goal = str_param(params, "goal")?;
-            let manifest_id = str_param(params, "contextManifestId")?;
-            // 校验清单属于该工作项。
-            let manifest = sg_knowledge::get_manifest(store, &manifest_id).map_err(store_err)?;
-            if manifest["workitemId"].as_str() != Some(workitem_id.as_str()) {
-                return Err(err(ErrorCode::InvalidParams, "上下文清单与工作项不匹配"));
-            }
+            // ADR-032 M2：服务端创建/验证 manifest。旧客户端可暂传 contextManifestId，
+            // 但必须通过归属验证并原样冻结；下一协议版本移除该参数（实施方案 §13 M2）。
+            let manifest_id = match opt_str_param(params, "contextManifestId") {
+                Some(id) => {
+                    sg_context::manifest::require_manifest_for_workitem(store, &id, &workitem_id)
+                        .map_err(store_err)?;
+                    id
+                }
+                None => {
+                    let wi_project: String = store
+                        .with_conn(|conn| {
+                            conn.query_row(
+                                "SELECT project_id FROM workitems WHERE id=?1",
+                                [&workitem_id],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .map_err(|_| Error::Message("not_found: workitem".into()))
+                        })
+                        .map_err(store_err)?;
+                    let built = sg_context::build_manifest(
+                        store,
+                        &sg_context::BuildInput {
+                            project_id: &wi_project,
+                            workitem_id: &workitem_id,
+                            goal: &goal,
+                            selected_sources: &[],
+                        },
+                    )
+                    .map_err(store_err)?;
+                    built["id"].as_str().unwrap_or_default().to_string()
+                }
+            };
             let allowlist: Vec<String> = params
                 .get("toolAllowlist")
                 .and_then(|v| v.as_array())
@@ -975,6 +1004,23 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                             "candidates": sel.candidate_report,
                         });
                     }
+                }
+            }
+            // ADR-032 M2：本次 Run 实际采用的记忆证据（ID/bytes；正文永不出协议）。
+            let run_manifest_id: String = store
+                .with_conn(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT context_manifest_id FROM agent_runs WHERE id=?1",
+                            [&run_id],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .unwrap_or_default())
+                })
+                .unwrap_or_default();
+            if !run_manifest_id.is_empty() {
+                if let Ok(ev) = sg_context::blocks::memory_evidence(store, &run_manifest_id) {
+                    v["memory"] = ev;
                 }
             }
             // rollout 摘要（F04）：行数/字节/路径；全文查看走 logs.* 既有域。
@@ -1210,12 +1256,14 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             sg_workitem::attempt::set_activity_state(store, &attempt.id, &activity_key, "running")
                 .map_err(store_err)?;
             // 服务端装配上下文清单（客户端不再自报关键绑定）。
-            let manifest = sg_knowledge::create_manifest(
+            let manifest = sg_context::build_manifest(
                 store,
-                &project_id,
-                &workitem_id,
-                &goal.chars().take(80).collect::<String>(),
-                &[],
+                &sg_context::BuildInput {
+                    project_id: &project_id,
+                    workitem_id: &workitem_id,
+                    goal: &goal,
+                    selected_sources: &[],
+                },
             )
             .map_err(store_err)?;
             let manifest_id = manifest["id"].as_str().unwrap_or_default().to_string();
@@ -1667,6 +1715,30 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(json!({"items": items}))
         }
 
+        // --- 项目记忆（ADR-032 / 实施方案 v1.0）：dispatch 仅做分流，
+        // 全部逻辑在 sg-memory crate + memory_dispatch 适配层（§5.1 依赖方向）。 ---
+        "memory.settingsGet"
+        | "memory.settingsUpdate"
+        | "memory.list"
+        | "memory.get"
+        | "memory.create"
+        | "memory.update"
+        | "memory.pin"
+        | "memory.archive"
+        | "memory.restore"
+        | "memory.purgePreview"
+        | "memory.purge"
+        | "memory.search"
+        | "memory.contextPreview"
+        | "memory.import"
+        | "memory.export"
+        | "memory.captureStart"
+        | "memory.captureGet"
+        | "memory.candidateList"
+        | "memory.candidateDecide" => {
+            crate::memory_dispatch::dispatch(state, store, method, params)
+        }
+
         _ => Err(err(ErrorCode::MethodNotFound, format!("未知方法 {method}"))),
     }
 }
@@ -2071,8 +2143,29 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
     let instr_settings = sg_agent::instructions::settings_from_json(&knowledge_settings);
     let (instr_text, layers, instr_warnings) =
         sg_agent::instructions::aggregate(&store.data_dir, work_dir.as_deref(), &instr_settings);
-    let blocks = sg_knowledge::manifest_blocks(store, &manifest_id, 64 << 10)
+    let blocks = sg_context::blocks::manifest_blocks(store, &manifest_id, 64 << 10)
         .unwrap_or_else(|_| json!({"blocks": [], "totalBytes": 0, "includedCount": 0, "excludedCount": 0, "truncated": false}));
+    // ADR-032 M2：记忆块按 manifest 冻结 revision 装载；purge/对象缺失 fail-closed 上报（§7.4）。
+    let memory_blocks = sg_context::blocks::manifest_memory_blocks(store, &manifest_id, 32 << 10)
+        .unwrap_or_else(|_| json!({"blocks": [], "totalBytes": 0, "missing": []}));
+    let memory_blocks_text = memory_blocks["blocks"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|b| {
+                    format!(
+                        "### [memory:{}@{}] {}\n{}",
+                        b["memoryId"].as_str().unwrap_or(""),
+                        b["revisionNo"].as_i64().unwrap_or(0),
+                        b["kind"].as_str().unwrap_or(""),
+                        b["text"].as_str().unwrap_or(""),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default();
+    let memory_segment = sg_agent::prompt::memory_text(&memory_blocks_text);
     let blocks_text = blocks["blocks"]
         .as_array()
         .map(|arr| {
@@ -2150,6 +2243,7 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         &env,
         &allowlist,
         &knowledge,
+        &memory_segment,
         &goal,
         profile_text.as_deref(),
     );
@@ -2160,6 +2254,9 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         "knowledgeItems": blocks["includedCount"].clone(),
         "knowledgeBytes": blocks["totalBytes"].clone(),
         "knowledgeExcluded": blocks["excludedCount"].clone(),
+        "memoryItems": memory_blocks["blocks"].as_array().map(|a| a.len()).unwrap_or(0),
+        "memoryBytes": memory_blocks["totalBytes"].clone(),
+        "memoryMissing": memory_blocks["missing"].clone(),
         "promptBytes": sg_agent::prompt::segment_bytes(&initial),
         "modeSource": mode_source,
         "policyRuleCount": policy_snapshot.tool_rules.len(),
@@ -2173,6 +2270,16 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
     let mut rollout = sg_agent::rollout::Rollout::open(&store.data_dir, run_id).ok();
     if rollout.is_none() {
         eprintln!("{{\"level\":\"warn\",\"msg\":\"rollout open failed for {run_id}\"}}");
+    }
+    // ADR-032 §7.4：记忆块缺失（已清除/对象损坏）如实入 rollout；默认 memory optional 不阻断 Run。
+    for missing in memory_blocks["missing"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        if let Some(r) = rollout.as_mut() {
+            let _ = r.append("memory_block_missing", missing);
+        }
     }
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.runs.register(run_id, flag.clone());

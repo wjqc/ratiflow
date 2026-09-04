@@ -14,6 +14,7 @@ extern "C" {
 unsafe fn libc_getppid() -> i32 {
     getppid()
 }
+mod memory_dispatch;
 mod migrate;
 mod settings_dispatch;
 mod state;
@@ -85,6 +86,24 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
     // hello 的 schemaVersion 与初始事件水位必须在 Store 移入 DB actor 前读取。
     if let Err(e) = store.quick_check() {
         eprintln!("{{\"level\":\"error\",\"msg\":\"quick_check: {e}\"}}");
+    }
+    // 项目记忆候选捕获 reconciliation（ADR-032 M4 / §8.2）：
+    // 遗留 in_flight 无可靠 Provider 查询能力 → unknown；pending 留待显式重试。
+    match sg_memory::capture::reconcile_broken_in_flight(&store) {
+        Ok(n) if n > 0 => {
+            eprintln!("{{\"level\":\"info\",\"msg\":\"memory capture reconciled: {n} in_flight -> unknown\"}}");
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("{{\"level\":\"error\",\"msg\":\"memory capture reconcile: {e}\"}}"),
+    }
+    // 项目记忆 FTS 投影启动检查（ADR-032 M1）：不一致才重建；失败仅告警不阻断。
+    match sg_memory::ensure_fts_consistent(&store) {
+        Ok(report) => {
+            if report["rebuild"] == serde_json::json!(true) {
+                eprintln!("{{\"level\":\"info\",\"msg\":\"memory fts rebuilt: {report}\"}}");
+            }
+        }
+        Err(e) => eprintln!("{{\"level\":\"error\",\"msg\":\"memory fts check: {e}\"}}"),
     }
     // M1 谱系底座：legacy docs → synthetic requirement revision（unverified）。
     // 幂等回填；失败不阻断启动（表为 additive，仅告警）。

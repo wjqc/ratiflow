@@ -770,8 +770,14 @@ pub fn invalidate_pending_if_drift(
 /// 崩溃恢复（启动时）：审批已决但推进未完成的放行请求补完（蓝图 §4.2 单事务语义的补偿路径）。
 pub fn resume_pending(store: &Store) -> Result<usize, Error> {
     let pending: Vec<(ReleaseRequest, String, String)> = store.with_conn(|conn| {
+        // JOIN 下裸列名 id/created_at 与 approvals 歧义：全部限定 r.（启动 resume 曾因此整体失败）。
+        let rr = RR_COLUMNS
+            .split(',')
+            .map(|c| format!("r.{}", c.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut stmt = conn.prepare(&format!(
-            "SELECT {RR_COLUMNS}, a.status, COALESCE(a.decided_by,'')
+            "SELECT {rr}, a.status, COALESCE(a.decided_by,'')
              FROM gate_release_requests r JOIN approvals a ON a.id = r.approval_id
              WHERE r.state='pending' AND a.status IN ('approved','rejected','changes_requested')"
         ))?;

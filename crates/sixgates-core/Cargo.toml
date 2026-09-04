@@ -18,6 +18,8 @@ sg-settings = { workspace = true }
 ureq = { workspace = true }
 sg-project = { workspace = true }
 sg-knowledge = { workspace = true }
+sg-memory = { workspace = true }
+sg-context = { workspace = true }
 sg-workitem = { workspace = true }
 sg-artifact = { workspace = true }
 sg-attachment = { workspace = true }
