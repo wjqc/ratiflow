@@ -21,6 +21,9 @@ pub struct TestReport {
     pub steps: Vec<StepResult>,
     #[serde(rename = "requiresAccept", skip_serializing_if = "Option::is_none")]
     pub requires_accept: Option<bool>,
+    /// ADR-033：探测通过后随报告返回能力快照（probe 来源）。
+    #[serde(rename = "capabilitySnapshot", skip_serializing_if = "Option::is_none")]
+    pub capability_snapshot: Option<serde_json::Value>,
 }
 
 fn step(name: &str, f: impl FnOnce() -> Result<Value, String>) -> StepResult {
@@ -76,6 +79,7 @@ fn report(steps: Vec<StepResult>, requires_accept: bool) -> TestReport {
         duration_ms: total,
         steps,
         requires_accept: if requires_accept { Some(true) } else { None },
+        capability_snapshot: None,
     }
 }
 
@@ -368,6 +372,7 @@ pub fn ssh_target_test(
                     duration_ms: r.duration_ms,
                     steps: r.steps,
                     requires_accept: None,
+                    capability_snapshot: None,
                 };
             }
         }

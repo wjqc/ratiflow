@@ -398,6 +398,16 @@ pub fn model_mark_tested(store: &Store, id: &str, status: &str) -> SettingsResul
     model_get(store, id)
 }
 
+/// 探测通过后记录能力快照（ADR-033：probe 来源 + verifiedAt/expiresAt/digest；
+/// manual 覆盖只允许收紧）。失败不阻断既有 Run（返回原 Profile）。
+pub fn model_record_capability(store: &Store, id: &str) -> SettingsResult<ModelProfile> {
+    let profile = model_get(store, id)?;
+    if let Err(e) = crate::capability::record_probe(store, id, &profile.capabilities) {
+        return Err(store_err(e));
+    }
+    model_get(store, id)
+}
+
 // --- model_routes ---
 
 pub fn route_get(store: &Store) -> SettingsResult<Value> {

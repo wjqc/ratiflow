@@ -6,6 +6,7 @@
 
 pub mod audit_ext;
 pub mod backup_ext;
+pub mod capability;
 pub mod credentials;
 pub mod executor_ext;
 pub mod knowledge_defaults;

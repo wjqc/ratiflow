@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sg_store::{ids, objects, outbox, scan, timefmt, Error, Store};
 
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Source {
     pub id: String,
@@ -294,8 +295,8 @@ pub fn scan_source(
         for (idx, (ordinal, object_sha, tokens)) in chunks.iter().enumerate() {
             let (chunk_id, _, body) = &chunk_rows[idx];
             tx.execute(
-                "INSERT INTO knowledge_chunks(id, source_id, ordinal, object_sha256, token_count) VALUES (?1,?2,?3,?4,?5)",
-                rusqlite::params![chunk_id, source_id, ordinal, object_sha, tokens],
+                "INSERT INTO knowledge_chunks(id, source_id, ordinal, object_sha256, token_count, project_id) VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![chunk_id, source_id, ordinal, object_sha, tokens, source.project_id],
             )?;
             tx.execute(
                 "INSERT INTO knowledge_fts(chunk_id, source_id, project_id, body) VALUES (?1,?2,?3,?4)",

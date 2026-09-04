@@ -228,7 +228,7 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                 ),
                 None => std::env::var("SIXGATES_MODEL_API_KEY").ok(),
             };
-            let report = sg_integrations::model_test(
+            let mut report = sg_integrations::model_test(
                 &profile.base_url,
                 api_key.as_deref(),
                 &profile.default_model,
@@ -240,6 +240,14 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                 "error"
             };
             let _ = settings::profiles::model_mark_tested(store, &profile.id, status).map_err(serr);
+            // ADR-033：真实探测通过 → 写入 probe 来源能力快照（source/verifiedAt/expiresAt/digest）。
+            if status == "ready" {
+                if let Ok(snapshot) = settings::profiles::model_record_capability(store, &profile.id) {
+                    if let Ok(cap) = serde_json::to_value(&snapshot) {
+                        report.capability_snapshot = Some(cap);
+                    }
+                }
+            }
             Ok(serde_json::to_value(&report).unwrap_or_default())
         }
         "modelProfile.syncModels" => {

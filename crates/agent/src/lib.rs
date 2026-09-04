@@ -7,6 +7,7 @@ use sg_policy::{self, PolicyError, Snapshot};
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
 pub mod instructions;
+pub mod model_protocol;
 pub mod modelgw;
 pub mod profile;
 pub mod prompt;

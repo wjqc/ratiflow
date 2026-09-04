@@ -131,6 +131,17 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
             }
         }
     }
+    // Context 存量 data migration（RFC v1.0 §8.2）：legacy_pending manifest 重建冻结；
+    // 失败不阻断启动（job 停留 pending/failed，下次启动续跑）。
+    match sg_context::legacy_migrate::run(&store, 500) {
+        Ok(summary) => {
+            eprintln!("{{\"level\":\"info\",\"msg\":\"context legacy migration: {summary}\"}}");
+        }
+        Err(e) => {
+            eprintln!("{{\"level\":\"warn\",\"msg\":\"context legacy migration deferred: {e}\"}}");
+        }
+    }
+
     // 放行崩溃恢复：审批已决但推进未完成的请求补完（蓝图 §4.2 原子语义补偿）。
     match sg_workitem::release::resume_pending(&store) {
         Ok(n) if n > 0 => {
