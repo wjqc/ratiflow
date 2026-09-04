@@ -1,0 +1,13 @@
+[package]
+name = "sg-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sg-store = { workspace = true }
+sg-knowledge = { workspace = true }
+sg-memory = { workspace = true }
+rusqlite = { workspace = true }

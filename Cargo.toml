@@ -6,6 +6,8 @@ members = [
     "crates/store",
     "crates/project",
     "crates/knowledge",
+    "crates/memory",
+    "crates/context",
     "crates/workitem",
     "crates/artifact",
     "crates/attachment",
@@ -34,6 +36,7 @@ sha2 = "0.10"
 regex = "1"
 getrandom = "0.2"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+base64 = "0.22"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time"] }
 ureq = { version = "2", features = ["json"] }
@@ -44,6 +47,8 @@ sg-settings = { path = "crates/settings" }
 sg-store = { path = "crates/store" }
 sg-project = { path = "crates/project" }
 sg-knowledge = { path = "crates/knowledge" }
+sg-memory = { path = "crates/memory" }
+sg-context = { path = "crates/context" }
 sg-workitem = { path = "crates/workitem" }
 sg-artifact = { path = "crates/artifact" }
 sg-attachment = { path = "crates/attachment" }

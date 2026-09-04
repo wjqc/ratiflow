@@ -613,6 +613,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sg-context"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sg-knowledge",
+ "sg-memory",
+ "sg-store",
+]
+
+[[package]]
 name = "sg-eventlog"
 version = "0.1.0"
 dependencies = [
@@ -661,6 +673,19 @@ dependencies = [
  "serde_json",
  "sg-store",
  "sha2",
+]
+
+[[package]]
+name = "sg-memory"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sg-store",
+ "sha2",
+ "time",
 ]
 
 [[package]]
@@ -813,10 +838,12 @@ dependencies = [
  "sg-agent",
  "sg-artifact",
  "sg-attachment",
+ "sg-context",
  "sg-evidence",
  "sg-executor",
  "sg-integrations",
  "sg-knowledge",
+ "sg-memory",
  "sg-policy",
  "sg-project",
  "sg-protocol",
