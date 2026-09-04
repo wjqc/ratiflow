@@ -121,7 +121,11 @@ pub fn build_manifest(store: &Store, input: &BuildInput) -> Result<Value, Error>
         Ok(())
     })?;
 
-    Ok(json!({
+    // 冻结最终 prompt-ready 知识块（§8.1）：确定性渲染 → objects → blocks 行。
+    // 失败不回滚 manifest（legacy items 已可服务），如实上报 freezeError，replay_status 保持 legacy_pending。
+    let freeze = crate::freeze::freeze_knowledge_blocks(store, &id);
+
+    let mut out = json!({
         "id": id,
         "workitemId": input.workitem_id,
         "scope": scope,
@@ -131,5 +135,10 @@ pub fn build_manifest(store: &Store, input: &BuildInput) -> Result<Value, Error>
             "excluded": mem_excluded.len(),
             "bytes": mem_bytes,
         },
-    }))
+    });
+    match freeze {
+        Ok(f) => out["freeze"] = f,
+        Err(e) => out["freeze"] = json!({"frozen": false, "error": e.to_string()}),
+    }
+    Ok(out)
 }

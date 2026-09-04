@@ -6,6 +6,8 @@
 //! `builder::build_manifest`，禁止客户端自报关键绑定。
 pub mod blocks;
 pub mod builder;
+pub mod freeze;
+pub mod legacy_migrate;
 pub mod manifest;
 
 pub use builder::{build_manifest, BuildInput};

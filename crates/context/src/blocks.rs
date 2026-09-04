@@ -6,8 +6,91 @@ use serde_json::{json, Value};
 use sg_memory as mem;
 use sg_store::{objects, Error, Store};
 
-/// 知识块装载（自 sg-knowledge::manifest_blocks 迁移；owner 为 sg-context）。
+/// 知识块装载（§8.1）：有冻结 blocks 行 → 按最终对象 SHA 装载（fail-closed）；
+/// legacy_pending（兼容观察期）→ 旧按来源装配路径。
 pub fn manifest_blocks(store: &Store, manifest_id: &str, max_bytes: i64) -> Result<Value, Error> {
+    let frozen: i64 = store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM context_manifest_blocks WHERE manifest_id=?1",
+            [manifest_id],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+    })?;
+    if frozen > 0 {
+        return load_frozen_blocks(store, manifest_id, max_bytes);
+    }
+    load_legacy_blocks(store, manifest_id, max_bytes)
+}
+
+/// 冻结装载：按 blocks.object_sha256 读 objects（对象缺失 fail-closed 报 missing）。
+fn load_frozen_blocks(store: &Store, manifest_id: &str, max_bytes: i64) -> Result<Value, Error> {
+    struct Row {
+        role: String,
+        object_sha256: String,
+        bytes: i64,
+    }
+    let rows: Vec<Row> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT role, object_sha256, bytes FROM context_manifest_blocks
+             WHERE manifest_id=?1 ORDER BY ordinal",
+        )?;
+        let mut out = Vec::new();
+        let mut rows = stmt.query([manifest_id])?;
+        while let Some(r) = rows.next()? {
+            out.push(Row {
+                role: r.get(0)?,
+                object_sha256: r.get(1)?,
+                bytes: r.get(2)?,
+            });
+        }
+        Ok(out)
+    })?;
+    let mut blocks = Vec::new();
+    let mut total = 0i64;
+    let mut truncated = false;
+    let mut missing = 0usize;
+    for row in &rows {
+        let mut text = match objects::open(store, &row.object_sha256) {
+            Ok(body) => String::from_utf8_lossy(&body).to_string(),
+            Err(_) => {
+                // 对象缺失：fail-closed —— 绝不发送替代文本（§8.1）。
+                missing += 1;
+                blocks.push(json!({
+                    "role": row.role,
+                    "bytes": row.bytes,
+                    "missing": true,
+                    "reason": "object_missing",
+                }));
+                continue;
+            }
+        };
+        if total + text.len() as i64 > max_bytes {
+            truncated = true;
+            text.truncate(max_bytes.saturating_sub(total) as usize);
+        }
+        total += text.len() as i64;
+        blocks.push(json!({
+            "role": row.role,
+            "bytes": text.len(),
+            "text": text,
+        }));
+        if total >= max_bytes {
+            truncated = true;
+            break;
+        }
+    }
+    Ok(json!({
+        "blocks": blocks,
+        "totalBytes": total,
+        "includedCount": blocks.len(),
+        "missingCount": missing,
+        "truncated": truncated,
+    }))
+}
+
+/// 旧装配路径（legacy_pending 兼容观察期）。
+fn load_legacy_blocks(store: &Store, manifest_id: &str, max_bytes: i64) -> Result<Value, Error> {
     struct Item {
         source_id: String,
     }
