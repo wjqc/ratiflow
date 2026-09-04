@@ -81,6 +81,7 @@ impl Gateway {
             masked_messages.push(sg_integrations::model::ChatMessage {
                 role: msg.role.clone(),
                 content: text,
+                ..Default::default()
             });
         }
         masked.messages = masked_messages;
@@ -99,13 +100,22 @@ impl Gateway {
                     store,
                     run_id,
                     &CallStats {
+                        protocol: if req.tools_json.is_some() {
+                            "native_tools"
+                        } else {
+                            "legacy_json"
+                        },
                         provider: self.provider.name(),
                         status: "ok",
                         tokens_in: resp.tokens_in,
                         tokens_out: resp.tokens_out,
                         latency_ms: started.elapsed().as_millis() as i64,
                         redactions,
-                        model: if req.model.is_empty() { None } else { Some(req.model.as_str()) },
+                        model: if req.model.is_empty() {
+                            None
+                        } else {
+                            Some(req.model.as_str())
+                        },
                         finish_reason: Some(resp.finish_reason.as_str()),
                         error_code: None,
                     },
@@ -117,13 +127,22 @@ impl Gateway {
                     store,
                     run_id,
                     &CallStats {
+                        protocol: if req.tools_json.is_some() {
+                            "native_tools"
+                        } else {
+                            "legacy_json"
+                        },
                         provider: self.provider.name(),
                         status: "error",
                         tokens_in: 0,
                         tokens_out: 0,
                         latency_ms: started.elapsed().as_millis() as i64,
                         redactions,
-                        model: if req.model.is_empty() { None } else { Some(req.model.as_str()) },
+                        model: if req.model.is_empty() {
+                            None
+                        } else {
+                            Some(req.model.as_str())
+                        },
                         finish_reason: None,
                         error_code: Some(e.split(':').next().unwrap_or("model_error")),
                     },
@@ -136,9 +155,26 @@ impl Gateway {
     pub fn usage(&self) -> Usage {
         *self.usage.lock().unwrap()
     }
+
+    /// ADR-033 M1：codec 协商（能力快照 → native_tools/legacy_json；
+    /// 未验证/缺失 → 保守 legacy）。
+    pub fn codec(&self, _store: &Store) -> crate::model_protocol::Codec {
+        use crate::model_protocol::CapabilitySnapshot;
+        self.provider
+            .capability()
+            .and_then(|v| serde_json::from_value::<CapabilitySnapshot>(v).ok())
+            .map(|s| s.preferred_codec())
+            .unwrap_or(crate::model_protocol::Codec::LegacyJson)
+    }
+
+    /// 能力快照原始 JSON（rollout 证据）。
+    pub fn capability(&self, _store: &Store) -> Option<serde_json::Value> {
+        self.provider.capability()
+    }
 }
 
 struct CallStats<'a> {
+    protocol: &'a str,
     provider: &'a str,
     status: &'a str,
     tokens_in: i64,
@@ -176,7 +212,10 @@ fn probe_digest_for_model(conn: &rusqlite::Connection, model: &str) -> String {
     if source != "probe" || digest.is_empty() {
         return String::new();
     }
-    let expired = match (sg_store::timefmt::parse(expires_at), sg_store::timefmt::parse(&sg_store::timefmt::now())) {
+    let expired = match (
+        sg_store::timefmt::parse(expires_at),
+        sg_store::timefmt::parse(&sg_store::timefmt::now()),
+    ) {
         (Some(exp), Some(now)) => exp <= now,
         _ => true,
     };
@@ -188,7 +227,8 @@ fn probe_digest_for_model(conn: &rusqlite::Connection, model: &str) -> String {
 }
 
 fn record(store: &Store, run_id: &str, stats: &CallStats<'_>) {
-    let (provider, status, tin, tout, latency_ms, redactions) = (
+    let (protocol, provider, status, tin, tout, latency_ms, redactions) = (
+        stats.protocol,
         stats.provider,
         stats.status,
         stats.tokens_in,
@@ -222,12 +262,13 @@ fn record(store: &Store, run_id: &str, stats: &CallStats<'_>) {
                 id, agent_run_id, turn_seq, protocol, capability_digest, provider, model,
                 tokens_in, tokens_out, cached_tokens, reasoning_tokens, ttft_ms, total_ms,
                 finish_reason, status, error_code, created_at
-             ) VALUES (?1,?2,?3,'legacy_json',?4,?5,?6,?7,?8,0,0,NULL,?9,?10,?11,?12,?13)",
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,0,NULL,?10,?11,?12,?13,?14)",
             rusqlite::params![
                 ids::new_id("mt"),
                 run_id,
                 turn_seq,
-                probe_digest_for_model(conn, &model_name),
+                protocol,
+                probe_digest_for_model(conn, model_name),
                 provider,
                 model_name,
                 tin,
@@ -273,9 +314,11 @@ mod tests {
             messages: vec![sg_integrations::model::ChatMessage {
                 role: "user".into(),
                 content: "hi".into(),
+                ..Default::default()
             }],
             max_tokens: 16,
             response_schema: None,
+            tools_json: None,
         };
         let resp = gateway
             .call(&store, "run-x", &Budget::default(), &req)

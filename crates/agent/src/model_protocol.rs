@@ -5,8 +5,8 @@
 //! 能力快照决定。Agent 不解析 SSE/品牌字段——线协议转换属于 Provider adapter。
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sg_store::ids;
+use sha2::{Digest, Sha256};
 
 /// Provider 能力快照消费方类型（与 sg-settings 探测写入的 §4.1 JSON 同形）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -118,29 +118,59 @@ pub enum Codec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelInputItem {
-    Message { role: String, content: String },
-    ToolCall { call_id: String, name: String, arguments_json: String },
-    ToolResult { call_id: String, output: String },
-    ReasoningOpaque { provider: String, payload: String },
-    CompactionOpaque { provider: String, payload: String },
+    Message {
+        role: String,
+        content: String,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        arguments_json: String,
+    },
+    ToolResult {
+        call_id: String,
+        output: String,
+    },
+    ReasoningOpaque {
+        provider: String,
+        payload: String,
+    },
+    CompactionOpaque {
+        provider: String,
+        payload: String,
+    },
 }
 
 /// 统一模型事件（Provider adapter 产出；Agent 不解析 SSE/品牌字段）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelEvent {
-    Started { provider_request_id: String },
-    TextDelta { text: String },
-    ReasoningSummaryDelta { text: String },
-    ToolCallDelta { call_id: String, name: String, arguments_delta: String },
-    ItemCompleted { item: ModelInputItem },
+    Started {
+        provider_request_id: String,
+    },
+    TextDelta {
+        text: String,
+    },
+    ReasoningSummaryDelta {
+        text: String,
+    },
+    ToolCallDelta {
+        call_id: String,
+        name: String,
+        arguments_delta: String,
+    },
+    ItemCompleted {
+        item: ModelInputItem,
+    },
     Usage {
         input: i64,
         cached_input: i64,
         output: i64,
         reasoning_output: i64,
     },
-    Completed { finish_reason: String },
+    Completed {
+        finish_reason: String,
+    },
 }
 
 /// 一轮模型交互的最终产物（由事件聚合器产生；Agent 只消费 ModelTurn）。
@@ -216,12 +246,18 @@ impl TurnAggregator {
             ));
         }
         match event {
-            ModelEvent::Started { provider_request_id } => {
+            ModelEvent::Started {
+                provider_request_id,
+            } => {
                 self.provider_request_id = provider_request_id;
             }
             ModelEvent::TextDelta { text } => self.text.push_str(&text),
             ModelEvent::ReasoningSummaryDelta { text } => self.reasoning_summary.push_str(&text),
-            ModelEvent::ToolCallDelta { call_id, name, arguments_delta } => {
+            ModelEvent::ToolCallDelta {
+                call_id,
+                name,
+                arguments_delta,
+            } => {
                 // call_id 首次出现时记录工具名；后续分片只拼 arguments。
                 let entry = self
                     .tool_call_deltas
@@ -229,31 +265,53 @@ impl TurnAggregator {
                     .or_insert_with(|| (name.clone(), String::new()));
                 if entry.0 != name {
                     self.violation = Some(format!("call_id {call_id} 工具名漂移"));
-                    return Err(ModelProtocolError::ProtocolViolation(self.violation.clone().unwrap()));
+                    return Err(ModelProtocolError::ProtocolViolation(
+                        self.violation.clone().unwrap(),
+                    ));
                 }
                 entry.1.push_str(&arguments_delta);
             }
             ModelEvent::ItemCompleted { item } => match item {
-                ModelInputItem::ToolCall { call_id, name, arguments_json } => {
+                ModelInputItem::ToolCall {
+                    call_id,
+                    name,
+                    arguments_json,
+                } => {
                     // 完成帧与 delta 聚合互斥：同一响应不可双重消费同一 call（§4.3）。
                     if self.tool_call_deltas.contains_key(&call_id) {
                         self.violation = Some(format!("call_id {call_id} 双重消费"));
-                        return Err(ModelProtocolError::ProtocolViolation(self.violation.clone().unwrap()));
+                        return Err(ModelProtocolError::ProtocolViolation(
+                            self.violation.clone().unwrap(),
+                        ));
                     }
-                    self.tool_call_deltas.insert(call_id.clone(), (name, arguments_json));
+                    self.tool_call_deltas
+                        .insert(call_id.clone(), (name, arguments_json));
                 }
                 ModelInputItem::Message { content, .. } => self.text.push_str(&content),
                 ModelInputItem::ToolResult { .. } => {
                     // ToolResult 是请求侧输入项；完成帧中不应出现，出现即协议违规。
                     self.violation = Some("ItemCompleted 携带 ToolResult".into());
-                    return Err(ModelProtocolError::ProtocolViolation(self.violation.clone().unwrap()));
+                    return Err(ModelProtocolError::ProtocolViolation(
+                        self.violation.clone().unwrap(),
+                    ));
                 }
                 // reasoning/compaction opaque payload 只透传给 checkpoint 层（M4），
                 // M0 聚合器不消费。
-                ModelInputItem::ReasoningOpaque { .. } | ModelInputItem::CompactionOpaque { .. } => {}
+                ModelInputItem::ReasoningOpaque { .. }
+                | ModelInputItem::CompactionOpaque { .. } => {}
             },
-            ModelEvent::Usage { input, cached_input, output, reasoning_output } => {
-                self.usage = Usage { input, cached_input, output, reasoning_output };
+            ModelEvent::Usage {
+                input,
+                cached_input,
+                output,
+                reasoning_output,
+            } => {
+                self.usage = Usage {
+                    input,
+                    cached_input,
+                    output,
+                    reasoning_output,
+                };
             }
             ModelEvent::Completed { finish_reason } => {
                 self.finish_reason = finish_reason;
@@ -285,9 +343,14 @@ impl TurnAggregator {
         let mut tool_calls: Vec<ToolCallComplete> = self
             .tool_call_deltas
             .into_iter()
-            .map(|(call_id, (name, arguments_json))| ToolCallComplete { call_id, name, arguments_json })
+            .map(|(call_id, (name, arguments_json))| ToolCallComplete {
+                call_id,
+                name,
+                arguments_json,
+            })
             .collect();
         tool_calls.sort_by(|a, b| a.call_id.cmp(&b.call_id));
+        let _ = &self.tool_calls; // 聚合来源（deltas）；保留字段供调试断言
         if tool_calls.len() > 1 {
             return Err(ModelProtocolError::ProtocolViolation(format!(
                 "并行工具调用 {} 个，首期拒绝",
@@ -331,11 +394,25 @@ mod tests {
     #[test]
     fn text_turn_aggregation() {
         let mut agg = TurnAggregator::new();
-        agg.feed(ModelEvent::Started { provider_request_id: "req-1".into() }).unwrap();
-        agg.feed(ModelEvent::TextDelta { text: "你".into() }).unwrap();
-        agg.feed(ModelEvent::TextDelta { text: "好".into() }).unwrap();
-        agg.feed(ModelEvent::Usage { input: 10, cached_input: 4, output: 2, reasoning_output: 0 }).unwrap();
-        agg.feed(ModelEvent::Completed { finish_reason: "stop".into() }).unwrap();
+        agg.feed(ModelEvent::Started {
+            provider_request_id: "req-1".into(),
+        })
+        .unwrap();
+        agg.feed(ModelEvent::TextDelta { text: "你".into() })
+            .unwrap();
+        agg.feed(ModelEvent::TextDelta { text: "好".into() })
+            .unwrap();
+        agg.feed(ModelEvent::Usage {
+            input: 10,
+            cached_input: 4,
+            output: 2,
+            reasoning_output: 0,
+        })
+        .unwrap();
+        agg.feed(ModelEvent::Completed {
+            finish_reason: "stop".into(),
+        })
+        .unwrap();
         let turn = agg.finish().unwrap();
         assert_eq!(turn.text, "你好");
         assert!(!turn.incomplete);
@@ -358,7 +435,10 @@ mod tests {
             arguments_delta: "\"a.md\"}".into(),
         })
         .unwrap();
-        agg.feed(ModelEvent::Completed { finish_reason: "tool_calls".into() }).unwrap();
+        agg.feed(ModelEvent::Completed {
+            finish_reason: "tool_calls".into(),
+        })
+        .unwrap();
         let turn = agg.finish().unwrap();
         assert_eq!(turn.tool_calls.len(), 1);
         assert_eq!(turn.tool_calls[0].arguments_json, "{\"path\":\"a.md\"}");
@@ -378,7 +458,10 @@ mod tests {
             })
             .unwrap();
         }
-        agg.feed(ModelEvent::Completed { finish_reason: "tool_calls".into() }).unwrap();
+        agg.feed(ModelEvent::Completed {
+            finish_reason: "tool_calls".into(),
+        })
+        .unwrap();
         assert!(matches!(
             agg.finish(),
             Err(ModelProtocolError::ProtocolViolation(_))
@@ -388,14 +471,20 @@ mod tests {
     #[test]
     fn stream_interrupted_without_completed() {
         let mut agg = TurnAggregator::new();
-        agg.feed(ModelEvent::TextDelta { text: "半截".into() }).unwrap();
+        agg.feed(ModelEvent::TextDelta {
+            text: "半截".into(),
+        })
+        .unwrap();
         assert_eq!(agg.finish(), Err(ModelProtocolError::StreamInterrupted));
     }
 
     #[test]
     fn cancel_discards_deltas() {
         let mut agg = TurnAggregator::new();
-        agg.feed(ModelEvent::TextDelta { text: "部分".into() }).unwrap();
+        agg.feed(ModelEvent::TextDelta {
+            text: "部分".into(),
+        })
+        .unwrap();
         agg.cancel();
         assert_eq!(agg.finish(), Err(ModelProtocolError::Cancelled));
     }
@@ -403,7 +492,10 @@ mod tests {
     #[test]
     fn completed_then_event_is_violation() {
         let mut agg = TurnAggregator::new();
-        agg.feed(ModelEvent::Completed { finish_reason: "stop".into() }).unwrap();
+        agg.feed(ModelEvent::Completed {
+            finish_reason: "stop".into(),
+        })
+        .unwrap();
         assert!(matches!(
             agg.feed(ModelEvent::TextDelta { text: "x".into() }),
             Err(ModelProtocolError::ProtocolViolation(_))
@@ -415,11 +507,13 @@ mod tests {
         // 未探测（preset）/unknown → legacy；显式 true 且已验证 → native。
         let unverified = CapabilitySnapshot::default();
         assert_eq!(unverified.preferred_codec(), Codec::LegacyJson);
-        let mut native = CapabilitySnapshot::default();
-        native.source = "probe".into();
-        native.verified_at = "2026-09-04T00:00:00.000Z".into();
-        native.expires_at = "2999-01-01T00:00:00.000Z".into();
-        native.native_tools = serde_json::json!(true);
+        let mut native = CapabilitySnapshot {
+            source: "probe".into(),
+            verified_at: "2026-09-04T00:00:00.000Z".into(),
+            expires_at: "2999-01-01T00:00:00.000Z".into(),
+            native_tools: serde_json::json!(true),
+            ..Default::default()
+        };
         assert_eq!(native.preferred_codec(), Codec::NativeTools);
         // 过期 probe → 回退 legacy。
         native.expires_at = "2020-01-01T00:00:00.000Z".into();

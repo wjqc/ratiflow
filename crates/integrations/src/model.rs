@@ -12,26 +12,55 @@ pub struct CompletionRequest {
     pub max_tokens: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<serde_json::Value>,
+    /// 原生 function calling（ADR-033 M1）：OpenAI 兼容 function 定义数组（JSON 串）；
+    /// None = legacy_json 协议。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_json: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// role=tool：本条结果对应的原生调用 id（原生 transcript）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// role=assistant：原生 tool_calls 数组（JSON 串，OpenAI 形状）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls_json: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Provider 原生工具调用（M1）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProviderToolCall {
+    pub id: String,
+    pub name: String,
+    /// 原始 arguments JSON 串（原样传递，不重排序）。
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompletionResponse {
     pub content: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub finish_reason: String,
+    #[serde(default)]
+    pub tool_calls: Vec<ProviderToolCall>,
+    #[serde(default)]
+    pub cached_tokens: i64,
+    #[serde(default)]
+    pub reasoning_tokens: i64,
 }
 
 pub trait ModelProvider: Send + Sync {
     fn name(&self) -> &str;
     fn health_check(&self) -> Result<(), String>;
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, String>;
+    /// Provider 能力快照（ADR-033 §4.1）；None = 未验证 → 保守 legacy 路径。
+    fn capability(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// ureq 2.x 对 HTTP 4xx/5xx 一律返回 Err(Error::Status)——必须先解包再按状态码分类，
@@ -101,12 +130,37 @@ impl ModelProvider for ModelHttp {
         } else {
             req.model.clone()
         };
+        let native = req.tools_json.is_some();
         let mut messages: Vec<serde_json::Value> = Vec::new();
         if !req.system_prompt.is_empty() {
             messages.push(serde_json::json!({"role": "system", "content": req.system_prompt}));
         }
         for msg in &req.messages {
-            // 兼容性降级（语义保留）：
+            // 原生 transcript：assistant tool_calls 与 tool 结果按 OpenAI 形状透传，
+            // call_id 原样保留（M1：不再把 tool 降级成 user）。
+            if native && msg.role == "assistant" {
+                if let Some(tc) = msg.tool_calls_json.as_deref() {
+                    let calls: serde_json::Value =
+                        serde_json::from_str(tc).unwrap_or(serde_json::Value::Null);
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": msg.content,
+                        "tool_calls": calls,
+                    }));
+                    continue;
+                }
+            }
+            if native && msg.role == "tool" {
+                if let Some(id) = msg.tool_call_id.as_deref() {
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": msg.content,
+                    }));
+                    continue;
+                }
+            }
+            // legacy 兼容性降级（语义保留）：
             // - developer 是 OpenAI 新式角色，兼容端点（DeepSeek 等）只认 system 等；
             // - harness 的 tool 消息是扁平文本、不带 tool_call_id，严格端点会 400，
             //   统一转成 user 消息承载工具输出。
@@ -117,8 +171,16 @@ impl ModelProvider for ModelHttp {
             };
             messages.push(serde_json::json!({"role": role, "content": msg.content}));
         }
-        let body =
+        let mut body =
             serde_json::json!({"model": model, "messages": messages, "max_tokens": req.max_tokens});
+        if native {
+            if let Some(tools) = req.tools_json.as_deref() {
+                if let Ok(defs) = serde_json::from_str::<serde_json::Value>(tools) {
+                    body["tools"] = defs;
+                    body["tool_choice"] = serde_json::json!("auto");
+                }
+            }
+        }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let send = |body: &serde_json::Value| {
             classify_ureq(
@@ -164,6 +226,26 @@ impl ModelProvider for ModelHttp {
                 "model_empty_output: 模型未返回正文（finish_reason={finish}）；{hint}"
             ));
         }
+        // 原生工具调用解析（OpenAI 形状；DeepSeek/GLM 兼容端点同形）。
+        let tool_calls: Vec<ProviderToolCall> = parsed["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .enumerate()
+                    .map(|(i, tc)| ProviderToolCall {
+                        id: tc["id"]
+                            .as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| format!("call_{i}")),
+                        name: tc["function"]["name"].as_str().unwrap_or_default().into(),
+                        arguments: tc["function"]["arguments"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .into(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(CompletionResponse {
             content,
             tokens_in: parsed["usage"]["prompt_tokens"].as_i64().unwrap_or(0),
@@ -172,6 +254,13 @@ impl ModelProvider for ModelHttp {
                 .as_str()
                 .unwrap_or_default()
                 .into(),
+            tool_calls,
+            cached_tokens: parsed["usage"]["prompt_tokens_details"]["cached_tokens"]
+                .as_i64()
+                .unwrap_or(0),
+            reasoning_tokens: parsed["usage"]["completion_tokens_details"]["reasoning_tokens"]
+                .as_i64()
+                .unwrap_or(0),
         })
     }
 }
@@ -210,11 +299,15 @@ pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String>
 }
 
 /// 脚本化 fake（内部队列加锁，complete 经 &self 调用）。
+/// `native=true` 时若请求带原生 tools，脚本中的 legacy action JSON 会被桥接为
+/// 原生 tool_calls 响应（final 动作仍为正文）——同一脚本可测双协议。
 #[derive(Default)]
 pub struct FakeModel {
     script: std::sync::Mutex<std::collections::VecDeque<CompletionResponse>>,
     errors: std::sync::Mutex<std::collections::VecDeque<String>>,
     pub calls: std::sync::Mutex<Vec<CompletionRequest>>,
+    pub native: std::sync::atomic::AtomicBool,
+    call_counter: std::sync::atomic::AtomicU64,
 }
 
 impl FakeModel {
@@ -224,11 +317,18 @@ impl FakeModel {
             tokens_in,
             tokens_out,
             finish_reason: "stop".into(),
+            ..CompletionResponse::default()
         });
     }
 
     pub fn push_error(&self, error: &str) {
         self.errors.lock().unwrap().push_back(error.into());
+    }
+
+    /// 声明原生工具能力（ADR-033：fake 以 manual 来源宣称，仅供测试路径）。
+    pub fn enable_native(&self) {
+        self.native
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -241,16 +341,75 @@ impl ModelProvider for FakeModel {
         Ok(())
     }
 
+    fn capability(&self) -> Option<serde_json::Value> {
+        if self.native.load(std::sync::atomic::Ordering::Relaxed) {
+            Some(serde_json::json!({
+                "schemaVersion": 1,
+                "protocols": ["chat_completions"],
+                "preferredProtocol": "chat_completions",
+                "nativeTools": true,
+                "streamText": false,
+                "streamToolArguments": false,
+                "reasoningTransport": "none",
+                "compaction": "local_structured",
+                "cache": "implicit",
+                "serverState": "unsupported",
+                "source": "manual",
+                "verifiedAt": "1970-01-01T00:00:00.000Z",
+                "expiresAt": "2999-01-01T00:00:00.000Z",
+            }))
+        } else {
+            None
+        }
+    }
+
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, String> {
         self.calls.lock().unwrap().push(req.clone());
         if let Some(err) = self.errors.lock().unwrap().pop_front() {
             return Err(err);
         }
-        self.script
+        let mut resp: CompletionResponse = self
+            .script
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or_else(|| "model_unavailable: script exhausted".into())
+            .ok_or_else(|| "model_unavailable: script exhausted".to_string())?;
+        // 原生桥接：脚本 action JSON → 原生 tool_calls（final 动作 = 正文答复）。
+        let n = self
+            .call_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if req.tools_json.is_some() {
+            // 数组脚本 → 单响应多 tool call（供并行拒绝测试）。
+            if let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&resp.content) {
+                resp.tool_calls = list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| ProviderToolCall {
+                        id: format!("call_{n}_{i}"),
+                        name: v["action"].as_str().unwrap_or_default().into(),
+                        arguments: v["arguments"].to_string(),
+                    })
+                    .collect();
+                resp.content = String::new();
+                resp.finish_reason = "tool_calls".into();
+                return Ok(resp);
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.content) {
+                let action = v["action"].as_str().unwrap_or_default().to_string();
+                if action == "final" {
+                    resp.content = v["summary"].as_str().unwrap_or_default().to_string();
+                } else {
+                    resp.tool_calls = vec![ProviderToolCall {
+                        id: format!("call_{n}"),
+                        name: action,
+                        arguments: v["arguments"].to_string(),
+                    }];
+                    resp.content = String::new();
+                    resp.finish_reason = "tool_calls".into();
+                }
+            }
+        }
+        Ok(resp)
     }
 }
 
@@ -296,9 +455,11 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".into(),
                 content: "hi".into(),
+                ..Default::default()
             }],
             max_tokens: 16,
             response_schema: None,
+            tools_json: None,
         }
     }
 

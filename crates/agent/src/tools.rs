@@ -270,6 +270,39 @@ pub fn truncate_output(text: &str, max_bytes: usize) -> String {
     )
 }
 
+/// ADR-033 M1：从同一 Registry 生成原生 function 定义（OpenAI 兼容形状）。
+/// 禁止复制 Schema——直接序列化各 ToolDef 的 parameters()。
+pub fn provider_tools_json(allowlist: &[String]) -> String {
+    let defs: Vec<serde_json::Value> = registry()
+        .iter()
+        .filter(|d| allowlist.iter().any(|a| a == d.name))
+        .map(|d| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": (d.parameters)(),
+                },
+            })
+        })
+        .collect();
+    serde_json::to_string(&serde_json::Value::Array(defs)).unwrap_or_else(|_| "[]".into())
+}
+
+/// allowlist 工具 Schema 的 canonical digest（提案指纹与 Run 快照用）。
+pub fn schema_digest(allowlist: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let defs: Vec<serde_json::Value> = registry()
+        .iter()
+        .filter(|d| allowlist.iter().any(|a| a == d.name))
+        .map(|d| d.to_json())
+        .collect();
+    sg_store::ids::hex(&Sha256::digest(
+        serde_json::to_string(&defs).unwrap_or_default().as_bytes(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

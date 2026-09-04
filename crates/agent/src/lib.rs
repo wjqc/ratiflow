@@ -207,7 +207,7 @@ pub fn execute_run(
 ) -> Result<RunOutput, Error> {
     let RunConfig {
         goal: _goal,
-        tool_allowlist: _tool_allowlist,
+        tool_allowlist,
         budget,
         max_iterations,
         ..
@@ -260,10 +260,12 @@ pub fn execute_run(
         messages.push(ChatMessage {
             role: "developer".into(),
             content: format!("审批已通过，执行工具提案：{}", proposal.tool),
+            ..Default::default()
         });
         messages.push(ChatMessage {
             role: "tool".into(),
             content: result_text.clone(),
+            ..Default::default()
         });
         log_rollout(
             &mut rollout,
@@ -319,6 +321,16 @@ pub fn execute_run(
                 }
             }
         }
+        // ADR-033 M1：Run 冻结 codec（能力快照协商；native → 原生 tools + call_id transcript）。
+        // ADR-033 M1：Run 启动时冻结 codec（能力快照协商；暂停/恢复不换协议）。
+        let codec = gateway.codec(store);
+        let mut system_prompt = system_prompt.clone();
+        if codec == crate::model_protocol::Codec::NativeTools {
+            system_prompt.push_str(
+                "\n\n工具通过原生 function calling 调用；无需输出 JSON 决策对象，\
+                 完成任务时直接以正文作为最终答复。",
+            );
+        }
         let request = CompletionRequest {
             model: String::new(),
             system_prompt: system_prompt.clone(),
@@ -327,6 +339,12 @@ pub fn execute_run(
             // 上限太小会 finish_reason=length 且正文为空——给足余量。
             max_tokens: 16384,
             response_schema: None,
+            tools_json: if codec == crate::model_protocol::Codec::NativeTools {
+                // Run 冻结的 allowlist（agent_runs.tool_allowlist）。
+                Some(crate::tools::provider_tools_json(tool_allowlist))
+            } else {
+                None
+            },
         };
         log_rollout(
             &mut rollout,
@@ -361,16 +379,56 @@ pub fn execute_run(
             }
         };
 
-        let decision = match parse_decision(&response.content) {
+        // M1：native 分支优先消费原生 tool_calls（正文非空 = 最终答复）；
+        // legacy 分支维持 parse_decision + 修复轮。
+        let (decision, native_call) = if codec == crate::model_protocol::Codec::NativeTools {
+            match response.tool_calls.len() {
+                1 => {
+                    let tc = &response.tool_calls[0];
+                    (
+                        Some(Decision {
+                            action: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                            summary: String::new(),
+                        }),
+                        Some(tc.clone()),
+                    )
+                }
+                0 if !response.content.trim().is_empty() => (
+                    Some(Decision {
+                        action: "final".into(),
+                        arguments: String::new(),
+                        summary: response.content.clone(),
+                    }),
+                    None,
+                ),
+                0 => (None, None),
+                n => {
+                    run.result =
+                        format!("model_protocol_violation: 并行工具调用 {n} 个（首期拒绝）");
+                    set_status(store, &mut run, "failed", "run.failed")?;
+                    finish(store, &run)?;
+                    return Err(Error::Message(run.result.clone()));
+                }
+            }
+        } else {
+            match parse_decision(&response.content) {
+                Some(d) => (Some(d), None),
+                None => (None, None),
+            }
+        };
+        let decision = match decision {
             Some(d) => d,
             None => {
                 messages.push(ChatMessage {
                     role: "assistant".into(),
                     content: response.content,
+                    ..Default::default()
                 });
                 messages.push(ChatMessage {
                     role: "user".into(),
                     content: "输出必须是 JSON（schema 见系统提示）；请重新输出决策对象。".into(),
+                    ..Default::default()
                 });
                 continue;
             }
@@ -422,10 +480,19 @@ pub fn execute_run(
         let outcome = propose_and_execute(store, policy, executor, &mut rollout, &run, &decision)?;
         match outcome {
             StepOutcome::NeedsApproval { proposal_id, tool } => {
-                messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content: format!("tool {}({})", decision.action, decision.arguments),
-                });
+                messages.push(native_assistant_msg(
+                    &response,
+                    native_call.as_ref(),
+                    &decision,
+                ));
+                if let Some(tc) = &native_call {
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: format!("等待审批：{tool}"),
+                        tool_call_id: Some(tc.id.clone()),
+                        tool_calls_json: None,
+                    });
+                }
                 checkpoint(store, run_id, iteration, &messages, Some(&proposal_id));
                 log_rollout(
                     &mut rollout,
@@ -443,14 +510,25 @@ pub fn execute_run(
             }
             StepOutcome::Continue(output_text) => {
                 tool_calls += 1;
-                messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content: format!("tool {}({})", decision.action, decision.arguments),
-                });
-                messages.push(ChatMessage {
-                    role: "tool".into(),
-                    content: output_text,
-                });
+                messages.push(native_assistant_msg(
+                    &response,
+                    native_call.as_ref(),
+                    &decision,
+                ));
+                if let Some(tc) = &native_call {
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: output_text,
+                        tool_call_id: Some(tc.id.clone()),
+                        tool_calls_json: None,
+                    });
+                } else {
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: output_text,
+                        ..Default::default()
+                    });
+                }
                 checkpoint(store, run_id, iteration, &messages, None);
                 log_rollout(
                     &mut rollout,
@@ -503,6 +581,7 @@ fn compact_history(
         messages: messages.clone(),
         max_tokens: 8192,
         response_schema: None,
+        tools_json: None,
     };
     let resp = match gateway.call(store, &run.id, budget, &request) {
         Ok(r) => r,
@@ -523,6 +602,7 @@ fn compact_history(
     new_messages.push(ChatMessage {
         role: "user".into(),
         content: format!("【会话已压缩】此前对话（约 {est_before} tokens）摘要：\n{summary_text}"),
+        ..Default::default()
     });
     new_messages.extend(tail);
     let est_after = estimate_input_tokens(system_prompt, &new_messages);
@@ -903,6 +983,7 @@ fn load_checkpoint(
         messages.push(ChatMessage {
             role: m.get("role")?.as_str()?.into(),
             content: m.get("content")?.as_str()?.into(),
+            ..Default::default()
         });
     }
     let iteration = v.get("iteration").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
@@ -1066,6 +1147,39 @@ pub fn validate_decision_shape(content: &str) -> bool {
     parse_decision(content).is_some()
 }
 
+/// 原生/legacy assistant 消息构造：native 携带 tool_calls JSON（call_id 回传链），
+/// legacy 维持"tool 名(参数)"扁平文本。
+fn native_assistant_msg(
+    response: &sg_integrations::model::CompletionResponse,
+    native_call: Option<&sg_integrations::model::ProviderToolCall>,
+    decision: &Decision,
+) -> ChatMessage {
+    if let Some(tc) = native_call {
+        let calls = serde_json::json!([
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.name, "arguments": tc.arguments}}
+        ]);
+        ChatMessage {
+            role: "assistant".into(),
+            content: response.content.clone(),
+            tool_calls_json: Some(calls.to_string()),
+            ..Default::default()
+        }
+    } else if decision.action == "final" {
+        ChatMessage {
+            role: "assistant".into(),
+            content: decision.summary.clone(),
+            ..Default::default()
+        }
+    } else {
+        ChatMessage {
+            role: "assistant".into(),
+            content: format!("tool {}({})", decision.action, decision.arguments),
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1156,6 +1270,104 @@ mod tests {
         let props = proposals(&store, &out.run.id).unwrap();
         assert_eq!(props.len(), 1);
         assert_eq!(props[0].decision, "executed");
+    }
+
+    /// ADR-033 M1：原生 tool_calls 全链——call_id transcript + 提案执行 + 正文 final。
+    #[test]
+    fn native_tool_call_run_completes_with_call_id_transcript() {
+        let store = setup();
+        let fake = FakeModel::default();
+        fake.enable_native();
+        fake.push_response(
+            r#"{"action":"read_file","arguments":{"path":"README.md"},"summary":"读取"}"#,
+            10,
+            5,
+        );
+        fake.push_response(r#"{"action":"final","summary":"native done"}"#, 20, 8);
+        let gateway = Gateway::new(Box::new(fake));
+        let executor =
+            move |p: &Proposal| -> Result<String, String> { Ok(format!("content of {}", p.tool)) };
+        let out = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "native 场景",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-native",
+                budget: &RunBudget::default(),
+                max_iterations: 10,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.run.status, "completed_execution");
+        assert_eq!(out.output, "native done");
+        let props = proposals(&store, &out.run.id).unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].tool, "read_file");
+        assert_eq!(props[0].decision, "executed");
+
+        // transcript：checkpoint 内 assistant 携带 tool_calls（call_0），
+        // tool 结果消息以同一 call_id 回传（不再降级 user）。
+        let state: String = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT state FROM agent_checkpoints WHERE agent_run_id=?1 ORDER BY seq DESC LIMIT 1",
+                    [&out.run.id],
+                    |r| r.get(0),
+                )
+                .map_err(sg_store::Error::from)
+            })
+            .unwrap();
+        let has_call_id = state.contains(r#""tool_call_id":"call_0""#)
+            || state.contains(r#""tool_call_id": "call_0""#);
+        assert!(has_call_id, "checkpoint 应携带 call_id transcript：{state}");
+        let has_tool_calls = state.contains(r#""name":"read_file""#) || state.contains("read_file");
+        assert!(has_tool_calls);
+    }
+
+    /// 原生并行 tool_calls 首期拒绝（ADR-033 决策 6）。
+    #[test]
+    fn native_parallel_tool_calls_fail_run() {
+        let store = setup();
+        let fake = FakeModel::default();
+        fake.enable_native();
+        // 数组脚本 → 单响应并行 tool_calls（桥接层）。
+        fake.push_response(
+            r#"[{"action":"read_file","arguments":{"path":"a.md"}},{"action":"read_file","arguments":{"path":"b.md"}}]"#,
+            5,
+            5,
+        );
+        let gateway = Gateway::new(Box::new(fake));
+        let executor = move |_p: &Proposal| -> Result<String, String> { Ok("ok".into()) };
+        let outcome = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "parallel",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-par",
+                budget: &RunBudget::default(),
+                max_iterations: 10,
+            },
+        );
+        let err = match outcome {
+            Ok(_) => panic!("并行 tool_calls 应被拒绝"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("model_protocol_violation"),
+            "应拒绝并行工具调用：{err}"
+        );
     }
 
     #[test]

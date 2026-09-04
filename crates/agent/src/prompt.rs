@@ -102,11 +102,13 @@ pub fn assemble_with_profile(
     let mut prefix = vec![ChatMessage {
         role: "developer".into(),
         content: boundary_content(env),
+        ..Default::default()
     }];
     if let Some(text) = profile_text.filter(|t| !t.trim().is_empty()) {
         prefix.push(ChatMessage {
             role: "developer".into(),
             content: text.to_string(),
+            ..Default::default()
         });
     }
     let rest = assemble_rest(env, knowledge, memory, goal);
@@ -122,16 +124,19 @@ fn assemble_rest(_env: &PromptEnv, knowledge: &str, memory: &str, goal: &str) ->
     let mut rest = vec![ChatMessage {
         role: "user".into(),
         content: knowledge.to_string(),
+        ..Default::default()
     }];
     if !memory.trim().is_empty() {
         rest.push(ChatMessage {
             role: "user".into(),
             content: memory.to_string(),
+            ..Default::default()
         });
     }
     rest.push(ChatMessage {
         role: "user".into(),
         content: goal.to_string(),
+        ..Default::default()
     });
     rest
 }
@@ -252,10 +257,12 @@ mod tests {
         grown.push(ChatMessage {
             role: "assistant".into(),
             content: "tool read_file({})".into(),
+            ..Default::default()
         });
         grown.push(ChatMessage {
             role: "tool".into(),
             content: "content".into(),
+            ..Default::default()
         });
         let s_small = serde_json::to_string(&a.prefix).unwrap();
         let s_slice = serde_json::to_string(&grown[..a.prefix.len()]).unwrap();

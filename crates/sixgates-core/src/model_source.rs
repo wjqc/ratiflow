@@ -15,6 +15,8 @@ struct Resolved {
     api_key: String,
     /// 供应商声明的输出上限（limits.maxOutputTokens）：请求侧超限会被端点 400 拒绝。
     max_output_tokens: Option<i64>,
+    /// Profile 能力快照（ADR-033 M1）：codec 协商来源。
+    capabilities: serde_json::Value,
 }
 
 /// limits_json 约定键：maxOutputTokens（兼容 max_output_tokens）；<=0 视为未声明。
@@ -95,6 +97,7 @@ impl ProfileModel {
                 model: profile.default_model.clone(),
                 api_key,
                 max_output_tokens: parse_max_output_tokens(&profile.limits),
+                capabilities: profile.capabilities.clone(),
             })
         };
 
@@ -153,6 +156,7 @@ impl ModelProvider for ProfileModel {
             messages: Vec::new(),
             max_tokens: 0,
             response_schema: None,
+            tools_json: None,
         }) {
             Ok((http, _)) => http.health_check(),
             Err(()) if self.fallback_enabled => self.fallback.health_check(),
@@ -170,6 +174,15 @@ impl ModelProvider for ProfileModel {
                 Err("model_unavailable: 未找到可用模型，请到“设置 → 模型”完成连接测试".into())
             }
         }
+    }
+
+    /// ADR-033 M1：返回主档/首个可用 Profile 的能力快照（供 codec 协商冻结）。
+    fn capability(&self) -> Option<serde_json::Value> {
+        Some(
+            self.resolve()
+                .map(|r| r.capabilities)
+                .unwrap_or(serde_json::json!({"nativeTools": false})),
+        )
     }
 }
 
