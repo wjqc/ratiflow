@@ -18,3 +18,15 @@ pub fn format_now(t: OffsetDateTime) -> String {
 pub fn parse(s: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
 }
+
+/// 当前时间 + N 天（RFC3339）。用于 receipt TTL 与 generation retention 截止。
+pub fn now_plus_days(days: i64) -> String {
+    let t = OffsetDateTime::now_utc() + time::Duration::days(days);
+    format_now(t)
+}
+
+/// 当前时间 + N 分钟（RFC3339）。用于 migration job 租约。
+pub fn now_plus_minutes(minutes: i64) -> String {
+    let t = OffsetDateTime::now_utc() + time::Duration::minutes(minutes);
+    format_now(t)
+}
