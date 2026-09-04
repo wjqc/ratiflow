@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sixgates.local/schemas/memory-candidate.json",
+  "title": "SixGates memory-candidate（ADR-032 / 实施方案 v1.0 §13 M4）",
+  "description": "Run 终态后由 memory_capture 任务抽取的候选记忆对象；模型输出必须是单个该形状 JSON。校验实现在 sg-memory::capture::parse_candidate_response。",
+  "type": "object",
+  "required": ["title", "kind", "body"],
+  "additionalProperties": false,
+  "properties": {
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "kind": { "enum": ["decision", "convention", "fact", "lesson", "preference"] },
+    "summary": { "type": "string", "maxLength": 512 },
+    "body": { "type": "string", "minLength": 1, "maxLength": 12288 }
+  }
+}

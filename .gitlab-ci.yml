@@ -78,6 +78,11 @@ protocol-e2e:
     - node tests/e2e-protocol/e2e.mjs
     - node tests/e2e-protocol/agent-e2e.mjs
     - node tests/e2e-protocol/settings-e2e.mjs
+    - node tests/e2e-protocol/trace-e2e.mjs
+    - node tests/e2e-protocol/gate-release-race-e2e.mjs
+    - node tests/e2e-protocol/rollback-e2e.mjs
+    - node tests/e2e-protocol/agent-routing-e2e.mjs
+    - node tests/e2e-protocol/memory-e2e.mjs
 
 electron-e2e:
   stage: e2e
