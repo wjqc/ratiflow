@@ -74,7 +74,7 @@ describe('设置页接线', () => {
   it('S12 记忆页：开关/计数/空状态与禁用态', async () => {
     render(<MemoryPage />);
     await waitFor(() => expect(screen.getByRole('switch', { name: /启用记忆注入/ })).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByText(/已确认 0/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/0 条记忆/)).toBeInTheDocument());
     // 默认项目未开启 → 开关未勾选（enabled=false 来自 settingsGet）。
     const sw = screen.getByRole('switch', { name: /启用记忆注入/ }) as HTMLInputElement;
     expect(sw.checked).toBe(false);

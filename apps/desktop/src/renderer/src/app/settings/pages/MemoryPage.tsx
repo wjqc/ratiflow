@@ -1,32 +1,23 @@
-// S12 项目记忆页（ADR-032 / 实施方案 §3）：项目开关 + 计数 + 搜索/筛选 + 文件式列表
-// + Drawer 详情；新建/导入/导出/归档恢复/两步清除全流程；全状态覆盖（§3.6）。
+// S12 项目记忆页（参考稿对齐版）：工作区记忆开关卡片 → 项目/计数 + 搜索 →
+// 「文件」列表（slug.md + 相对时间 + 注入开关）；新建/导入/导出在列表工具行。
+// 不区分类型；状态详情在抽屉内查看（§3.6 状态仍全覆盖）。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpc } from '../../../rpc/client';
 import { rpcErrText } from '../../../lib/rpcError';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
+import { IconRefresh } from '../../../components/Icons';
 import { MemoryList } from '../components/MemoryList';
 import { MemoryDrawer } from '../components/MemoryDrawer';
 import { MemoryCandidates } from '../components/MemoryCandidates';
-import type { MemoryListResult, MemorySettingsInfo } from '../types';
+import type { MemoryListItem, MemoryListResult, MemorySettingsInfo } from '../types';
 
 interface ProjectLite {
   id: string;
   name: string;
   archivedAt: string | null;
 }
-
-const FILTERS: Array<{ id: string; label: string; kinds?: string[]; statuses?: string[] }> = [
-  { id: 'all', label: '全部' },
-  { id: 'decision', label: '决策', kinds: ['decision'] },
-  { id: 'convention', label: '约定', kinds: ['convention'] },
-  { id: 'fact', label: '事实', kinds: ['fact'] },
-  { id: 'lesson', label: '经验', kinds: ['lesson'] },
-  { id: 'preference', label: '偏好', kinds: ['preference'] },
-  { id: 'proposed', label: '待确认', statuses: ['proposed'] },
-  { id: 'archived', label: '已归档', statuses: ['archived'] },
-];
 
 export function MemoryPage() {
   const [projects, setProjects] = useState<ProjectLite[]>([]);
@@ -38,7 +29,6 @@ export function MemoryPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState('all');
   const [toggling, setToggling] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [revealExportId, setRevealExportId] = useState<string | null>(null);
@@ -47,10 +37,9 @@ export function MemoryPage() {
   const requestSeq = useRef(0);
   const debounceRef = useRef<number | null>(null);
 
-  const activeFilter = FILTERS.find((f) => f.id === filter) ?? FILTERS[0];
   const featureOff = settings ? !settings.featureEnabled : false;
   // 全局 flag 只锁注入开关与捕获；浏览/编辑/导入导出/归档/清除是数据控制路径，不受限（§3.3/§16.2/MEM-029）。
-  const readOnly = false;
+  const archivedProject = projects.find((p) => p.id === projectId)?.archivedAt != null;
 
   // 项目列表（首个未归档项目默认选中）。
   useEffect(() => {
@@ -78,7 +67,7 @@ export function MemoryPage() {
   }, []);
 
   const loadList = useCallback(
-    async (pid: string, q: string, f: (typeof FILTERS)[number]) => {
+    async (pid: string, q: string) => {
       const seq = ++requestSeq.current;
       setLoading(true);
       setListError(null);
@@ -86,8 +75,6 @@ export function MemoryPage() {
         const res = await rpc<MemoryListResult>('memory.list', {
           projectId: pid,
           query: q.trim() || undefined,
-          statuses: f.statuses,
-          kinds: f.kinds,
           limit: 50,
         });
         // 旧请求结果不得覆盖新 query（§7.1）。
@@ -108,8 +95,8 @@ export function MemoryPage() {
 
   useEffect(() => {
     if (!projectId) return;
-    void loadList(projectId, query, activeFilter);
-  }, [projectId, query, activeFilter, loadList]);
+    void loadList(projectId, query);
+  }, [projectId, query, refreshKey, loadList]);
 
   // 搜索 250ms debounce。
   const onQueryChange = (v: string) => {
@@ -119,7 +106,7 @@ export function MemoryPage() {
   };
 
   const toggleEnabled = async () => {
-    if (!projectId || !settings || toggling || readOnly) return;
+    if (!projectId || !settings || toggling || featureOff) return;
     setToggling(true);
     setNotice(null);
     try {
@@ -139,6 +126,34 @@ export function MemoryPage() {
     }
   };
 
+  // 行内注入开关：active ↔ archived（归档可恢复；其余状态在抽屉内裁决）。
+  const toggleItemActive = async (item: MemoryListItem) => {
+    if (!projectId) return;
+    setNotice(null);
+    try {
+      if (item.status === 'active') {
+        await rpc('memory.archive', {
+          projectId,
+          memoryId: item.id,
+          expectedRevision: item.revision,
+          idempotencyKey: crypto.randomUUID(),
+        });
+      } else {
+        await rpc('memory.restore', {
+          projectId,
+          memoryId: item.id,
+          expectedRevision: item.revision,
+          idempotencyKey: crypto.randomUUID(),
+        });
+      }
+      setRefreshKey((k) => k + 1);
+      if (projectId) void loadList(projectId, query);
+    } catch (e) {
+      setNotice(rpcErrText(e) || '操作失败');
+      if (projectId) void loadList(projectId, query);
+    }
+  };
+
   const doImport = async (mode: 'proposed' | 'active') => {
     if (!projectId) return;
     const picked = await window.sixgates.selectFile();
@@ -153,7 +168,8 @@ export function MemoryPage() {
         idempotencyKey: crypto.randomUUID(),
       });
       setNotice(`导入完成：新建 ${res.created?.length ?? 0} 条，跳过/去重 ${res.duplicates?.length ?? 0} 条`);
-      if (projectId) void loadList(projectId, query, activeFilter);
+      setRefreshKey((k) => k + 1);
+      if (projectId) void loadList(projectId, query);
     } catch (e) {
       setNotice(rpcErrText(e) || '导入失败');
     }
@@ -182,10 +198,27 @@ export function MemoryPage() {
   };
 
   const counts = list?.counts ?? {};
-  const archivedProject = projects.find((p) => p.id === projectId)?.archivedAt != null;
+  const total =
+    (counts.active ?? 0) + (counts.proposed ?? 0) + (counts.conflicted ?? 0) + (counts.archived ?? 0);
 
   const emptyState = useMemo(() => {
-    if (queryInput.trim()) return <>没有匹配「{queryInput}」的记忆。<button type="button" className="sg-btn" onClick={() => { setQuery(''); setQueryInput(''); }}>清除筛选</button></>;
+    if (queryInput.trim()) {
+      return (
+        <>
+          没有匹配「{queryInput}」的记忆。
+          <button
+            type="button"
+            className="sg-btn"
+            onClick={() => {
+              setQuery('');
+              setQueryInput('');
+            }}
+          >
+            清除筛选
+          </button>
+        </>
+      );
+    }
     if (featureOff) return '项目记忆功能未开启：可浏览与编辑，注入由管理员/版本开关控制。';
     if (settings?.enabled === false) return '当前项目未开启记忆。开启后新 Run 才会复用已确认记忆；也可以先新建或导入。';
     return '还没有记忆。新建一条，或从 Markdown 导入。';
@@ -213,29 +246,12 @@ export function MemoryPage() {
                 disabled={!projectId || !settings || toggling || featureOff}
                 onChange={() => void toggleEnabled()}
               />
-              <span>启用记忆注入（每 Run 最多 {settings?.maxEntries ?? 8} 条 / {Math.round((settings?.maxBytes ?? 12288) / 1024)} KiB）</span>
+              <span>
+                启用记忆注入（每 Run 最多 {settings?.maxEntries ?? 8} 条 / {Math.round((settings?.maxBytes ?? 12288) / 1024)} KiB）
+              </span>
             </label>
             {featureOff ? <StatusPill kind="readonly" label="功能由当前版本/管理员关闭" /> : null}
             {archivedProject ? <StatusPill kind="readonly" label="项目已归档：只读浏览" /> : null}
-          </div>
-          <div className="sg-memory-project-row">
-            <label className="sg-field">
-              <span>项目</span>
-              <select value={projectId ?? ''} onChange={(e) => { setDrawer(null); setProjectId(e.target.value || null); }}>
-                {projects.length === 0 ? <option value="">（暂无项目）</option> : null}
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id} disabled={p.archivedAt != null}>
-                    {p.name}{p.archivedAt ? '（已归档）' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <span className="sg-memory-counts" aria-label="记忆计数">
-              已确认 {counts.active ?? 0} · 待确认 {counts.proposed ?? 0} · 冲突 {counts.conflicted ?? 0} · 已归档 {counts.archived ?? 0}
-            </span>
-            <button type="button" className="sg-btn" onClick={() => projectId && void loadList(projectId, query, activeFilter)}>
-              刷新
-            </button>
           </div>
           {settingsError ? (
             <div role="alert" className="sg-memory-banner sg-memory-banner--error">
@@ -257,50 +273,81 @@ export function MemoryPage() {
           ) : null}
         </SettingsSection>
 
+        {/* 参考稿布局：[项目▾ | N 条记忆] …… [搜索记忆文件…] */}
+        <div className="sg-memory-projectbar">
+          <label className="sg-memory-project">
+            <select
+              value={projectId ?? ''}
+              aria-label="选择项目"
+              onChange={(e) => {
+                setDrawer(null);
+                setProjectId(e.target.value || null);
+              }}
+            >
+              {projects.length === 0 ? <option value="">（暂无项目）</option> : null}
+              {projects.map((p) => (
+                <option key={p.id} value={p.id} disabled={p.archivedAt != null}>
+                  {p.name}
+                  {p.archivedAt ? '（已归档）' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="sg-memory-total" aria-label="记忆总数">
+            {total} 条记忆
+          </span>
+          <input
+            type="search"
+            className="sg-memory-search"
+            aria-label="搜索记忆文件"
+            placeholder="搜索记忆文件…"
+            value={queryInput}
+            onChange={(e) => onQueryChange(e.target.value)}
+          />
+        </div>
+
         <SettingsSection
-          title="记忆列表"
+          title="文件"
           actions={
             <div className="sg-memory-toolbar">
-              <input
-                type="search"
-                className="sg-memory-search"
-                aria-label="搜索记忆"
-                placeholder="搜索标题与正文…"
-                value={queryInput}
-                onChange={(e) => onQueryChange(e.target.value)}
-              />
-              <button type="button" className="sg-btn" onClick={() => setDrawer({ id: null, create: true })} disabled={!projectId || readOnly || archivedProject}>
+              <button
+                type="button"
+                className="sg-btn"
+                aria-label="新建记忆"
+                onClick={() => setDrawer({ id: null, create: true })}
+                disabled={!projectId || archivedProject}
+              >
                 新建记忆
               </button>
-              <button type="button" className="sg-btn" onClick={() => void doImport('proposed')} disabled={!projectId || archivedProject}>
+              <button
+                type="button"
+                className="sg-btn"
+                onClick={() => void doImport('proposed')}
+                disabled={!projectId || archivedProject}
+              >
                 导入 Markdown
               </button>
               <button type="button" className="sg-btn" onClick={() => void doExport(false)} disabled={!projectId}>
                 导出
               </button>
+              <button
+                type="button"
+                className="sg-btn"
+                aria-label="刷新记忆列表"
+                onClick={() => projectId && void loadList(projectId, query)}
+              >
+                <IconRefresh size={14} />
+              </button>
             </div>
           }
         >
-          <div className="sg-memory-filters" role="group" aria-label="筛选">
-            {FILTERS.map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                className={`sg-memory-filter ${filter === f.id ? 'sg-memory-filter--active' : ''}`}
-                aria-pressed={filter === f.id}
-                onClick={() => setFilter(f.id)}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
-
           {projectId ? (
             <MemoryCandidates
               projectId={projectId}
               refreshKey={refreshKey}
               onChanged={() => {
-                if (projectId) void loadList(projectId, query, activeFilter);
+                setRefreshKey((k) => k + 1);
+                if (projectId) void loadList(projectId, query);
               }}
             />
           ) : null}
@@ -311,6 +358,7 @@ export function MemoryPage() {
               loading={loading}
               activeId={drawer?.id ?? null}
               onSelect={(id) => setDrawer({ id, create: false })}
+              onToggleActive={(item) => void toggleItemActive(item)}
               empty={emptyState}
             />
           </div>
@@ -321,7 +369,7 @@ export function MemoryPage() {
               <button
                 type="button"
                 className="sg-btn"
-                onClick={() => projectId && void loadList(projectId, query, activeFilter)}
+                onClick={() => projectId && void loadList(projectId, query)}
               >
                 重试
               </button>
@@ -335,12 +383,12 @@ export function MemoryPage() {
           projectId={projectId}
           memoryId={drawer.id}
           createMode={drawer.create}
-          readOnly={readOnly || archivedProject}
+          readOnly={archivedProject}
           onClose={() => setDrawer(null)}
           onChanged={() => {
             setRefreshKey((k) => k + 1);
             if (projectId) {
-              void loadList(projectId, query, activeFilter);
+              void loadList(projectId, query);
               void loadSettings(projectId);
             }
           }}
