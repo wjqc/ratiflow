@@ -37,6 +37,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0022_model_profile_models.sql"),
     ),
     (23, include_str!("../migrations/0023_project_memory.sql")),
+    (
+        24,
+        include_str!("../migrations/0024_model_turns.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。
@@ -53,6 +57,15 @@ pub fn run(store: &crate::Store) -> Result<(), crate::Error> {
     })?;
 
     let applied = applied_versions(store)?;
+    // 未来 schema 守卫（RFC v1.0 §19.1/A38）：DB 中存在高于本应用支持上限的已应用版本
+    // → 拒绝打开，不允许静默 no-op 继续读写不认识的数据。
+    if let Some(&max_known) = MIGRATIONS.iter().map(|(v, _)| v).max() {
+        if applied.iter().any(|v| *v > max_known) {
+            return Err(crate::Error::Message(
+                "schema version above supported maximum: please upgrade the application".into(),
+            ));
+        }
+    }
     let pending: Vec<&(i64, &str)> = MIGRATIONS
         .iter()
         .filter(|(v, _)| !applied.contains(v))
@@ -61,37 +74,85 @@ pub fn run(store: &crate::Store) -> Result<(), crate::Error> {
         return Ok(());
     }
 
-    // 预迁移备份（在线快照）。
-    let _ = crate::backup::snapshot(store);
+    // 预迁移备份是硬 Gate（RFC v1.0 §12.1/A48）：快照失败立即中止，DB 保持迁移前状态。
+    // 仅对已含 objects 表的库强制（0009 起才有数据对象）；全新空库与 v2 骨架（version<9）无可保数据。
+    if applied.iter().max() >= Some(&9) {
+        crate::backup::snapshot(store)?;
+    }
 
-    // BEGIN IMMEDIATE + 锁内重读版本表：多进程同时升级（双开应用）时，
-    // 后到者在写锁内发现版本已推进，安全降级为 no-op，
-    // 不会对同一版本重复执行 ALTER 而报 duplicate column。
-    store.with_tx_immediate(|tx| {
-        let applied: std::collections::HashSet<i64> = {
-            let mut stmt = tx.prepare("SELECT version FROM schema_migrations")?;
-            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-            let mut set = std::collections::HashSet::new();
-            for row in rows {
-                set.insert(row?);
+    // RFC v1.0 §12.1 runner 契约：
+    // - FK 必须在事务开始前关闭（事务内 PRAGMA foreign_keys 是 no-op）；
+    // - 提交前在同一事务内跑 foreign_key_check，违例即 ROLLBACK；
+    // - commit/rollback 后无论成败恢复 FK ON（RAII 语义）；
+    // - 提交后再做一次防御性 foreign_key_check。
+    store.with_conn(|conn| {
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let outcome = (|| -> Result<(), crate::Error> {
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| crate::Error::Message(format!("begin migration tx: {e}")))?;
+            let inner = (|| -> Result<(), crate::Error> {
+                // 写锁内重读版本表：双开应用时后到者安全降级为 no-op。
+                let applied: std::collections::HashSet<i64> = {
+                    let mut stmt = conn.prepare("SELECT version FROM schema_migrations")?;
+                    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+                    let mut set = std::collections::HashSet::new();
+                    for row in rows {
+                        set.insert(row?);
+                    }
+                    set
+                };
+                for (version, body) in MIGRATIONS {
+                    if applied.contains(version) {
+                        continue;
+                    }
+                    conn.execute_batch(body).map_err(|e| {
+                        crate::Error::Message(format!("migration {version:04}: {e}"))
+                    })?;
+                    conn.execute(
+                        "INSERT INTO schema_migrations(version) VALUES (?1)",
+                        [version],
+                    )?;
+                }
+                let violations = fk_violations(conn)?;
+                if violations > 0 {
+                    return Err(crate::Error::Message(format!(
+                        "foreign_key_check: {violations} violations in migration tx"
+                    )));
+                }
+                Ok(())
+            })();
+            match inner {
+                Ok(()) => conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| crate::Error::Message(format!("commit migration: {e}"))),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
             }
-            set
-        };
-        for (version, body) in MIGRATIONS {
-            if applied.contains(version) {
-                continue;
-            }
-            tx.execute_batch(body)
-                .map_err(|e| crate::Error::Message(format!("migration {version:04}: {e}")))?;
-            tx.execute(
-                "INSERT INTO schema_migrations(version) VALUES (?1)",
-                [version],
-            )?;
-        }
-        Ok(())
+        })();
+        // 恢复 FK ON 不依赖调用方自觉（§12.1 第 4 条）。
+        let _ = conn.pragma_update(None, "foreign_keys", "ON");
+        outcome
     })?;
+    // 提交后防御性复核（§12.1 第 4 条）。
     foreign_key_check(store)?;
     store.quick_check()
+}
+
+fn fk_violations(conn: &Connection) -> Result<usize, crate::Error> {
+    let mut stmt = conn
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|e| crate::Error::Message(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| crate::Error::Message(e.to_string()))?;
+    let mut n = 0usize;
+    for row in rows {
+        let _ = row.map_err(|e| crate::Error::Message(e.to_string()))?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// 外键一致性（蓝图 §13.4）：迁移后立即校验，违例即失败（不带着断链服务）。
