@@ -76,7 +76,7 @@ fn assert_err_token<T>(result: Result<T, sg_store::Error>, token: &str) {
 #[test]
 fn migration_empty_db_reaches_v23() {
     let (store, _t) = open_store("sg-mem-mig");
-    assert_eq!(store.schema_version().unwrap(), 29);
+    assert_eq!(store.schema_version().unwrap(), 30);
     // v23 表存在。
     let n: i64 = store
         .with_conn(|c| {
@@ -128,7 +128,7 @@ fn migration_populated_v22_to_v23() {
         add_project_raw(&conn, "pj");
     }
     let store = Store::open(&t.path, "test").unwrap();
-    assert_eq!(store.schema_version().unwrap(), 29);
+    assert_eq!(store.schema_version().unwrap(), 30);
     store.quick_check().unwrap();
 }
 

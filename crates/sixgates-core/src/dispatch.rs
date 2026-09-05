@@ -2383,9 +2383,8 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
             .collect(),
     };
     // M4：AgentProfile developer 层（persona/SOP/输出契约；无 selection 时为 None）。
-    // 技能段（启用即注入，用户级）：拼入 profile developer 层之后、知识层之前由 assemble 定序。
-    let skills_text = sg_settings::skills_ext::enabled_bodies_text(store).unwrap_or_default();
-    let profile_text: Option<String> = {
+    // 技能段（启用即注入；全局技能恒注入，绑定技能仅该 Agent 的 Run）：拼入 profile 层之后。
+    let (profile_text, active_profile_id): (Option<String>, Option<String>) = {
         let sel_id: String = store
             .with_conn(|conn| {
                 conn.query_row(
@@ -2396,34 +2395,40 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
                 .map_err(Error::from)
             })
             .unwrap_or_default();
-        let profile = if sel_id.is_empty() {
+        let resolved = if sel_id.is_empty() {
             None
         } else {
-            sg_agent::router::get(store, &sel_id).ok().and_then(|sel| {
-                sg_agent::profile::get_version(store, &sel.resolved_profile_version_id)
-                    .ok()
-                    .and_then(|ver| {
-                        sg_agent::profile::version_texts(store, &ver)
-                            .ok()
-                            .map(|(persona, sop)| {
-                                format!(
-                                    "【Agent 角色档案】\n角色说明：{}\n标准作业流程：{}\n（profile v{} · digest {}）",
-                                    if persona.is_empty() { "（未配置）" } else { persona.trim() },
-                                    if sop.is_empty() { "（未配置）" } else { sop.trim() },
-                                    ver.version_no,
-                                    ver.content_digest
-                                )
-                            })
-                    })
-            })
+            sg_agent::router::get(store, &sel_id)
+                .ok()
+                .and_then(|sel| sg_agent::profile::get_version(store, &sel.resolved_profile_version_id).ok())
+                .map(|ver| {
+                    let text = sg_agent::profile::version_texts(store, &ver).ok().map(|(persona, sop)| {
+                        format!(
+                            "【Agent 角色档案】\n角色说明：{}\n标准作业流程：{}\n（profile v{} · digest {}）",
+                            if persona.is_empty() { "（未配置）" } else { persona.trim() },
+                            if sop.is_empty() { "（未配置）" } else { sop.trim() },
+                            ver.version_no,
+                            ver.content_digest
+                        )
+                    });
+                    (text, ver.profile_id)
+                })
         };
+        let (profile, profile_id) = match resolved {
+            Some((text, pid)) => (text, Some(pid)),
+            None => (None, None),
+        };
+        let skills_text =
+            sg_settings::skills_ext::enabled_bodies_text(store, profile_id.as_deref())
+                .unwrap_or_default();
         // 技能段追加到 profile 层文本（Run 内冻结、确定性拼接，保持前缀稳定）。
-        match (profile, skills_text.is_empty()) {
+        let combined = match (profile, skills_text.is_empty()) {
             (None, true) => None,
             (None, false) => Some(skills_text),
             (Some(text), false) => Some(format!("{text}\n\n{skills_text}")),
             (Some(text), true) => Some(text),
-        }
+        };
+        (combined, profile_id)
     };
     let initial = sg_agent::prompt::assemble_with_profile(
         &env,

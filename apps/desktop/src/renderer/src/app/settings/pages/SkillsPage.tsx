@@ -12,9 +12,17 @@ interface SkillInfo {
   bodyBytes: number;
   enabled: boolean;
   source: string;
+  agentProfileId: string | null;
+  agentName: string | null;
   revision: number;
   createdAt: string;
   updatedAt: string;
+}
+
+interface AgentLite {
+  id: string;
+  name: string;
+  enabled: boolean;
 }
 
 const NAME_RE = /^[A-Za-z0-9_-]+$/;
@@ -37,12 +45,13 @@ export function SkillsPage() {
   const [items, setItems] = useState<SkillInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [agents, setAgents] = useState<AgentLite[]>([]);
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
   const [busyId, setBusyId] = useState('');
   const [actionsOpen, setActionsOpen] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({ name: '', description: '', body: '' });
+  const [form, setForm] = useState<{ name: string; description: string; body: string; agentProfileId: string | null }>({ name: '', description: '', body: '', agentProfileId: null });
   const [editing, setEditing] = useState<SkillInfo | null>(null);
   const [editBody, setEditBody] = useState('');
   const debounceRef = useRef<number | null>(null);
@@ -57,6 +66,13 @@ export function SkillsPage() {
     }
   }, []);
   useEffect(() => { void load(); }, [load]);
+
+  // Agent 列表（绑定选择器数据源；全局 + 各 Agent）。
+  useEffect(() => {
+    rpc<{ items: AgentLite[] }>('agentProfile.list', {})
+      .then((res) => setAgents((res.items ?? []).filter((a) => a.enabled)))
+      .catch(() => setAgents([]));
+  }, []);
 
   const onQueryChange = (v: string) => {
     setQueryInput(v);
@@ -85,6 +101,25 @@ export function SkillsPage() {
       setItems((cur) => (cur ?? []).map((x) => (x.id === updated.id ? updated : x)));
     } catch (e) {
       setError(rpcErrorMessage(e) || '操作失败');
+      void load();
+    } finally {
+      setBusyId('');
+    }
+  };
+
+  // 改绑范围：'' = 全局，否则 Agent id。显式传 agentProfileId（null=全局）。
+  const bind = async (s: SkillInfo, agentId: string) => {
+    setBusyId(s.id);
+    setError(null);
+    try {
+      const updated = await rpc<SkillInfo>('skill.update', {
+        skillId: s.id,
+        agentProfileId: agentId === '' ? null : agentId,
+        expectedRevision: s.revision,
+      });
+      setItems((cur) => (cur ?? []).map((x) => (x.id === updated.id ? updated : x)));
+    } catch (e) {
+      setError(rpcErrorMessage(e) || '绑定失败');
       void load();
     } finally {
       setBusyId('');
@@ -151,9 +186,10 @@ export function SkillsPage() {
         description: form.description.trim(),
         body: form.body,
         source: 'manual',
+        ...(form.agentProfileId ? { agentProfileId: form.agentProfileId } : {}),
       });
       setNotice(`技能「${name}」已创建并启用`);
-      setForm({ name: '', description: '', body: '' });
+      setForm({ name: '', description: '', body: '', agentProfileId: null });
       setShowCreate(false);
       await load();
     } catch (e) {
@@ -267,6 +303,22 @@ export function SkillsPage() {
                 onChange={(e) => setForm({ ...form, description: e.target.value })} />
             </div>
           </div>
+          <div className="sg-set-item">
+            <div className="sg-set-item-copy">
+              <label htmlFor="skill-agent" className="sg-set-item-title">生效范围</label>
+              <small className="sg-set-item-desc">全局 = 注入所有 Run；绑定 Agent = 仅该 Agent 的 Run 注入</small>
+            </div>
+            <div className="sg-set-item-control">
+              <select id="skill-agent" className="sg-select" style={{ width: 'auto' }}
+                value={form.agentProfileId ?? ''}
+                onChange={(e) => setForm({ ...form, agentProfileId: e.target.value === '' ? null : e.target.value })}>
+                <option value="">全局生效</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.id}>绑定：{a.name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
           <div className="sg-set-item" style={{ gridTemplateColumns: '1fr' }}>
             <div className="sg-set-item-copy">
               <label htmlFor="skill-body" className="sg-set-item-title">正文（Markdown）</label>
@@ -305,9 +357,23 @@ export function SkillsPage() {
                   </button>
                   <small className="sg-set-item-desc">
                     {s.description || '（无描述）'} · {s.source === 'import' ? '导入' : '手动'}
+                    {s.agentName ? ` · 仅 ${s.agentName} 生效` : ' · 全局生效'}
                   </small>
                 </div>
                 <div className="sg-set-item-control">
+                  <select
+                    className="sg-select"
+                    style={{ marginRight: 10, width: 'auto' }}
+                    aria-label={`技能 ${s.name} 生效范围`}
+                    value={s.agentProfileId ?? ''}
+                    disabled={busyId === s.id}
+                    onChange={(e) => void bind(s, e.target.value)}
+                  >
+                    <option value="">全局生效</option>
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>绑定：{a.name}</option>
+                    ))}
+                  </select>
                   <SettingsToggle
                     label={`启用技能 ${s.name}`}
                     checked={s.enabled}

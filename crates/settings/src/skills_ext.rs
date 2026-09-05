@@ -19,6 +19,9 @@ pub struct Skill {
     pub body_bytes: i64,
     pub enabled: bool,
     pub source: String,
+    /// 绑定的 Agent（agent_profiles.id）；None = 全局（所有 Run 注入）。
+    pub agent_profile_id: Option<String>,
+    pub agent_name: Option<String>,
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -33,6 +36,8 @@ fn row_skill(r: &rusqlite::Row<'_>) -> rusqlite::Result<Skill> {
         body_bytes: r.get(4)?,
         enabled: r.get::<_, i64>(5)? != 0,
         source: r.get(6)?,
+        agent_profile_id: r.get(10)?,
+        agent_name: r.get(11)?,
         revision: r.get(7)?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
@@ -40,7 +45,9 @@ fn row_skill(r: &rusqlite::Row<'_>) -> rusqlite::Result<Skill> {
 }
 
 const SKILL_COLUMNS: &str =
-    "id, name, description, body_object_sha256, body_bytes, enabled, source, revision, created_at, updated_at";
+    "s.id, s.name, s.description, s.body_object_sha256, s.body_bytes, s.enabled, s.source, s.revision, s.created_at, s.updated_at, s.agent_profile_id, p.name";
+
+const SKILL_FROM: &str = "skills s LEFT JOIN agent_profiles p ON p.id = s.agent_profile_id";
 
 fn validate_name(name: &str) -> Result<(), SettingsError> {
     if name.is_empty()
@@ -79,6 +86,7 @@ pub fn create(
     description: &str,
     body: &str,
     source: &str,
+    agent_profile_id: Option<&str>,
 ) -> SettingsResult<Skill> {
     validate_name(name)?;
     if !matches!(source, "manual" | "import") {
@@ -87,14 +95,15 @@ pub fn create(
     if let Some(existing) = skill_by_name(store, name)? {
         return Ok(existing);
     }
+    ensure_profile(store, agent_profile_id)?;
     let (body_sha, body_bytes) = put_body(store, body)?;
     let id = ids::new_id("skill");
     let now = timefmt::now();
     store
         .with_conn(|conn| {
             conn.execute(
-                "INSERT INTO skills(id, name, description, body_object_sha256, body_bytes, enabled, source, revision, created_at, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,1,?6,1,?7,?7)",
+                "INSERT INTO skills(id, name, description, body_object_sha256, body_bytes, enabled, source, revision, created_at, updated_at, agent_profile_id)
+                 VALUES (?1,?2,?3,?4,?5,1,?6,1,?7,?7,?8)",
                 rusqlite::params![
                     id,
                     name,
@@ -102,7 +111,8 @@ pub fn create(
                     body_sha,
                     body_bytes,
                     source,
-                    now
+                    now,
+                    agent_profile_id
                 ],
             )
             .map_err(Error::from)
@@ -115,7 +125,7 @@ pub fn list(store: &Store) -> SettingsResult<Vec<Skill>> {
     store
         .with_conn(|conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {SKILL_COLUMNS} FROM skills ORDER BY name"
+                "SELECT {SKILL_COLUMNS} FROM {SKILL_FROM} ORDER BY s.name"
             ))?;
             let rows = stmt.query_map([], row_skill)?;
             let mut out = Vec::new();
@@ -132,7 +142,7 @@ fn skill_by_name(store: &Store, name: &str) -> SettingsResult<Option<Skill>> {
         .with_conn(|conn| {
             Ok(conn
                 .query_row(
-                    &format!("SELECT {SKILL_COLUMNS} FROM skills WHERE name=?1"),
+                    &format!("SELECT {SKILL_COLUMNS} FROM {SKILL_FROM} WHERE s.name=?1"),
                     [name],
                     row_skill,
                 )
@@ -145,12 +155,37 @@ fn not_found(id: &str) -> SettingsError {
     SettingsError::new("INVALID_PARAMS", format!("技能 {id} 不存在"))
 }
 
+/// 绑定校验：agent_profiles 中必须存在（NULL 直接放行）。
+fn ensure_profile(store: &Store, agent_profile_id: Option<&str>) -> Result<(), SettingsError> {
+    let Some(pid) = agent_profile_id else {
+        return Ok(());
+    };
+    let n: i64 = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_profiles WHERE id=?1",
+                    [pid],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0))
+        })
+        .map_err(store_err)?;
+    if n == 0 {
+        return Err(SettingsError::new(
+            "INVALID_PARAMS",
+            format!("Agent {pid} 不存在"),
+        ));
+    }
+    Ok(())
+}
+
 pub fn get(store: &Store, id: &str) -> SettingsResult<Skill> {
     let skill: Option<Skill> = store
         .with_conn(|conn| {
             Ok(conn
                 .query_row(
-                    &format!("SELECT {SKILL_COLUMNS} FROM skills WHERE id=?1"),
+                    &format!("SELECT {SKILL_COLUMNS} FROM {SKILL_FROM} WHERE s.id=?1"),
                     [id],
                     row_skill,
                 )
@@ -174,31 +209,64 @@ pub fn update(
     description: Option<&str>,
     body: Option<&str>,
     expected_revision: i64,
+    // 绑定三态：外层 None = 不改绑定；内层 None = 解绑为全局，Some(id) = 绑定该 Agent。
+    agent_profile_id: Option<Option<&str>>,
 ) -> SettingsResult<Skill> {
+    if let Some(Some(pid)) = agent_profile_id {
+        ensure_profile(store, Some(pid))?;
+    }
     let body_pair = match body {
         Some(text) => Some(put_body(store, text)?),
         None => None,
     };
     let updated = store
         .with_conn(|conn| {
-            let n = conn.execute(
-                "UPDATE skills SET
-                    description = COALESCE(?2, description),
-                    body_object_sha256 = COALESCE(?3, body_object_sha256),
-                    body_bytes = COALESCE(?4, body_bytes),
-                    revision = revision + 1,
-                    updated_at = ?5
-                 WHERE id=?1 AND revision=?6",
-                rusqlite::params![
-                    id,
-                    description.map(str::trim),
-                    body_pair.as_ref().map(|(sha, _)| sha.as_str()),
-                    body_pair.as_ref().map(|(_, size)| *size),
-                    timefmt::now(),
-                    expected_revision
-                ],
-            )
-            .map_err(Error::from)?;
+            // 绑定用显式赋值（Some(None) 需写成 NULL，COALESCE 表达不了解绑），故分支。
+            let bind_value: Option<&str> = match agent_profile_id {
+                Some(None) | None => None,
+                Some(Some(pid)) => Some(pid),
+            };
+            let n = if agent_profile_id.is_some() {
+                conn.execute(
+                    "UPDATE skills SET
+                        description = COALESCE(?2, description),
+                        body_object_sha256 = COALESCE(?3, body_object_sha256),
+                        body_bytes = COALESCE(?4, body_bytes),
+                        agent_profile_id = ?5,
+                        revision = revision + 1,
+                        updated_at = ?6
+                     WHERE id=?1 AND revision=?7",
+                    rusqlite::params![
+                        id,
+                        description.map(str::trim),
+                        body_pair.as_ref().map(|(sha, _)| sha.as_str()),
+                        body_pair.as_ref().map(|(_, size)| *size),
+                        bind_value,
+                        timefmt::now(),
+                        expected_revision
+                    ],
+                )
+                .map_err(Error::from)?
+            } else {
+                conn.execute(
+                    "UPDATE skills SET
+                        description = COALESCE(?2, description),
+                        body_object_sha256 = COALESCE(?3, body_object_sha256),
+                        body_bytes = COALESCE(?4, body_bytes),
+                        revision = revision + 1,
+                        updated_at = ?5
+                     WHERE id=?1 AND revision=?6",
+                    rusqlite::params![
+                        id,
+                        description.map(str::trim),
+                        body_pair.as_ref().map(|(sha, _)| sha.as_str()),
+                        body_pair.as_ref().map(|(_, size)| *size),
+                        timefmt::now(),
+                        expected_revision
+                    ],
+                )
+                .map_err(Error::from)?
+            };
             Ok(n)
         })
         .map_err(store_err)?;
@@ -258,10 +326,19 @@ pub fn remove(store: &Store, id: &str, expected_revision: i64) -> SettingsResult
 
 /// 已启用技能的注入文本（按名称排序，确定性前缀）：
 /// 技能段标题 + 不可信边界声明 + 每技能小节。总预算 32KB，超限按名称序保留前段并计数截断。
-pub fn enabled_bodies_text(store: &Store) -> SettingsResult<String> {
+pub fn enabled_bodies_text(store: &Store, agent_profile_id: Option<&str>) -> SettingsResult<String> {
     let mut sections: Vec<String> = Vec::new();
     for skill in list(store)? {
         if !skill.enabled {
+            continue;
+        }
+        // 绑定过滤：全局技能恒注入；绑定技能仅命中 Agent 的 Run 注入。
+        let applies = match (&skill.agent_profile_id, agent_profile_id) {
+            (None, _) => true,
+            (Some(bound), Some(current)) => bound == current,
+            (Some(_), None) => false,
+        };
+        if !applies {
             continue;
         }
         let bytes = objects::open(store, &skill.body_object_sha256).map_err(store_err)?;
@@ -317,24 +394,24 @@ mod tests {
     #[test]
     fn skill_lifecycle_with_cas_and_injection_text() {
         let store = setup();
-        let created = create(&store, "deploy-check", "部署检查清单", "部署前检查端点。", "manual").unwrap();
+        let created = create(&store, "deploy-check", "部署检查清单", "部署前检查端点。", "manual", None).unwrap();
         assert!(created.enabled);
         assert!(created.id.starts_with("skill"));
 
         // 同名幂等：返回既有，正文不覆盖。
-        let again = create(&store, "deploy-check", "另一个人", "另正文", "import").unwrap();
+        let again = create(&store, "deploy-check", "另一个人", "另正文", "import", None).unwrap();
         assert_eq!(again.id, created.id);
         assert_eq!(again.description, "部署检查清单");
 
         // 注入文本：启用时含正文。
-        let text = enabled_bodies_text(&store).unwrap();
+        let text = enabled_bodies_text(&store, None).unwrap();
         assert!(text.contains("### 技能：deploy-check"));
         assert!(text.contains("部署前检查端点。"));
 
         // 停用（CAS）→ 注入为空。
         let disabled = set_enabled(&store, &created.id, false, created.revision).unwrap();
         assert!(!disabled.enabled);
-        assert!(enabled_bodies_text(&store).unwrap().is_empty());
+        assert!(enabled_bodies_text(&store, None).unwrap().is_empty());
         // 旧 revision 再停用 → 冲突。
         assert!(set_enabled(&store, &created.id, true, created.revision).is_err());
 
@@ -345,6 +422,7 @@ mod tests {
             Some("新描述"),
             Some("部署前检查端点、日志与回滚。"),
             disabled.revision,
+            None,
         )
         .unwrap();
         assert_eq!(updated.description, "新描述");
@@ -359,10 +437,50 @@ mod tests {
     #[test]
     fn skill_input_guards() {
         let store = setup();
-        assert!(create(&store, "非法 名", "", "正文", "manual").is_err());
-        assert!(create(&store, "ok-name", "", "   ", "manual").is_err());
+        assert!(create(&store, "非法 名", "", "正文", "manual", None).is_err());
+        assert!(create(&store, "ok-name", "", "   ", "manual", None).is_err());
         let leaky = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----";
-        let err = create(&store, "leaky", "", leaky, "manual").unwrap_err();
+        let err = create(&store, "leaky", "", leaky, "manual", None).unwrap_err();
         assert!(err.to_string().contains("secret") || err.to_string().contains("INTERNAL"), "{err}");
+    }
+
+    /// 绑定：绑到 Agent 的技能只在该 Agent 的 Run 注入；不存在 Agent 拒绝绑定。
+    #[test]
+    fn skill_binding_filters_injection_by_agent() {
+        let store = setup();
+        // 造一个 Agent profile。
+        let pid = "ap_test";
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO agent_profiles(id, project_id, name, adapter_kind, enabled, created_at, updated_at)
+                     VALUES (?1, NULL, '部署 Agent', 'local_harness', 1, datetime('now'), datetime('now'))",
+                    [pid],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let global = create(&store, "global-skill", "", "全局技能正文", "manual", None).unwrap();
+        let bound = create(&store, "agent-skill", "", "专属技能正文", "manual", Some(pid)).unwrap();
+        assert_eq!(bound.agent_profile_id.as_deref(), Some(pid));
+        assert_eq!(bound.agent_name.as_deref(), Some("部署 Agent"));
+        // 不存在的 Agent 拒绝。
+        assert!(create(&store, "orphan", "", "正文", "manual", Some("ap_missing")).is_err());
+
+        // 全局 Run：只注入全局技能；Agent Run：全局 + 绑定技能。
+        let global_text = enabled_bodies_text(&store, None).unwrap();
+        assert!(global_text.contains("全局技能正文"));
+        assert!(!global_text.contains("专属技能正文"));
+        let agent_text = enabled_bodies_text(&store, Some(pid)).unwrap();
+        assert!(agent_text.contains("全局技能正文"));
+        assert!(agent_text.contains("专属技能正文"));
+
+        // 解绑（外层 Some(None) → 全局）：此后 Agent Run 也注入。
+        let rebound = update(&store, &bound.id, None, None, bound.revision, Some(None)).unwrap();
+        assert_eq!(rebound.agent_profile_id, None);
+        let agent_text2 = enabled_bodies_text(&store, Some(pid)).unwrap();
+        assert!(agent_text2.contains("专属技能正文"));
+        let _ = global;
     }
 }

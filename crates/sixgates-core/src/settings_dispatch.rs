@@ -615,7 +615,8 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             let description = opt_s(p, "description").unwrap_or_default();
             let body = s(p, "body")?;
             let source = opt_s(p, "source").unwrap_or("manual");
-            let v = settings::skills_ext::create(store, name, description, body, source)
+            let agent_profile_id = opt_s(p, "agentProfileId");
+            let v = settings::skills_ext::create(store, name, description, body, source, agent_profile_id)
                 .map_err(serr)?;
             changed(store, "skill", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
@@ -624,12 +625,20 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             let skill_id = s(p, "skillId")?;
             let description = opt_s(p, "description");
             let body = opt_s(p, "body");
+            // 绑定三态：参数缺省不改；显式 null = 全局；字符串 = 绑定该 Agent。
+            let agent_profile_id = match p.get("agentProfileId") {
+                Some(Value::Null) | None if !p.as_object().map(|o| o.contains_key("agentProfileId")).unwrap_or(false) => None,
+                Some(Value::Null) => Some(None),
+                Some(v) => Some(v.as_str().map(String::from)),
+                None => None,
+            };
             let v = settings::skills_ext::update(
                 store,
                 skill_id,
                 description,
                 body,
                 n(p, "expectedRevision")?,
+                agent_profile_id.as_ref().map(|inner| inner.as_deref()),
             )
             .map_err(serr)?;
             changed(store, "skill", &v.id);

@@ -3432,6 +3432,11 @@
           "name": "source",
           "type": "string",
           "required": false
+        },
+        {
+          "name": "agentProfileId",
+          "type": "string",
+          "required": false
         }
       ],
       "result": "value"
@@ -3458,6 +3463,11 @@
           "name": "expectedRevision",
           "type": "integer",
           "required": true
+        },
+        {
+          "name": "agentProfileId",
+          "type": "string",
+          "required": false
         }
       ],
       "result": "value"

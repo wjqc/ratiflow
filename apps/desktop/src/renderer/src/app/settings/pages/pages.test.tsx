@@ -42,10 +42,12 @@ describe('设置页接线', () => {
         case 'skill.list':
           return ok({
             items: [
-              { id: 'skill_1', name: 'deploy-check', description: '部署检查清单', bodyBytes: 120, enabled: true, source: 'manual', revision: 1, createdAt: '', updatedAt: '' },
-              { id: 'skill_2', name: 'prd-writer', description: '', bodyBytes: 80, enabled: false, source: 'import', revision: 2, createdAt: '', updatedAt: '' },
+              { id: 'skill_1', name: 'deploy-check', description: '部署检查清单', bodyBytes: 120, enabled: true, source: 'manual', agentProfileId: null, agentName: null, revision: 1, createdAt: '', updatedAt: '' },
+              { id: 'skill_2', name: 'prd-writer', description: '', bodyBytes: 80, enabled: false, source: 'import', agentProfileId: 'agent_1', agentName: '文档 Agent', revision: 2, createdAt: '', updatedAt: '' },
             ],
           });
+        case 'agentProfile.list':
+          return ok({ items: [{ id: 'agent_1', name: '文档 Agent', enabled: true }] });
         case 'model.usage':
           return ok({
             tokensIn: 12000,
@@ -166,6 +168,14 @@ describe('设置页接线', () => {
     fireEvent.click(toggles[0]);
     await waitFor(() =>
       expect(rpcMock).toHaveBeenCalledWith('skill.setEnabled', expect.objectContaining({ skillId: 'skill_1', enabled: false })),
+    );
+    // 绑定选择器：显示范围描述；改绑发送 skill.update（显式 null=全局）。
+    expect(screen.getByText(/仅 文档 Agent 生效/)).toBeInTheDocument();
+    const selects = screen.getAllByRole('combobox', { name: /生效范围/ });
+    expect(selects).toHaveLength(2);
+    fireEvent.change(selects[1], { target: { value: '' } });
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith('skill.update', expect.objectContaining({ skillId: 'skill_2', agentProfileId: null })),
     );
   });
 

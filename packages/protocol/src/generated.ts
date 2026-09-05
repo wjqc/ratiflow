@@ -1506,6 +1506,7 @@ export interface SkillCreateParams {
   body: string;
   description?: string;
   source?: string;
+  agentProfileId?: string;
 }
 
 export interface SkillUpdateParams {
@@ -1513,6 +1514,7 @@ export interface SkillUpdateParams {
   expectedRevision: unknown;
   description?: string;
   body?: string;
+  agentProfileId?: string;
 }
 
 export interface SkillSetEnabledParams {
