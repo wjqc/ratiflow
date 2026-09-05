@@ -15,6 +15,7 @@ import { MemoryPage } from './pages/MemoryPage';
 import { ModelsPage } from './pages/ModelsPage';
 import { ToolsPage } from './pages/ToolsPage';
 import { McpPage } from './pages/McpPage';
+import { SkillsPage } from './pages/SkillsPage';
 import { AgentCenterPage } from './pages/AgentCenterPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { IntegrationsPage } from './pages/IntegrationsPage';
@@ -44,6 +45,8 @@ export default function SettingsShell({ section }: { section?: string }) {
         return <ToolsPage />;
       case 'mcp':
         return <McpPage />;
+      case 'skills':
+        return <SkillsPage />;
       case 'agent-center':
         return <AgentCenterPage />;
       case 'execution':

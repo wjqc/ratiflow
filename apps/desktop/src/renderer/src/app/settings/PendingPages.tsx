@@ -110,7 +110,14 @@ const DEFS: Record<string, PendingDef> = {
 };
 
 export function PendingSettingsPage({ id }: { id: keyof typeof DEFS }) {
-  const def = DEFS[id];
+  const def = DEFS[id] ?? {
+    title: '页面未接线',
+    scope: '本地' as const,
+    description: `路由 ${String(id)} 尚未映射到实现页面（路由表与页面壳不一致）。`,
+    features: [],
+    awaiting: [],
+    fallback: '请检查 SettingsShell 的分支注册。',
+  };
   return (
     <div className="sg-set-page">
       <SettingsPageHeader title={def.title} scope={def.scope} description={def.description} />

@@ -12,6 +12,8 @@ import { IntegrationsPage } from './IntegrationsPage';
 import { SkillsPage } from './SkillsPage';
 import { MemoryPage } from './MemoryPage';
 import { DiagnosticsPage } from '../DiagnosticsPage';
+import { SETTINGS_NAV } from '../settings-routes';
+import SettingsShell from '../SettingsShell';
 
 const rpcMock = vi.fn();
 function ok(body: unknown) { return Promise.resolve(body); }
@@ -66,7 +68,12 @@ describe('设置页接线', () => {
       rpc: (m: string, p: Record<string, unknown>) => rpcMock(m, p),
       hello: () => Promise.resolve({ ok: true }),
       selectFile: () => Promise.resolve(null),
+      selectDirectory: () => Promise.resolve(null),
       openExternal: () => Promise.resolve(),
+      appInfo: () => Promise.resolve({ desktopVersion: 'test', logDir: '/tmp', userDataDir: '/tmp' }),
+      openLogs: () => Promise.resolve(),
+      revealMemoryExport: () => Promise.resolve(false),
+      onEvent: () => () => {},
     };
   });
   afterEach(() => { delete (window as unknown as { sixgates?: unknown }).sixgates; });
@@ -220,4 +227,16 @@ describe('设置页接线', () => {
     await waitFor(() => expect(screen.getByText('近 30 天暂无每日模型调用量。')).toBeInTheDocument());
     expect(screen.queryByRole('img', { name: /近 30 天模型每日 Token 用量/ })).not.toBeInTheDocument();
   });
+  it('设置壳：导航表内 real 路由全部渲染且不落「未接线」占位（skills 接线回归）', async () => {
+    const realIds = SETTINGS_NAV.flatMap((g) => g.items.map((i) => i.id))
+      .filter((id) => id !== 'editors');
+    for (const id of realIds) {
+      cleanup();
+      const { container } = render(<SettingsShell section={id} />);
+      await waitFor(() => expect(container.textContent).not.toBe(''));
+      expect(container.textContent, `路由 ${id} 落入未接线占位`).not.toContain('页面未接线');
+    }
+  });
 });
+
+
