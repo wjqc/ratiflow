@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use sg_policy::Risk;
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
+pub mod dag;
 pub mod delivery;
 pub mod instance;
+pub mod plan;
 pub mod template;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
