@@ -221,9 +221,7 @@ impl ModelProvider for ModelHttp {
                 .unwrap_or_default()
                 .into(),
             tool_calls,
-            cached_tokens: parsed["usage"]["prompt_tokens_details"]["cached_tokens"]
-                .as_i64()
-                .unwrap_or(0),
+            cached_tokens: cached_tokens_from_usage(&parsed["usage"]),
             reasoning_tokens: parsed["usage"]["completion_tokens_details"]["reasoning_tokens"]
                 .as_i64()
                 .unwrap_or(0),
@@ -231,6 +229,15 @@ impl ModelProvider for ModelHttp {
             reasoning_state_status: "none".into(),
         })
     }
+}
+
+/// 缓存命中 Token 提取：OpenAI 形状（prompt_tokens_details.cached_tokens）优先，
+/// 回落 DeepSeek 顶层形状（prompt_cache_hit_tokens）；都没有时为 0。
+pub fn cached_tokens_from_usage(usage: &serde_json::Value) -> i64 {
+    usage["prompt_tokens_details"]["cached_tokens"]
+        .as_i64()
+        .or_else(|| usage["prompt_cache_hit_tokens"].as_i64())
+        .unwrap_or(0)
 }
 
 /// OpenAI 兼容 /chat/completions 请求体（流式/非流式共用同一构造，M1 transcript 形状不变）。
@@ -490,6 +497,17 @@ impl ModelProvider for FakeModel {
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
+
+    /// 缓存命中提取：OpenAI 嵌套形状 / DeepSeek 顶层形状 / 双缺失回落 0。
+    #[test]
+    fn cached_tokens_accepts_both_provider_shapes() {
+        let openai = serde_json::json!({"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 64}});
+        assert_eq!(cached_tokens_from_usage(&openai), 64);
+        let deepseek = serde_json::json!({"prompt_tokens": 100, "prompt_cache_hit_tokens": 64, "prompt_cache_miss_tokens": 36});
+        assert_eq!(cached_tokens_from_usage(&deepseek), 64);
+        let none = serde_json::json!({"prompt_tokens": 100});
+        assert_eq!(cached_tokens_from_usage(&none), 0);
+    }
 
     /// 本地 HTTP stub：按脚本逐请求返回原始响应（覆盖 ureq 真实传输路径）。
     fn serve(script: Vec<String>) -> String {

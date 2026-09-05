@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import AppShell from './AppShell';
@@ -20,6 +20,17 @@ describe('AppShell', () => {
           return ok({ items: [{ id: 'pj_1', name: '演示项目', namespace: 'team', project: 'demo', status: 'ready' }] });
         case 'workitem.list':
           return ok({ items: [{ id: 'wi_1', title: '支持 SSO 登录', currentGate: 'requirements' }] });
+        case 'diagnostics.check':
+          return ok({ generatedAt: '2026-09-05T00:00:00Z', local: [], integrations: [] });
+        case 'settings.summary':
+          return ok({
+            overallStatus: 'ready',
+            checkedAt: '2026-09-05T00:00:00Z',
+            blockers: [],
+            components: [],
+            dataSafety: { credentialRefCount: 0, lastBackup: null, auditEventsLast7Days: 0 },
+            recentChanges: [],
+          });
         default:
           return ok({});
       }
@@ -44,11 +55,43 @@ describe('AppShell', () => {
     expect(screen.getAllByText('需求关').length).toBeGreaterThan(0);
   });
 
-  it('侧栏展示项目与六关导航', async () => {
+  it('主侧栏只保留任务与审批入口，设置从底部齿轮进入', async () => {
     render(<AppShell />);
     await waitFor(() => expect(screen.getAllByText('演示项目').length).toBeGreaterThan(0));
-    expect(screen.getByRole('button', { name: /审批中心/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /设置与诊断/ })).toBeInTheDocument();
+    const projectNav = within(screen.getByRole('complementary', { name: '项目导航' }));
+    expect(projectNav.getByRole('button', { name: /审批中心/ })).toBeInTheDocument();
+    expect(projectNav.getByRole('button', { name: /新建任务/ })).toBeInTheDocument();
+    expect(projectNav.queryByRole('button', { name: '需求入口' })).not.toBeInTheDocument();
+    expect(projectNav.queryByRole('button', { name: '设置与诊断' })).not.toBeInTheDocument();
+    expect(projectNav.getByRole('button', { name: '设置' })).toBeInTheDocument();
+  });
+
+  it('进入设置后替换项目侧栏，并按需展开高级设置后返回原工作区', async () => {
+    render(<AppShell />);
+    await waitFor(() => expect(screen.getByRole('complementary', { name: '项目导航' })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    await waitFor(() => expect(screen.getByRole('complementary', { name: '设置导航' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: /^常规$/ })).toBeInTheDocument());
+    expect(screen.queryByRole('complementary', { name: '项目导航' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^使用统计$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '外部集成' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('complementary')).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: '高级设置' }));
+    expect(screen.getByRole('button', { name: /^使用统计$/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '外部集成' })).toBeInTheDocument();
+
+    // 外部集成是普通页：GitLab / SSH 目标机为页内区块，不再是独立菜单项。
+    fireEvent.click(screen.getByRole('button', { name: '外部集成' }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: '外部集成' })).toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: 'GitLab' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'SSH 目标机' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'GitLab' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'SSH 目标机' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '返回工作区' }));
+    await waitFor(() => expect(screen.getByRole('complementary', { name: '项目导航' })).toBeInTheDocument());
   });
 
   it('core 不可用时显示错误标记', async () => {

@@ -1,182 +1,231 @@
-// S50 运行与集成诊断：diagnostics.check 真实数据 + 每项修复入口直达目标设置页（§5.14）。
+// 使用统计：只展示真实的模型缓存观测（用量卡片 + 每日趋势）。
 import { useCallback, useEffect, useState } from 'react';
 import { rpc } from '../../rpc/client';
-import { formatDateTime } from '../../lib/format';
-import type { DiagnosticsReport, IntegrationCheck, LocalCheck } from './types';
-import type { SettingsRouteId } from './settings-routes';
+import { IconRefresh } from '../../components/Icons';
 import { SettingsPageHeader } from './components/SettingsPageHeader';
 import { SettingsSection } from './components/SettingsSection';
-import { StatusPill } from './components/StatusPill';
-import { IconChevronRight, IconRefresh } from '../../components/Icons';
 
-/** 检查项 → 修复目标页（纯映射，供单测）。 */
-export const FIX_TARGET: Record<string, SettingsRouteId> = {
-  gitlab: 'gitlab',
-  model: 'models',
-  ssh: 'ssh',
-  sqlite: 'backup',
-  core: 'logs',
-  executor: 'execution',
-};
-
-function pillKind(status: string) {
-  if (status === 'ready') return 'ready' as const;
-  if (status === 'pending') return 'pending' as const;
-  if (status === 'disabled' || status === 'needs_configuration') return 'readonly' as const;
-  return 'error' as const;
-}
-
-function CheckTable({
-  checks,
-  onNavigate,
-}: {
-  checks: Array<IntegrationCheck | LocalCheck>;
-  onNavigate: (section: SettingsRouteId) => void;
-}) {
-  return (
-    <table className="sg-table">
-      <thead>
-        <tr>
-          <th style={{ width: 110 }}>检查项</th>
-          <th style={{ width: 100 }}>状态</th>
-          <th>详情（含环境变量名）</th>
-          <th style={{ width: 110 }}>修复入口</th>
-        </tr>
-      </thead>
-      <tbody>
-        {checks.map((c) => (
-          <tr key={c.checkId}>
-            <td>{c.label}</td>
-            <td><StatusPill kind={pillKind(c.status)} /></td>
-            <td className="sg-muted" style={{ wordBreak: 'break-all' }}>{c.detail}</td>
-            <td>
-              {FIX_TARGET[c.checkId] ? (
-                <button className="sg-link-btn" onClick={() => onNavigate(FIX_TARGET[c.checkId])}>
-                  去处理 <IconChevronRight size={12} />
-                </button>
-              ) : (
-                <span className="sg-hint">—</span>
-              )}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
+interface DailyPoint {
+  day: string;
+  totalTokens: number;
+  cachedTokens: number;
+  cacheHitRatio: number | null;
 }
 
 interface ModelUsage {
-  calls: number;
   tokensIn: number;
   tokensOut: number;
   cachedTokens: number;
   cacheHitRatio: number | null;
-  reasoningTokens: number;
-  ttftAvgMs: number | null;
-  totalMs: number;
-  compactions: number;
-  compactionBeforeEst: number | null;
-  compactionAfterEst: number | null;
-  costMicros: number;
+  daily?: DailyPoint[];
 }
 
-/** M4：模型缓存与压缩观测（仅 token 计量与延迟；不展示任何 reasoning 正文）。 */
-function ModelUsageCard() {
-  const [usage, setUsage] = useState<ModelUsage | null>(null);
-  useEffect(() => {
-    rpc<ModelUsage>('model.usage', {})
-      .then(setUsage)
-      .catch(() => setUsage(null));
-  }, []);
-  if (!usage) {
-    return <div className="sg-hint">暂无模型调用观测数据。</div>;
-  }
-  const pct = usage.cacheHitRatio == null ? '—' : `${Math.round(usage.cacheHitRatio * 100)}%`;
+function TokenMetric({ label, value, tone }: { label: string; value: string; tone?: 'accent' | 'success' }) {
   return (
-    <table className="sg-table" aria-label="模型缓存与压缩观测">
-      <tbody>
-        <tr><td>模型调用轮次</td><td>{usage.calls}</td></tr>
-        <tr><td>输入 / 输出 tokens</td><td>{usage.tokensIn} / {usage.tokensOut}</td></tr>
-        <tr><td>缓存命中 tokens（命中率）</td><td>{usage.cachedTokens}（{pct}）</td></tr>
-        <tr><td>reasoning tokens（仅计量）</td><td>{usage.reasoningTokens}</td></tr>
-        <tr><td>首 token 平均延迟</td><td>{usage.ttftAvgMs == null ? '—' : `${usage.ttftAvgMs} ms`}</td></tr>
-        <tr><td>压缩次数（前后估算 tokens）</td><td>{usage.compactions}（{usage.compactionBeforeEst ?? '—'} → {usage.compactionAfterEst ?? '—'}）</td></tr>
-        <tr><td>成本</td><td>未接价格表（诚实口径：恒 0）</td></tr>
-      </tbody>
-    </table>
+    <div className={`sg-token-metric ${tone ? `sg-token-metric--${tone}` : ''}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
-export function DiagnosticsPage({ onNavigate }: { onNavigate: (section: SettingsRouteId) => void }) {
-  const [report, setReport] = useState<DiagnosticsReport | null>(null);
+/// 纵轴取整到 1/2/2.5/5×10^k，避免刻度出现零碎数字。
+function niceMax(v: number): number {
+  if (v <= 0) return 1;
+  const base = 10 ** Math.floor(Math.log10(v));
+  for (const m of [1, 2, 2.5, 5, 10]) {
+    if (v <= m * base) return m * base;
+  }
+  return 10 * base;
+}
+
+function fmtCompact(n: number): string {
+  if (n >= 1_000_000) return `${Number((n / 1_000_000).toPrecision(3))}M`;
+  if (n >= 1_000) return `${Number((n / 1_000).toPrecision(3))}k`;
+  return String(n);
+}
+
+const CHART_W = 760;
+const CHART_H = 240;
+const PAD = { top: 14, right: 46, bottom: 30, left: 58 };
+const PLOT_W = CHART_W - PAD.left - PAD.right;
+const PLOT_H = CHART_H - PAD.top - PAD.bottom;
+const RATIO_MAX = 100;
+
+function xAt(i: number, n: number): number {
+  return n <= 1 ? PAD.left + PLOT_W / 2 : PAD.left + (i * PLOT_W) / (n - 1);
+}
+
+function yTokens(v: number, max: number): number {
+  return PAD.top + PLOT_H * (1 - v / max);
+}
+
+function yRatio(pct: number): number {
+  return PAD.top + PLOT_H * (1 - pct / RATIO_MAX);
+}
+
+function UsageLine({ values, getX, getY, stroke, dashed }: {
+  values: Array<number | null>;
+  getX: (i: number) => number;
+  getY: (v: number) => number;
+  stroke: string;
+  dashed?: string;
+}) {
+  // 只连接相邻有效点：中间出现空洞（null）时断线，不跨天硬连；孤立点不生成线，只留数据圆点。
+  const segments: string[] = [];
+  let current: string[] = [];
+  const flush = () => {
+    if (current.length > 1) segments.push(current.join(' '));
+    current = [];
+  };
+  values.forEach((v, i) => {
+    if (v == null) {
+      flush();
+      return;
+    }
+    current.push(`${getX(i).toFixed(1)},${getY(v).toFixed(1)}`);
+    if (i === values.length - 1) flush();
+  });
+  return (
+    <>
+      {segments.map((pts) => (
+        <polyline key={`${stroke}-${pts.slice(0, 24)}`} points={pts} fill="none" stroke={stroke} strokeWidth={2} strokeDasharray={dashed} strokeLinejoin="round" strokeLinecap="round" />
+      ))}
+    </>
+  );
+}
+
+function DailyUsageChart({ points }: { points: DailyPoint[] }) {
+  const maxTokens = niceMax(Math.max(...points.map((p) => Math.max(p.totalTokens, p.cachedTokens)), 0));
+  const gridRatios = [0, 0.25, 0.5, 0.75, 1];
+  const hasMultiple = points.length > 1;
+  const xLabels = hasMultiple
+    ? [points[0], points[Math.floor((points.length - 1) / 2)], points[points.length - 1]]
+    : points;
+  const pointTitle = (p: DailyPoint) =>
+    `${p.day}：总 ${p.totalTokens.toLocaleString()} / 命中 ${p.cachedTokens.toLocaleString()}` +
+    (p.cacheHitRatio == null ? '' : ` / 命中率 ${Math.round(p.cacheHitRatio * 100)}%`);
+
+  return (
+    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} role="img" aria-label="近 30 天模型每日 Token 用量折线图" className="sg-daily-chart-svg">
+      {gridRatios.map((r) => {
+        const y = PAD.top + PLOT_H * (1 - r);
+        return (
+          <g key={r}>
+            <line x1={PAD.left} y1={y} x2={PAD.left + PLOT_W} y2={y} stroke="var(--sg-border-default)" strokeWidth={r === 0 ? 1.2 : 1} />
+            <text x={PAD.left - 8} y={y + 3.5} textAnchor="end" fontSize={10.5} fill="var(--sg-text-secondary)">{fmtCompact(maxTokens * r)}</text>
+            <text x={PAD.left + PLOT_W + 8} y={y + 3.5} textAnchor="start" fontSize={10.5} fill="var(--sg-text-secondary)">{Math.round(r * RATIO_MAX)}%</text>
+          </g>
+        );
+      })}
+      {xLabels.map((p) => (
+        <text key={`x-${p.day}`} x={xAt(points.indexOf(p), points.length)} y={CHART_H - 10} textAnchor="middle" fontSize={10.5} fill="var(--sg-text-secondary)">{p.day.slice(5)}</text>
+      ))}
+
+      <UsageLine values={points.map((p) => p.totalTokens)} getX={(i) => xAt(i, points.length)} getY={(v) => yTokens(v, maxTokens)} stroke="var(--sg-action-primary)" />
+      <UsageLine values={points.map((p) => p.cachedTokens)} getX={(i) => xAt(i, points.length)} getY={(v) => yTokens(v, maxTokens)} stroke="var(--sg-status-passed)" />
+      <UsageLine values={points.map((p) => (p.cacheHitRatio == null ? null : p.cacheHitRatio * 100))} getX={(i) => xAt(i, points.length)} getY={yRatio} stroke="var(--sg-text-secondary)" dashed="4 3" />
+
+      {points.map((p, i) => (
+        <g key={`pt-${p.day}`}>
+          <circle cx={xAt(i, points.length)} cy={yTokens(p.totalTokens, maxTokens)} r={2.6} fill="var(--sg-action-primary)">
+            <title>{pointTitle(p)}</title>
+          </circle>
+          <circle cx={xAt(i, points.length)} cy={yTokens(p.cachedTokens, maxTokens)} r={2.6} fill="var(--sg-status-passed)">
+            <title>{pointTitle(p)}</title>
+          </circle>
+          {p.cacheHitRatio == null ? null : (
+            <circle cx={xAt(i, points.length)} cy={yRatio(p.cacheHitRatio * 100)} r={2} fill="var(--sg-text-secondary)">
+              <title>{pointTitle(p)}</title>
+            </circle>
+          )}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+export function DiagnosticsPage() {
+  const [usage, setUsage] = useState<ModelUsage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const runChecks = useCallback(async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setReport(await rpc<DiagnosticsReport>('diagnostics.check'));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '诊断执行失败');
+      setUsage(await rpc<ModelUsage>('model.usage', {}));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '观测数据加载失败');
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void runChecks();
-  }, [runChecks]);
+    void load();
+  }, [load]);
+
+  const hitRatio = usage?.cacheHitRatio == null
+    ? '—'
+    : `${Math.round(usage.cacheHitRatio * 100)}%`;
+  const daily = usage?.daily ?? [];
+  const hasDailyVolume = daily.some((p) => p.totalTokens > 0);
 
   return (
     <div className="sg-set-page">
       <SettingsPageHeader
-        title="运行与集成诊断"
+        title="使用统计"
         scope="本地"
-        description="逐项列出 core / 执行器 / SQLite 与外部集成就绪状态；异常项给出修复入口。"
+        description="查看模型请求的缓存使用情况。"
         actions={
-          <button className="sg-btn sg-btn--primary" onClick={() => void runChecks()} disabled={loading}>
+          <button className="sg-btn" onClick={() => void load()} disabled={loading}>
             <IconRefresh size={14} />
-            {loading ? '检查中…' : '运行全部检查'}
+            {loading ? '刷新中…' : '刷新'}
           </button>
         }
       />
 
-      <div aria-live="polite">
-        {error ? <div className="sg-banner sg-banner--error" role="alert">诊断失败：{error}</div> : null}
-        {report ? (
-          <p className="sg-hint">上次检查时间：{formatDateTime(report.generatedAt)}</p>
-        ) : null}
-      </div>
+      {error ? (
+        <div className="sg-banner sg-banner--error" role="alert">
+          加载失败：{error}
+        </div>
+      ) : null}
 
-      <SettingsSection title="本地运行" description="core 进程、命令执行器、SQLite 迁移状态。">
-        {report ? (
-          <CheckTable checks={report.local} onNavigate={onNavigate} />
-        ) : (
+      <SettingsSection title="模型 Token 用量" description="统计全部模型调用的总 Token、缓存命中与每日趋势。">
+        {loading && !usage ? (
           <div className="sg-skeleton-rows" aria-busy="true">
             <div className="sg-skeleton-row" />
             <div className="sg-skeleton-row" />
           </div>
-        )}
-      </SettingsSection>
-
-      <SettingsSection
-        title="模型缓存与压缩观测"
-        description="cached tokens / 命中率 / reasoning tokens（仅计量）/ 首 token 延迟 / 压缩次数与前后估算；不含任何 reasoning 正文。"
-      >
-        <ModelUsageCard />
-      </SettingsSection>
-
-      <SettingsSection
-        title="外部集成"
-        description="详情中出现的环境变量名（如 SIXGATES_GITLAB_BASE_URL）为启动时装配来源；gitlabProfile/modelProfile 契约到位后迁移为应用内配置。"
-      >
-        {report ? (
-          <CheckTable checks={report.integrations} onNavigate={onNavigate} />
+        ) : usage ? (
+          <>
+            <div className="sg-token-metrics" aria-label="模型 Token 用量统计">
+              <TokenMetric label="总 Token" value={(usage.tokensIn + usage.tokensOut).toLocaleString()} tone="accent" />
+              <TokenMetric label="缓存命中 Token" value={usage.cachedTokens.toLocaleString()} tone="success" />
+              <TokenMetric label="缓存命中率" value={hitRatio} tone="success" />
+            </div>
+            <div className="sg-daily-chart">
+              <div className="sg-daily-chart-head">
+                <span>每日趋势<small>近 30 天（UTC 日聚合）</small></span>
+                <div className="sg-daily-chart-legend" aria-hidden>
+                  <span><i style={{ background: 'var(--sg-action-primary)' }} />总 Token</span>
+                  <span><i style={{ background: 'var(--sg-status-passed)' }} />缓存命中 Token</span>
+                  <span><i className="sg-daily-chart-legend-dash" />缓存命中率</span>
+                </div>
+              </div>
+              {hasDailyVolume ? (
+                <DailyUsageChart points={daily} />
+              ) : (
+                <div className="sg-empty" style={{ padding: '24px 20px' }}>
+                  近 30 天暂无每日模型调用量。
+                </div>
+              )}
+            </div>
+          </>
         ) : (
-          <div className="sg-skeleton-rows" aria-busy="true">
-            <div className="sg-skeleton-row" />
-            <div className="sg-skeleton-row" />
+          <div className="sg-empty" style={{ padding: '28px 20px' }}>
+            暂无模型缓存观测数据。
           </div>
         )}
       </SettingsSection>

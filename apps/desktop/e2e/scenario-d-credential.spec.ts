@@ -79,3 +79,41 @@ test('D1 401 → degraded → 轮换 → 验证 → ready；审计无 token', as
   const afterVerify = await e2e.rpc<{ revision: number }>('credentialRef.verify', { refId: cred.id });
   await e2e.rpc('credentialRef.remove', { refId: cred.id, expectedRevision: afterVerify.revision, force: true });
 });
+
+test('D2 GitLab/SSH 直填秘密自动落 Keychain（凭据引用页已删）', async () => {
+  e2e = await launchApp({ env: { SIXGATES_GITLAB_URL: gitlab.url(), SIXGATES_GITLAB_TOKEN: '' } });
+
+  // 1. GitLab 直填 token 创建 → 自动生成凭据引用，列表不回显秘密。
+  const profile = await e2e.rpc<{ id: string }>('gitlabProfile.create', {
+    name: '直填实例', baseUrl: gitlab.url(), token: SECRET_V1,
+  });
+  expect(profile.id).toBeTruthy();
+  const profiles = await e2e.rpc<{ items: Array<{ id: string; credential_ref_id?: string | null }> }>('gitlabProfile.list');
+  const bound = profiles.items.find((p) => p.id === profile.id);
+  expect(bound?.credential_ref_id).toBeTruthy();
+
+  // 2. 直填 token 真实传递：fake 收到；测试通过。
+  gitlab.setMode('ok');
+  const okReport = await e2e.rpc<{ status: string }>('gitlabProfile.test', { profileId: profile.id });
+  expect(okReport.status).toBe('ready');
+  expect(gitlab.tokenSeen).toContain(SECRET_V1);
+
+  // 3. SSH 直填凭证创建 → 同样自动生成凭据引用。
+  const target = await e2e.rpc<{ id: string }>('sshTarget.create', {
+    name: '直填目标机', host: '127.0.0.1', port: 22, user: 'deploy', secret: SECRET_V2,
+  });
+  expect(target.id).toBeTruthy();
+  const targets = await e2e.rpc<{ items: Array<{ id: string; credential_ref_id?: string | null }> }>('sshTarget.list');
+  expect(targets.items.find((t) => t.id === target.id)?.credential_ref_id).toBeTruthy();
+
+  // 4. 秘密值与 credentialRefId 同给 → InvalidParams。
+  const conflict = e2e.rpc('gitlabProfile.create', {
+    name: '冲突实例', baseUrl: gitlab.url(), token: SECRET_V1, credentialRefId: bound?.credential_ref_id,
+  });
+  await expect(conflict).rejects.toThrow(/二选一/);
+
+  // 5. 审计不含直填秘密。
+  const auditText = JSON.stringify(await e2e.rpc('audit.export', {}));
+  expect(auditText).not.toContain(SECRET_V1);
+  expect(auditText).not.toContain(SECRET_V2);
+});

@@ -7,6 +7,7 @@ import {
   IconTarget,
   IconZap,
 } from '../../../components/Icons';
+import { SettingsPageHeader } from '../components/SettingsPageHeader';
 
 interface ProfileVersion {
   id: string;
@@ -187,14 +188,12 @@ export function AgentCenterPage() {
   };
 
   return (
-    <div className="sg-agent-page">
-      <header className="sg-page-head">
-        <div>
-          <span className="sg-page-head-title">Agent 中心</span>
-          <span className="sg-page-head-subtitle">决定六关中的每一步由谁完成</span>
-        </div>
-        <span className="sg-page-head-status">本地运行</span>
-      </header>
+    <div className="sg-set-page sg-agent-page">
+      <SettingsPageHeader
+        title="Agent 中心"
+        scope="本地"
+        description="决定六关中的每一步由谁完成；没有特殊要求时使用内置通用 Agent。"
+      />
 
       <div className="sg-agent-scroll">
         {error ? <div className="sg-banner sg-banner--error" role="alert">{error}</div> : null}

@@ -57,7 +57,7 @@ test('G1 开启→新建→搜索→打开→编辑', async () => {
 
   // 打开全局 flag（内部构建语义）后开关可用。
   await e2e.rpc('settings.update', { patches: [{ key: 'memory.featureEnabled', value: true }] });
-  await e2e.gotoSettings('overview');
+  await e2e.gotoSettings('app-general');
   await e2e.gotoSettings('memory');
   await expect(sw).toBeEnabled({ timeout: 10000 });
   await sw.click();

@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
+import { SettingsRow, SettingsToggle } from '../components/SettingsRow';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
 import { IconCheck, IconZap } from '../../../components/Icons';
@@ -96,9 +97,8 @@ export function ExecutionPage() {
       {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
 
       <SettingsSection title="模式与资源">
-        <form className="sg-card sg-set-form" onSubmit={save}>
-          <div className="sg-field">
-            <label htmlFor="ex-mode">执行模式</label>
+        <form className="sg-setting-list" onSubmit={save}>
+          <SettingsRow title="执行模式" htmlFor="ex-mode" description={MODE_HINT[draft.mode ?? 'safe_restricted']}>
             <select id="ex-mode" className="sg-select" value={draft.mode ?? 'safe_restricted'} onChange={(e) => set('mode', e.target.value)}>
               <option value="docker">Docker（推荐）</option>
               <option value="kernel_restricted">内核沙箱（无 Docker 时推荐）</option>
@@ -106,43 +106,34 @@ export function ExecutionPage() {
               <option value="disabled">禁用</option>
               <option value="unsafe_explicit">显式不安全（需确认）</option>
             </select>
-            <p className="sg-hint">{MODE_HINT[draft.mode ?? 'safe_restricted']}</p>
-            {draft.mode === 'safe_restricted' ? (
-              <div className="sg-banner sg-banner--warning" role="alert" style={{ marginTop: 4 }}>
-                本机白名单（非强隔离）：仅按命令名白名单执行，无内核强制隔离。
-              </div>
-            ) : null}
-            {draft.mode === 'unsafe_explicit' ? (
-              <div className="sg-banner sg-banner--warning" role="alert" style={{ marginTop: 4 }}>
-                不安全模式不提供容器级隔离；保存即视为二次确认。
-              </div>
-            ) : null}
-          </div>
-          <div className="sg-form-grid--2">
-            <div className="sg-field">
-              <label htmlFor="ex-mem">内存（MB）</label>
-              <input id="ex-mem" className="sg-input" type="number" min={128} max={8192}
-                value={draft.memoryMB ?? 256} onChange={(e) => set('memoryMB', Number(e.target.value))} />
+          </SettingsRow>
+          {draft.mode === 'safe_restricted' ? (
+            <div className="sg-banner sg-banner--warning sg-set-item-banner" role="alert">
+              本机白名单（非强隔离）：仅按命令名白名单执行，无内核强制隔离。
             </div>
-            <div className="sg-field">
-              <label htmlFor="ex-cpu">CPU</label>
-              <input id="ex-cpu" className="sg-input" type="number" min={1} max={8} step={0.5}
-                value={draft.cpus ?? 1} onChange={(e) => set('cpus', Number(e.target.value))} />
+          ) : null}
+          {draft.mode === 'unsafe_explicit' ? (
+            <div className="sg-banner sg-banner--warning sg-set-item-banner" role="alert">
+              不安全模式不提供容器级隔离；保存即视为二次确认。
             </div>
-            <div className="sg-field">
-              <label htmlFor="ex-timeout">超时（秒）</label>
-              <input id="ex-timeout" className="sg-input" type="number" min={10} max={3600}
-                value={draft.timeoutSec ?? 120} onChange={(e) => set('timeoutSec', Number(e.target.value))} />
-            </div>
-            <div className="sg-field">
-              <label htmlFor="ex-net" style={{ cursor: 'pointer' }}>
-                <input id="ex-net" type="checkbox" checked={draft.networkOff !== false}
-                  onChange={(e) => set('networkOff', e.target.checked)} />
-                默认禁网
-              </label>
-            </div>
-          </div>
-          <div className="sg-row">
+          ) : null}
+          <SettingsRow title="内存（MB）" htmlFor="ex-mem" narrow>
+            <input id="ex-mem" className="sg-input" type="number" min={128} max={8192}
+              value={draft.memoryMB ?? 256} onChange={(e) => set('memoryMB', Number(e.target.value))} />
+          </SettingsRow>
+          <SettingsRow title="CPU" htmlFor="ex-cpu" narrow>
+            <input id="ex-cpu" className="sg-input" type="number" min={1} max={8} step={0.5}
+              value={draft.cpus ?? 1} onChange={(e) => set('cpus', Number(e.target.value))} />
+          </SettingsRow>
+          <SettingsRow title="超时（秒）" htmlFor="ex-timeout" narrow>
+            <input id="ex-timeout" className="sg-input" type="number" min={10} max={3600}
+              value={draft.timeoutSec ?? 120} onChange={(e) => set('timeoutSec', Number(e.target.value))} />
+          </SettingsRow>
+          <SettingsRow title="默认禁网" description="工具执行默认切断网络出口">
+            <SettingsToggle label="默认禁网" checked={draft.networkOff !== false}
+              onChange={(checked) => set('networkOff', checked)} />
+          </SettingsRow>
+          <div className="sg-set-form-actions">
             <button type="submit" className="sg-btn sg-btn--primary" disabled={!dirty || saving}>
               <IconCheck size={14} />
               {saving ? '保存中…' : '保存更改'}

@@ -16,11 +16,13 @@ export function SettingsSection({
   return (
     <section className="sg-set-section" aria-labelledby={headingId}>
       <div className="sg-set-section-head">
-        <h2 id={headingId} className="sg-section-title">{title}</h2>
+        <div>
+          <h2 id={headingId} className="sg-section-title">{title}</h2>
+          {description ? <p className="sg-set-section-description">{description}</p> : null}
+        </div>
         {actions}
       </div>
-      {description ? <p className="sg-hint" style={{ marginTop: -4 }}>{description}</p> : null}
-      {children}
+      <div className="sg-set-section-body">{children}</div>
     </section>
   );
 }

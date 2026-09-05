@@ -21,9 +21,8 @@ __pycache__/
 # 本地技能/工作区配置不入库
 /.trae/
 
-# 仅核心代码入库：文档与工作记录不上传（本地文件保留，勿删）
+# 仅核心代码入库：工作记录不上传（本地文件保留，勿删）。README.md 是仓库首页，允许入库。
 /docs/
-/README.md
 /design-qa.md
 /findings.md
 /progress.md

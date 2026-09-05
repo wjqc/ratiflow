@@ -2,6 +2,7 @@
 // 右侧为该条记忆的注入开关（active=开，归档=关）。不区分类型、不展示状态标签
 // （详情/状态在抽屉内查看）。loading 出 5 行 skeleton；语义化 list/button。
 import type { MemoryListItem } from '../types';
+import { SettingsToggle } from './SettingsRow';
 
 const STATUS_TONE: Record<string, string> = {
   proposed: 'sg-status--pending',
@@ -80,17 +81,12 @@ export function MemoryList({
                 ) : null}
               </span>
             </button>
-            <label className="sg-memory-switch" title={active ? '注入：开' : '注入：关'}>
-              <input
-                type="checkbox"
-                role="switch"
-                aria-checked={active}
-                checked={active}
-                disabled={!switchable}
-                aria-label={`启用注入：${item.slug}.md`}
-                onChange={() => onToggleActive(item)}
-              />
-            </label>
+            <SettingsToggle
+              label={`启用注入：${item.slug}.md`}
+              checked={active}
+              disabled={!switchable}
+              onChange={() => onToggleActive(item)}
+            />
           </li>
         );
       })}

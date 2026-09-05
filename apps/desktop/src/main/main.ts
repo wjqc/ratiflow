@@ -406,6 +406,11 @@ function buildMenu(): void {
 // E2E 实例使用独立 SIXGATES_E2E_DATA_DIR（不共享库），豁免单实例锁，
 // 否则与用户在用的桌面实例互斥，自动化无法启动。
 const isE2eInstance = Boolean(process.env.SIXGATES_E2E_DATA_DIR);
+if (isE2eInstance) {
+  // localStorage（sg:lastRoute 等）也在 userData 下：不隔离会把在用实例的
+  // 路由状态泄漏进 e2e（启动直接落在设置页，A0 首断言失败）。
+  app.setPath('userData', process.env.SIXGATES_E2E_DATA_DIR as string);
+}
 if (!isE2eInstance && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {

@@ -76,6 +76,13 @@ fn opt_str_param(params: &Value, key: &str) -> Option<String> {
     params.get(key).and_then(|v| v.as_str()).map(String::from)
 }
 
+fn bool_param(params: &Value, key: &str) -> Result<bool, RpcError> {
+    params
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| err(ErrorCode::InvalidParams, format!("缺少参数 {key}")))
+}
+
 /// 放行 digest 的 policy version 分量：当前权限快照的 canonical digest。
 fn release_policy_version(store: &Store) -> String {
     let (snapshot, _) = assemble_policy_snapshot(store);
@@ -1127,6 +1134,12 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             sg_settings::mcp_ext::server_refresh(store, &str_param(params, "serverId")?)
                 .map_err(serr)
         }
+        "mcp.serverToggle" => sg_settings::mcp_ext::server_set_enabled(
+            store,
+            &str_param(params, "serverId")?,
+            bool_param(params, "enabled")?,
+        )
+        .map_err(serr),
         "mcp.toolsList" => mcp_tools_list(store, opt_str_param(params, "serverId").as_deref()),
 
         // M4：模型缓存与压缩观测（不含任何 reasoning 正文）。
@@ -2526,7 +2539,7 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
 
 /// M4：model.usage 聚合——model_turns 的 token/缓存/延迟观测 + 压缩次数与前后估算。
 fn model_usage(_state: &AppState, store: &Store, run_id: Option<&str>) -> RpcResult {
-    let (calls, tokens_in, tokens_out, cached, reasoning, ttft_avg, ttft_p95, total_ms, compactions, compact_before, compact_after) =
+    let (calls, tokens_in, tokens_out, cached, reasoning, ttft_avg, ttft_p95, total_ms, compactions, compact_before, compact_after, daily) =
         store
             .with_conn(|conn| {
                 let turns: (i64, i64, i64, i64, i64, Option<f64>, Option<i64>, i64) = conn
@@ -2548,10 +2561,12 @@ fn model_usage(_state: &AppState, store: &Store, run_id: Option<&str>) -> RpcRes
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
                     .map_err(Error::from)?;
+                let daily = model_usage_daily(conn, run_id)?;
                 Ok((
                     turns.0, turns.1, turns.2, turns.3, turns.4,
                     turns.5, turns.6, turns.7,
                     comp.0, comp.1, comp.2,
+                    daily,
                 ))
             })
             .map_err(store_err)?;
@@ -2567,6 +2582,7 @@ fn model_usage(_state: &AppState, store: &Store, run_id: Option<&str>) -> RpcRes
         "tokensOut": tokens_out,
         "cachedTokens": cached,
         "cacheHitRatio": hit_ratio,
+        "daily": daily,
         "reasoningTokens": reasoning,
         "ttftAvgMs": ttft_avg.map(|v| (v * 10.0).round() / 10.0),
         "ttftP95Ms": ttft_p95,
@@ -2577,6 +2593,44 @@ fn model_usage(_state: &AppState, store: &Store, run_id: Option<&str>) -> RpcRes
         "costMicros": 0,
         "costNote": "未接价格表；成本恒 0（诚实口径）",
     }))
+}
+
+/// 近 30 天按 UTC 日零填充聚合：总 Token=in+out，命中率=cached/in（无输入日为 null）。供每日折线图。
+fn model_usage_daily(conn: &rusqlite::Connection, run_id: Option<&str>) -> Result<Vec<Value>, Error> {
+    let mut stmt = conn
+        .prepare(
+            "WITH RECURSIVE days(day) AS (
+                 SELECT date('now','-29 days')
+                 UNION ALL SELECT date(day,'+1 day') FROM days WHERE day < date('now')
+             )
+             SELECT days.day,
+                    COALESCE(SUM(t.tokens_in),0), COALESCE(SUM(t.tokens_out),0), COALESCE(SUM(t.cached_tokens),0)
+             FROM days
+             LEFT JOIN model_turns t
+               ON substr(t.created_at,1,10)=days.day AND (?1 IS NULL OR t.agent_run_id=?1)
+             GROUP BY days.day ORDER BY days.day",
+        )
+        .map_err(Error::from)?;
+    let rows = stmt
+        .query_map(rusqlite::params![run_id], |r| {
+            let day: String = r.get(0)?;
+            let tin: i64 = r.get(1)?;
+            let tout: i64 = r.get(2)?;
+            let cached: i64 = r.get(3)?;
+            Ok(json!({
+                "day": day,
+                "tokensIn": tin,
+                "totalTokens": tin + tout,
+                "cachedTokens": cached,
+                "cacheHitRatio": if tin > 0 {
+                    json!((cached as f64 / tin as f64 * 1000.0).round() / 1000.0)
+                } else {
+                    Value::Null
+                },
+            }))
+        })
+        .map_err(Error::from)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
 }
 
 /// M6：工具清单（候选/活跃/撤销状态 + schema digest）。
@@ -2666,6 +2720,59 @@ mod m6_zero_change_tests {
                 .any(|s| s["source"] == "mcp" && s["sandboxed"] == json!(false)));
             assert_eq!(snap.tool_rules.len(), before_count, "基线规则集不变");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod model_usage_daily_tests {
+    use super::*;
+
+    fn daily_rows(store: &Store, run_id: Option<&str>) -> Vec<Value> {
+        store
+            .with_conn(|conn| model_usage_daily(conn, run_id))
+            .unwrap()
+    }
+
+    /// 近 30 天窗口零填充 + 按 UTC 日分组 + run 过滤 + 命中率口径（cached/tokens_in）。
+    #[test]
+    fn daily_window_zero_filled_and_run_scoped() {
+        let dir = std::env::temp_dir().join(format!("sg-usage-daily-{}", sg_store::ids::new_id("t")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir, "test").unwrap();
+        let today = sg_store::timefmt::now();
+        let old = sg_store::timefmt::now_plus_minutes(-40 * 24 * 60);
+        store
+            .with_conn(|conn| {
+                for (id, run, tin, tout, cached, created) in [
+                    ("mt_d1", "run1", 120_i64, 30_i64, 60_i64, today.as_str()),
+                    ("mt_d2", "run2", 10, 5, 0, today.as_str()),
+                    ("mt_old", "run1", 999, 999, 999, old.as_str()),
+                ] {
+                    conn.execute(
+                        "INSERT INTO model_turns(id, agent_run_id, turn_seq, tokens_in, tokens_out, cached_tokens, created_at)
+                         VALUES (?1,?2,1,?3,?4,?5,?6)",
+                        rusqlite::params![id, run, tin, tout, cached, created],
+                    )
+                    .map_err(Error::from)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let all = daily_rows(&store, None);
+        assert_eq!(all.len(), 30, "固定 30 天窗口");
+        assert_eq!(all[0]["day"], json!(&sg_store::timefmt::now_plus_minutes(-29 * 24 * 60)[..10]));
+        assert_eq!(all[29]["day"], json!(&today[..10]));
+        assert_eq!(all[0]["totalTokens"], json!(0), "窗口外的旧行不参与");
+        assert_eq!(all[0]["cacheHitRatio"], Value::Null, "无输入日命中率为 null");
+        assert_eq!(all[29]["totalTokens"], json!(165));
+        assert_eq!(all[29]["cachedTokens"], json!(60));
+        assert_eq!(all[29]["cacheHitRatio"], json!(0.462));
+
+        let run1 = daily_rows(&store, Some("run1"));
+        assert_eq!(run1.last().unwrap()["totalTokens"], json!(150), "run 过滤生效");
+        assert_eq!(run1.last().unwrap()["cacheHitRatio"], json!(0.5));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,10 +4,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpc } from '../../../rpc/client';
 import { rpcErrText } from '../../../lib/rpcError';
-import { SettingsPageHeader } from '../components/SettingsPageHeader';
-import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
-import { IconRefresh } from '../../../components/Icons';
+import { SettingsToggle } from '../components/SettingsRow';
+import { IconMore, IconPlus, IconRefresh, IconSearch } from '../../../components/Icons';
 import { MemoryList } from '../components/MemoryList';
 import { MemoryDrawer } from '../components/MemoryDrawer';
 import { MemoryCandidates } from '../components/MemoryCandidates';
@@ -33,6 +32,7 @@ export function MemoryPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [revealExportId, setRevealExportId] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<{ id: string | null; create: boolean } | null>(null);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const requestSeq = useRef(0);
   const debounceRef = useRef<number | null>(null);
@@ -225,157 +225,130 @@ export function MemoryPage() {
   }, [queryInput, featureOff, settings?.enabled]);
 
   return (
-    <>
-      <SettingsPageHeader
-        title="项目记忆"
-        scope="项目"
-        description="该项目以后持续记住什么，由你确认与管理；记忆是上下文数据，不会改变审批、关卡或项目指令。"
-      />
-      <div className="sg-set-page">
-        <SettingsSection
-          title="在该项目中使用记忆"
-          description="新启动的 Agent Run 会在预算内复用已确认的项目记忆。开启后可能增加模型输入 Token；不会自动改变审批、关卡或项目指令。"
-        >
-          <div className="sg-memory-switch-row">
-            <label className="sg-memory-switch">
-              <input
-                type="checkbox"
-                role="switch"
-                aria-checked={settings?.enabled ?? false}
-                checked={settings?.enabled ?? false}
-                disabled={!projectId || !settings || toggling || featureOff}
-                onChange={() => void toggleEnabled()}
-              />
-              <span>
-                启用记忆注入（每 Run 最多 {settings?.maxEntries ?? 8} 条 / {Math.round((settings?.maxBytes ?? 12288) / 1024)} KiB）
-              </span>
-            </label>
-            {featureOff ? <StatusPill kind="readonly" label="功能由当前版本/管理员关闭" /> : null}
-            {archivedProject ? <StatusPill kind="readonly" label="项目已归档：只读浏览" /> : null}
-          </div>
-          {settingsError ? (
-            <div role="alert" className="sg-memory-banner sg-memory-banner--error">
-              {settingsError}
-              <button type="button" className="sg-btn" onClick={() => projectId && void loadSettings(projectId)}>
-                重试
-              </button>
-            </div>
-          ) : null}
-          {notice ? (
-            <div className="sg-memory-banner sg-memory-banner--ok">
-              {notice}
-              {revealExportId ? (
-                <button type="button" className="sg-btn" onClick={() => void reveal()}>
-                  在访达中显示
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-        </SettingsSection>
+    <div className="sg-set-page sg-reference-page sg-memory-page">
+      <header className="sg-reference-page-head">
+        <h1>记忆</h1>
+      </header>
 
-        {/* 参考稿布局：[项目▾ | N 条记忆] …… [搜索记忆文件…] */}
-        <div className="sg-memory-projectbar">
-          <label className="sg-memory-project">
+      <section className="sg-memory-master" aria-label="工作区记忆">
+        <div>
+          <strong>工作区记忆</strong>
+          <p>在工作区中保存并复用长期上下文，新会话生效。开启后可能增加模型调用和 Token 成本。</p>
+        </div>
+        <SettingsToggle
+          label="启用记忆注入"
+          checked={settings?.enabled ?? false}
+          disabled={!projectId || !settings || toggling || featureOff}
+          onChange={() => void toggleEnabled()}
+        />
+      </section>
+
+      {(featureOff || archivedProject) ? (
+        <div className="sg-memory-state-row">
+          {featureOff ? <StatusPill kind="readonly" label="功能由当前版本/管理员关闭" /> : null}
+          {archivedProject ? <StatusPill kind="readonly" label="项目已归档：只读浏览" /> : null}
+        </div>
+      ) : null}
+      {settingsError ? (
+        <div role="alert" className="sg-memory-banner sg-memory-banner--error">
+          {settingsError}
+          <button type="button" className="sg-btn" onClick={() => projectId && void loadSettings(projectId)}>重试</button>
+        </div>
+      ) : null}
+      {notice ? (
+        <div className="sg-memory-banner sg-memory-banner--ok">
+          {notice}
+          {revealExportId ? <button type="button" className="sg-btn" onClick={() => void reveal()}>在访达中显示</button> : null}
+        </div>
+      ) : null}
+
+      <div className="sg-reference-toolbar">
+        <div className="sg-reference-toolbar-start">
+          <label className="sg-reference-scope">
             <select
               value={projectId ?? ''}
               aria-label="选择项目"
-              onChange={(e) => {
+              onChange={(event) => {
                 setDrawer(null);
-                setProjectId(e.target.value || null);
+                setProjectId(event.target.value || null);
               }}
             >
-              {projects.length === 0 ? <option value="">（暂无项目）</option> : null}
-              {projects.map((p) => (
-                <option key={p.id} value={p.id} disabled={p.archivedAt != null}>
-                  {p.name}
-                  {p.archivedAt ? '（已归档）' : ''}
+              {projects.length === 0 ? <option value="">暂无工作区</option> : null}
+              {projects.map((project) => (
+                <option key={project.id} value={project.id} disabled={project.archivedAt != null}>
+                  {project.name}{project.archivedAt ? '（已归档）' : ''}
                 </option>
               ))}
             </select>
           </label>
-          <span className="sg-memory-total" aria-label="记忆总数">
-            {total} 条记忆
-          </span>
-          <input
-            type="search"
-            className="sg-memory-search"
-            aria-label="搜索记忆文件"
-            placeholder="搜索记忆文件…"
-            value={queryInput}
-            onChange={(e) => onQueryChange(e.target.value)}
-          />
+          <span className="sg-reference-divider" aria-hidden />
+          <span className="sg-reference-count" aria-label="记忆总数">{total} 条记忆</span>
         </div>
 
-        <SettingsSection
-          title="文件"
-          actions={
-            <div className="sg-memory-toolbar">
-              <button
-                type="button"
-                className="sg-btn"
-                aria-label="新建记忆"
-                onClick={() => setDrawer({ id: null, create: true })}
-                disabled={!projectId || archivedProject}
-              >
-                新建记忆
-              </button>
-              <button
-                type="button"
-                className="sg-btn"
-                onClick={() => void doImport('proposed')}
-                disabled={!projectId || archivedProject}
-              >
-                导入 Markdown
-              </button>
-              <button type="button" className="sg-btn" onClick={() => void doExport(false)} disabled={!projectId}>
-                导出
-              </button>
-              <button
-                type="button"
-                className="sg-btn"
-                aria-label="刷新记忆列表"
-                onClick={() => projectId && void loadList(projectId, query)}
-              >
-                <IconRefresh size={14} />
-              </button>
-            </div>
-          }
-        >
-          {projectId ? (
-            <MemoryCandidates
-              projectId={projectId}
-              refreshKey={refreshKey}
-              onChanged={() => {
-                setRefreshKey((k) => k + 1);
-                if (projectId) void loadList(projectId, query);
-              }}
+        <div className="sg-reference-toolbar-end">
+          <label className="sg-reference-search">
+            <IconSearch size={14} />
+            <input
+              type="search"
+              aria-label="搜索记忆文件"
+              placeholder="搜索记忆文件…"
+              value={queryInput}
+              onChange={(event) => onQueryChange(event.target.value)}
             />
-          ) : null}
-
-          <div id="sg-memory-list-zone">
-            <MemoryList
-              items={list?.items ?? []}
-              loading={loading}
-              activeId={drawer?.id ?? null}
-              onSelect={(id) => setDrawer({ id, create: false })}
-              onToggleActive={(item) => void toggleItemActive(item)}
-              empty={emptyState}
-            />
+          </label>
+          <div className="sg-reference-more">
+            <button
+              type="button"
+              className="sg-reference-icon-btn"
+              aria-label="更多记忆操作"
+              aria-expanded={actionsOpen}
+              onClick={() => setActionsOpen((open) => !open)}
+            >
+              <IconMore size={16} />
+            </button>
+            {actionsOpen ? (
+              <div className="sg-reference-menu" role="menu">
+                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); setDrawer({ id: null, create: true }); }} disabled={!projectId || archivedProject}>
+                  <IconPlus size={14} />新建记忆
+                </button>
+                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); void doImport('proposed'); }} disabled={!projectId || archivedProject}>导入 Markdown</button>
+                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); void doExport(false); }} disabled={!projectId}>导出</button>
+              </div>
+            ) : null}
           </div>
+          <button type="button" className="sg-reference-icon-btn" aria-label="刷新记忆列表" onClick={() => projectId && void loadList(projectId, query)}>
+            <IconRefresh size={15} />
+          </button>
+        </div>
+      </div>
 
-          {listError ? (
-            <div role="alert" className="sg-memory-banner sg-memory-banner--error">
-              {listError}
-              <button
-                type="button"
-                className="sg-btn"
-                onClick={() => projectId && void loadList(projectId, query)}
-              >
-                重试
-              </button>
-            </div>
-          ) : null}
-        </SettingsSection>
+      <div className="sg-memory-files">
+        {projectId ? (
+          <MemoryCandidates
+            projectId={projectId}
+            refreshKey={refreshKey}
+            onChanged={() => {
+              setRefreshKey((key) => key + 1);
+              if (projectId) void loadList(projectId, query);
+            }}
+          />
+        ) : null}
+        <div id="sg-memory-list-zone">
+          <MemoryList
+            items={list?.items ?? []}
+            loading={loading}
+            activeId={drawer?.id ?? null}
+            onSelect={(id) => setDrawer({ id, create: false })}
+            onToggleActive={(item) => void toggleItemActive(item)}
+            empty={emptyState}
+          />
+        </div>
+        {listError ? (
+          <div role="alert" className="sg-memory-banner sg-memory-banner--error">
+            {listError}
+            <button type="button" className="sg-btn" onClick={() => projectId && void loadList(projectId, query)}>重试</button>
+          </div>
+        ) : null}
       </div>
 
       {drawer && projectId ? (
@@ -394,6 +367,6 @@ export function MemoryPage() {
           }}
         />
       ) : null}
-    </>
+    </div>
   );
 }

@@ -143,10 +143,15 @@ pub fn server_get(store: &Store, id: &str) -> SettingsResult<Value> {
     store
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, transport, command, args_json, url, server_info, status, probe_error, approved_by, approved_at, created_at
+                "SELECT id, name, transport, command, args_json, url, server_info, status, probe_error, approved_by, approved_at, created_at, enabled,
+                     (SELECT COUNT(*) FROM mcp_server_tools t WHERE t.server_id = mcp_servers.id AND t.status='active'),
+                     (SELECT COUNT(*) FROM mcp_server_tools t WHERE t.server_id = mcp_servers.id AND t.status='candidate')
                  FROM mcp_servers WHERE id=?1",
             )?;
             let mut rows = stmt.query_map([id], |r| {
+                let enabled: i64 = r.get(12)?;
+                let tools_active: i64 = r.get(13)?;
+                let tools_candidate: i64 = r.get(14)?;
                 Ok(json!({
                     "serverId": r.get::<_, String>(0)?,
                     "name": r.get::<_, String>(1)?,
@@ -160,6 +165,8 @@ pub fn server_get(store: &Store, id: &str) -> SettingsResult<Value> {
                     "approvedBy": r.get::<_, String>(9)?,
                     "approvedAt": r.get::<_, String>(10)?,
                     "createdAt": r.get::<_, String>(11)?,
+                    "enabled": enabled == 1,
+                    "toolCounts": {"active": tools_active, "candidate": tools_candidate},
                 }))
             })?;
             match rows.next() {
@@ -272,6 +279,51 @@ pub fn server_revoke(
         "mcp_server",
         id,
         json!({"reason": reason}),
+    )
+    .map_err(store_err)?;
+    server_get(store, id)
+}
+
+/// 启用/停用：活跃集总开关（active_tools 过滤 enabled=1），不改 status；
+/// 已撤销不可启停（撤销即终态）。
+pub fn server_set_enabled(store: &Store, id: &str, enabled: bool) -> SettingsResult<Value> {
+    let status: String = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row("SELECT status FROM mcp_servers WHERE id=?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap_or_default())
+        })
+        .map_err(store_err)?;
+    if status.is_empty() {
+        return Err(SettingsError::new(
+            "NOT_FOUND",
+            format!("MCP server {id} 不存在"),
+        ));
+    }
+    if status == "revoked" {
+        return Err(SettingsError::new(
+            "INVALID_PARAMS",
+            "已撤销 server 不可启停",
+        ));
+    }
+    store
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE mcp_servers SET enabled=?2 WHERE id=?1",
+                rusqlite::params![id, enabled as i64],
+            )?;
+            Ok(())
+        })
+        .map_err(store_err)?;
+    sg_store::audit::append(
+        store,
+        "local",
+        "mcp.server.toggle",
+        "mcp_server",
+        id,
+        json!({"enabled": enabled}),
     )
     .map_err(store_err)?;
     server_get(store, id)
@@ -681,6 +733,40 @@ for line in sys.stdin:
         )
         .unwrap();
         assert_eq!(a["serverId"], b["serverId"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 启停：停用仅摘出活跃集（status 不变）；重开恢复；列表带 enabled/工具计数；
+    /// 撤销后不可启停。
+    #[test]
+    fn toggle_enabled_gates_active_set() {
+        if !python3_available() {
+            return;
+        }
+        let (store, dir) = store();
+        let script = write_fake_server();
+        let v = server_add(
+            &store,
+            "tg",
+            "python3",
+            &[script.to_string_lossy().to_string(), "ok".into()],
+        )
+        .unwrap();
+        let id = v["serverId"].as_str().unwrap().to_string();
+        server_approve(&store, &id, "admin").unwrap();
+        assert_eq!(active_tools(&store).len(), 2);
+        let off = server_set_enabled(&store, &id, false).unwrap();
+        assert_eq!(off["enabled"], false);
+        assert_eq!(off["status"], "active", "停用不改状态，仅摘出活跃集");
+        assert!(active_tools(&store).is_empty());
+        let on = server_set_enabled(&store, &id, true).unwrap();
+        assert_eq!(on["enabled"], true);
+        assert_eq!(active_tools(&store).len(), 2);
+        let list = server_list(&store).unwrap();
+        assert_eq!(list["items"][0]["enabled"], true);
+        assert_eq!(list["items"][0]["toolCounts"]["active"], 2);
+        server_revoke(&store, &id, "admin", "x").unwrap();
+        assert!(server_set_enabled(&store, &id, false).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

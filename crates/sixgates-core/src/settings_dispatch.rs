@@ -61,6 +61,50 @@ fn changed(store: &Store, resource: &str, id: &str) {
     );
 }
 
+/// 直填秘密自动落 Keychain：secret 与 credentialRefId 二选一；
+/// 命中直填时创建凭据引用并回填 params，随后从 params 移除明文字段（不落库不入日志）。
+fn bind_inline_secret(
+    state: &AppState,
+    store: &Store,
+    params: &mut Value,
+    secret_key: &str,
+    cred_name: &str,
+    kind: &str,
+    provider: &str,
+) -> Result<(), RpcError> {
+    let secret = opt_s(params, secret_key)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let has_ref = opt_s(params, "credentialRefId")
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .is_some();
+    if let Some(secret) = secret {
+        if has_ref {
+            return Err(RpcError::new(
+                ErrorCode::InvalidParams,
+                "秘密值与 credentialRefId 二选一，不可同时提供",
+            ));
+        }
+        let cred = settings::credentials::create(
+            store,
+            state.credentials.as_ref(),
+            cred_name,
+            kind,
+            provider,
+            secret,
+            None,
+        )
+        .map_err(serr)?;
+        params["credentialRefId"] = json!(cred.id);
+        changed(store, "credentialRef", &cred.id);
+    }
+    if let Some(obj) = params.as_object_mut() {
+        obj.remove(secret_key);
+    }
+    Ok(())
+}
+
 const PREFIXES: [&str; 28] = [
     "settings.",
     "modelProvider.",
@@ -349,7 +393,15 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             Ok(json!({"items": v}))
         }
         "gitlabProfile.create" => {
-            let v = settings::profiles::gitlab_create(store, p).map_err(serr)?;
+            // token 直填：先落 Keychain（kind=gitlab_token），DB 只存凭据引用 ID。
+            let mut params = p.clone();
+            let provider = opt_s(&params, "baseUrl").unwrap_or("gitlab").to_string();
+            let cred_name = format!(
+                "{} GitLab Token",
+                opt_s(&params, "name").unwrap_or("GitLab 实例").trim()
+            );
+            bind_inline_secret(state, store, &mut params, "token", &cred_name, "gitlab_token", &provider)?;
+            let v = settings::profiles::gitlab_create(store, &params).map_err(serr)?;
             changed(store, "gitlabProfile", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
@@ -406,7 +458,18 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             Ok(serde_json::to_value(v).unwrap_or_default())
         }
         "sshTarget.create" => {
-            let v = settings::profiles::ssh_create(store, p).map_err(serr)?;
+            // secret 直填（密码或私钥）：先落 Keychain（kind=ssh_key），DB 只存凭据引用 ID。
+            let mut params = p.clone();
+            let provider = opt_s(&params, "host").unwrap_or("ssh").to_string();
+            let cred_name = format!(
+                "{} SSH 凭证",
+                opt_s(&params, "name")
+                    .or_else(|| opt_s(&params, "host"))
+                    .unwrap_or("SSH 目标机")
+                    .trim()
+            );
+            bind_inline_secret(state, store, &mut params, "secret", &cred_name, "ssh_key", &provider)?;
+            let v = settings::profiles::ssh_create(store, &params).map_err(serr)?;
             changed(store, "sshTarget", &v.id);
             Ok(serde_json::to_value(v).unwrap_or_default())
         }

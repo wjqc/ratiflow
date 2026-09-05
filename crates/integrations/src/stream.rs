@@ -16,7 +16,8 @@ use crate::cancel::CancelToken;
 use crate::sse::{pump_sse, SsePumpError};
 use crate::{
     model::{
-        build_chat_body, ChatMessage, CompletionRequest, CompletionResponse, ProviderToolCall,
+        build_chat_body, cached_tokens_from_usage, ChatMessage, CompletionRequest,
+        CompletionResponse, ProviderToolCall,
     },
     FakeModel, ModelHttp,
 };
@@ -104,9 +105,7 @@ fn dispatch_chunk(v: &Value, sink: &dyn StreamSink, acc: &mut StreamAcc) {
         if usage.is_object() && !usage.as_object().unwrap().is_empty() {
             acc.usage = StreamUsage {
                 input: usage["prompt_tokens"].as_i64().unwrap_or(0),
-                cached_input: usage["prompt_tokens_details"]["cached_tokens"]
-                    .as_i64()
-                    .unwrap_or(0),
+                cached_input: cached_tokens_from_usage(usage),
                 output: usage["completion_tokens"].as_i64().unwrap_or(0),
                 reasoning_output: usage["completion_tokens_details"]["reasoning_tokens"]
                     .as_i64()

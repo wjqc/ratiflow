@@ -1,18 +1,16 @@
 // 新接线的 9 个设置页：mock bridge 下渲染不崩溃 + 空/加载状态展示。
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import type React from 'react';
 import { GeneralPage } from './GeneralPage';
-import { AppearancePage } from './AppearancePage';
 import { KnowledgeDefaultsPage } from './KnowledgeDefaultsPage';
 import { ModelsPage } from './ModelsPage';
 import { ToolsPage } from './ToolsPage';
 import { ExecutionPage } from './ExecutionPage';
-import { GitlabPage } from './GitlabPage';
-import { SshPage } from './SshPage';
-import { CredentialsPage } from './CredentialsPage';
+import { IntegrationsPage } from './IntegrationsPage';
 import { MemoryPage } from './MemoryPage';
+import { DiagnosticsPage } from '../DiagnosticsPage';
 
 const rpcMock = vi.fn();
 function ok(body: unknown) { return Promise.resolve(body); }
@@ -26,8 +24,7 @@ describe('设置页接线', () => {
         case 'settings.get': return ok({ items: [] });
         case 'knowledge.settings.get': return ok({ revision: 0 });
         case 'modelProfile.list': case 'gitlabProfile.list': case 'sshTarget.list':
-        case 'credentialRef.list': case 'tool.list': case 'executionProfile.list':
-        case 'modelProvider.presets':
+        case 'credentialRef.list': case 'tool.list': case 'executionProfile.list':        case 'modelProvider.presets':
           return ok({ items: [] });
         case 'executor.settings.get': return ok({ revision: 0 });
         case 'project.list': return ok({ items: [{ id: 'prj_1', name: '示例项目', archivedAt: null }] });
@@ -39,6 +36,21 @@ describe('设置页接线', () => {
           });
         case 'memory.list':
           return ok({ projectId: 'prj_1', items: [], counts: { active: 0 }, cursor: null });
+        case 'model.usage':
+          return ok({
+            tokensIn: 12000,
+            tokensOut: 3000,
+            cachedTokens: 4800,
+            cacheHitRatio: 0.6,
+            compactions: 2,
+            compactionBeforeEst: 18000,
+            compactionAfterEst: 6200,
+            daily: [
+              { day: '2026-09-01', tokensIn: 4000, totalTokens: 5000, cachedTokens: 1600, cacheHitRatio: 0.4 },
+              { day: '2026-09-02', tokensIn: 0, totalTokens: 0, cachedTokens: 0, cacheHitRatio: null },
+              { day: '2026-09-03', tokensIn: 8000, totalTokens: 10000, cachedTokens: 3200, cacheHitRatio: 0.4 },
+            ],
+          });
         default: return ok({});
       }
     });
@@ -52,23 +64,68 @@ describe('设置页接线', () => {
   afterEach(() => { delete (window as unknown as { sixgates?: unknown }).sixgates; });
 
   it.each([
-    ['常规', GeneralPage, '此处不登记 GitLab 项目'],
-    ['外观', AppearancePage, '深色'],
+    ['常规', GeneralPage, '管理应用启动'],
     ['知识默认', KnowledgeDefaultsPage, '不添加项目来源'],
     ['模型', ModelsPage, 'Keychain'],
     ['工具', ToolsPage, 'ActionDigest 绑定'],
     ['执行', ExecutionPage, '显式不安全'],
-    ['GitLab', GitlabPage, '令牌经凭据引用'],
-    ['SSH', SshPage, '首次连接必须显式确认'],
-    ['凭据', CredentialsPage, '不回显'],
   ] as Array<[string, () => React.ReactElement, string]>)('%s 页渲染且含安全提示', async (_label, Page, hint) => {
     render(<Page />);
     await waitFor(() => expect(screen.getAllByText(new RegExp(hint.slice(0, 4))).length).toBeGreaterThan(0));
   });
 
-  it('凭据页空状态显示引导', async () => {
-    render(<CredentialsPage />);
-    await waitFor(() => expect(screen.getByText(/暂无凭据引用/)).toBeInTheDocument());
+  it('外部集成页同页含 GitLab 与 SSH 两个区块，新增表单在区块内展开', async () => {
+    render(<IntegrationsPage />);
+    await waitFor(() => expect(screen.getByText('暂无 GitLab 实例')).toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: '外部集成' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'GitLab' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'SSH 目标机' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('暂无 SSH 目标')).toBeInTheDocument());
+    // 两个空态并存 → 确认不是两页而是同页两区块。
+    expect(screen.getByText('部署关依赖至少一个已确认指纹的目标。')).toBeInTheDocument();
+    // 新增表单在区块内切换，不改变区块标题；秘密直填落 Keychain，不再有凭据引用 ID 输入。
+    fireEvent.click(screen.getByRole('button', { name: '新增实例' }));
+    expect(screen.getByLabelText('名称 *')).toBeInTheDocument();
+    expect(screen.getByLabelText('访问令牌（Token）')).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('cr_…')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'GitLab' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    fireEvent.click(screen.getByRole('button', { name: '新增目标' }));
+    expect(screen.getByLabelText('Host *')).toBeInTheDocument();
+    expect(screen.getByLabelText('访问凭证（密码或私钥）')).toBeInTheDocument();
+  });
+
+  it('常规页合并外观设置并一次保存两个设置域', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'settings.get') {
+        return ok({
+          items: [
+            { key: 'app.general', value: { language: 'zh-CN' }, revision: 2 },
+            { key: 'app.appearance', value: { density: 'comfortable' }, revision: 3 },
+          ],
+        });
+      }
+      return ok({});
+    });
+    const appearanceEvents: unknown[] = [];
+    const onAppearance = (event: Event) => appearanceEvents.push((event as CustomEvent).detail);
+    window.addEventListener('sg:appearance-changed', onAppearance);
+    render(<GeneralPage />);
+    await waitFor(() => expect(screen.getByRole('heading', { name: /^外观$/ })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText('语言'), { target: { value: 'system' } });
+    fireEvent.change(screen.getByLabelText('界面密度'), { target: { value: 'compact' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存更改' }));
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledWith(
+      'settings.update',
+      expect.objectContaining({
+        patches: expect.arrayContaining([
+          expect.objectContaining({ key: 'app.general', expectedRevision: 2 }),
+          expect.objectContaining({ key: 'app.appearance', expectedRevision: 3 }),
+        ]),
+      }),
+    ));
+    expect(appearanceEvents).toHaveLength(1);
+    window.removeEventListener('sg:appearance-changed', onAppearance);
   });
 
   it('S12 记忆页：开关/计数/空状态与禁用态', async () => {
@@ -108,5 +165,53 @@ describe('设置页接线', () => {
     });
     render(<ToolsPage />);
     await waitFor(() => expect(screen.getByText('read_file')).toBeInTheDocument());
+  });
+
+  it('知识默认页统一行式布局：标题在左、控件在右', async () => {
+    const { container } = render(<KnowledgeDefaultsPage />);
+    await waitFor(() => expect(screen.getByText('最大文件大小（MB）')).toBeInTheDocument());
+    const items = container.querySelectorAll('.sg-set-item');
+    expect(items.length).toBeGreaterThanOrEqual(9);
+    expect(container.querySelectorAll('.sg-set-item-control')).toHaveLength(items.length);
+    expect(screen.getByLabelText('指令文件名（逗号分隔，按序探测）')).toBeInTheDocument();
+    // 布尔设置用胶囊开关（不再出现裸复选框网格）。
+    expect(container.querySelectorAll('.sg-setting-toggle').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('使用统计只保留总/缓存命中/命中率三个指标并渲染每日折线图', async () => {
+    render(<DiagnosticsPage />);
+    await waitFor(() => expect(screen.getByText('15,000')).toBeInTheDocument());
+    const grid = screen.getByLabelText('模型 Token 用量统计');
+    expect(grid.children).toHaveLength(3);
+    expect(screen.getByText('4,800')).toBeInTheDocument();
+    expect(screen.getByText('60%')).toBeInTheDocument();
+    expect(screen.queryByText('输入 Token')).not.toBeInTheDocument();
+    expect(screen.queryByText('输出 Token')).not.toBeInTheDocument();
+    expect(screen.queryByText('2 次')).not.toBeInTheDocument();
+    // 每日折线图：总/命中两条连续序列；命中率遇空日断线（此处仅剩孤立点，无连线）。
+    const chart = screen.getByRole('img', { name: /近 30 天模型每日 Token 用量/ });
+    expect(chart.querySelectorAll('polyline')).toHaveLength(2);
+    expect(chart.querySelectorAll('circle')).toHaveLength(8); // 每天总/命中两点，第1、3天各加命中率点
+    expect(screen.getByText('每日趋势')).toBeInTheDocument();
+    // 上下文压缩区块已移除。
+    expect(screen.queryByText('上下文压缩', { selector: 'h2' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/压缩前后/)).not.toBeInTheDocument();
+    expect(screen.queryByText('本地运行')).not.toBeInTheDocument();
+    expect(screen.queryByText('外部集成', { selector: 'h2' })).not.toBeInTheDocument();
+  });
+
+  it('使用统计近 30 天无调用量时折线图给空状态', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'model.usage') {
+        return ok({
+          tokensIn: 0, tokensOut: 0, cachedTokens: 0, cacheHitRatio: null,
+          daily: [],
+        });
+      }
+      return ok({});
+    });
+    render(<DiagnosticsPage />);
+    await waitFor(() => expect(screen.getByText('近 30 天暂无每日模型调用量。')).toBeInTheDocument());
+    expect(screen.queryByRole('img', { name: /近 30 天模型每日 Token 用量/ })).not.toBeInTheDocument();
   });
 });

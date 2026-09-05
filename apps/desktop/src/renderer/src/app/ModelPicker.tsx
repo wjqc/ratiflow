@@ -144,7 +144,7 @@ export function ModelPicker({ onChange }: { onChange?: () => void }) {
       {open ? (
         <div className="sg-model-picker-menu" role="listbox" aria-label="选择全局默认模型">
           {groups.length === 0 ? (
-            <div className="sg-model-picker-empty">还没有已同步的模型。请先到「设置与诊断 → 模型与路由」同步模型。</div>
+            <div className="sg-model-picker-empty">还没有已同步的模型。请先到「设置 → 模型与路由」同步模型。</div>
           ) : (
             groups.map(({ profile, models }) => (
               <div key={profile.id} className="sg-model-picker-group">
@@ -171,7 +171,7 @@ export function ModelPicker({ onChange }: { onChange?: () => void }) {
           )}
           {groups.length > 0 && unsyncedNames.length > 0 ? (
             <div className="sg-model-picker-empty">
-              {unsyncedNames}还未同步模型，可到「设置与诊断 → 模型与路由」点「同步模型」。
+              {unsyncedNames}还未同步模型，可到「设置 → 模型与路由」点「同步模型」。
             </div>
           ) : null}
         </div>

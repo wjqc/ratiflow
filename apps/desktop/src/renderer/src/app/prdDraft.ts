@@ -22,7 +22,7 @@ const pendingKey = (workItemId: string) => `sg:auto-prd:${workItemId}`;
 export function friendlyAgentError(value: unknown): string {
   const raw = rpcErrorMessage(value);
   if (raw.includes('script exhausted') || raw.includes('未找到可用模型')) {
-    return '没有可用模型。请先到“设置与诊断 → 模型”完成连接测试，然后重试。';
+    return '没有可用模型。请先到“设置 → 模型”完成连接测试，然后重试。';
   }
   if (raw.includes('api key missing') || raw.includes('CREDENTIAL_MISSING')) {
     return '模型凭据不可用。请重新保存 API Key 并测试连接。';

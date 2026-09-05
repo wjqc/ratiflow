@@ -66,7 +66,7 @@ const DEFS: Record<string, PendingDef> = {
       '每阶段预算上限与分步测试',
     ],
     awaiting: ['modelProfile.list/get/create/update/delete', 'modelProfile.testConnection', 'modelRoute.get/update'],
-    fallback: '当前经 SIXGATES_MODEL_* 环境变量启动装配；装配状态见「运行与集成诊断」。',
+    fallback: '当前经 SIXGATES_MODEL_* 环境变量启动装配；装配状态见「使用统计」。',
   },
   tools: {
     title: '工具与审批',
@@ -93,33 +93,7 @@ const DEFS: Record<string, PendingDef> = {
       '模式切换前的环境自检结果',
     ],
     awaiting: ['executionProfile.list', 'executionProfile.create', 'executionProfile.update', 'executor.settings.get', 'executor.settings.update', 'executor.check'],
-    fallback: '当前模式由启动环境检测决定，实际状态见「运行与集成诊断」本地执行器项。',
-  },
-  gitlab: {
-    title: 'GitLab',
-    scope: '全局',
-    description: 'GitLab 实例连接与权限检测；token 仅存 keychain 引用。',
-    features: [
-      '实例列表：baseUrl / tokenRef / 连接状态',
-      '新增实例：连接测试 → scopes 与 api 写权限检测 → 保存',
-      '权限检测明细：token scopes / api 范围 / 写权限逐项展示',
-      '默认实例与按项目覆盖',
-    ],
-    awaiting: ['gitlabProfile.list/get/create/update/delete', 'gitlabProfile.testConnection'],
-    fallback: '当前经 SIXGATES_GITLAB_BASE_URL / SIXGATES_GITLAB_TOKEN 启动装配；状态见「运行与集成诊断」。',
-  },
-  ssh: {
-    title: 'SSH 目标机',
-    scope: '全局',
-    description: '部署目标机连接档案；首次连接展示指纹并要求显式确认，私钥仅存 keychain 引用。',
-    features: [
-      '目标列表：host / port / user / authRef / 最近预检状态',
-      '新增目标：host key 指纹展示 + 显式确认（覆盖需二次确认）',
-      '密码/密钥二选一，密钥引用永不落盘',
-      '连接预检与环境预检（git / 磁盘空间）',
-    ],
-    awaiting: ['sshTarget.list/get/create/update/delete', 'sshTarget.probe', 'sshTarget.precheck'],
-    fallback: '当前为 FakeSSH 适配（SIXGATES_SSH_* 环境变量）；状态见「运行与集成诊断」。',
+    fallback: '当前模式由启动环境检测决定，实际状态见「使用统计」本地执行器项。',
   },
   editors: {
     title: '编辑器',
@@ -132,19 +106,6 @@ const DEFS: Record<string, PendingDef> = {
     ],
     awaiting: ['editor.detect（S32 可选，未进契约——非发布阻塞）'],
     fallback: '可在系统文件管理器中直接打开项目目录。',
-  },
-  credentials: {
-    title: '凭据引用',
-    scope: '全局',
-    description: '集中管理 keychain 凭据引用；秘密值只输入一次，永不明文回显或入库。',
-    features: [
-      '引用列表：用途 / 关联服务 / 创建时间（不显示秘密值）',
-      '新增引用：选择用途 → 输入秘密（仅一次）→ 测试',
-      '测试有效性与轮换',
-      '删除前列出被引用位置并阻止误删',
-    ],
-    awaiting: ['credentialRef.list', 'credentialRef.create', 'credentialRef.verify', 'credentialRef.replace', 'credentialRef.remove'],
-    fallback: '无替代路径：秘密不入库、不回显；当前集成凭据由启动环境变量注入。',
   },
 };
 

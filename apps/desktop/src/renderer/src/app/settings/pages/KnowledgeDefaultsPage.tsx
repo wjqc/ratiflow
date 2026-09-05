@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
+import { SettingsRow, SettingsToggle } from '../components/SettingsRow';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
 import { IconCheck } from '../../../components/Icons';
@@ -93,107 +94,81 @@ export function KnowledgeDefaultsPage() {
 
       <form onSubmit={save}>
         <SettingsSection title="扫描边界" description="固定排除 .git、node_modules、target、dist、docs/history/**、legacy/**">
-          <div className="sg-card sg-set-form">
-            <div className="sg-form-grid--2">
-              <div className="sg-field">
-                <label htmlFor="kb-maxfile">最大文件大小（MB）</label>
-                <input id="kb-maxfile" className="sg-input" type="number" min={1} max={64}
-                  value={Math.floor((draft.maxFileBytes ?? EMPTY.maxFileBytes) / 1048576)}
-                  onChange={(e) => set('maxFileBytes', Number(e.target.value) * 1048576)} />
-              </div>
-              <div className="sg-field">
-                <label htmlFor="kb-maxfiles">单来源文件上限</label>
-                <input id="kb-maxfiles" className="sg-input" type="number" min={10} max={5000}
-                  value={draft.maxFilesPerSource ?? EMPTY.maxFilesPerSource}
-                  onChange={(e) => set('maxFilesPerSource', Number(e.target.value))} />
-              </div>
-            </div>
+          <div className="sg-setting-list">
+            <SettingsRow title="最大文件大小（MB）" htmlFor="kb-maxfile" narrow>
+              <input id="kb-maxfile" className="sg-input" type="number" min={1} max={64}
+                value={Math.floor((draft.maxFileBytes ?? EMPTY.maxFileBytes) / 1048576)}
+                onChange={(e) => set('maxFileBytes', Number(e.target.value) * 1048576)} />
+            </SettingsRow>
+            <SettingsRow title="单来源文件上限" htmlFor="kb-maxfiles" narrow>
+              <input id="kb-maxfiles" className="sg-input" type="number" min={10} max={5000}
+                value={draft.maxFilesPerSource ?? EMPTY.maxFilesPerSource}
+                onChange={(e) => set('maxFilesPerSource', Number(e.target.value))} />
+            </SettingsRow>
           </div>
         </SettingsSection>
 
         <SettingsSection title="分块与秘密" description="秘密命中时禁止内容进入模型（fail closed）">
-          <div className="sg-card sg-set-form">
-            <div className="sg-form-grid--2">
-              <div className="sg-field">
-                <label htmlFor="kb-chunk">分块最大字符数</label>
-                <input id="kb-chunk" className="sg-input" type="number" min={500} max={8000}
-                  value={draft.chunkMaxChars ?? EMPTY.chunkMaxChars}
-                  onChange={(e) => set('chunkMaxChars', Number(e.target.value))} />
-              </div>
-              <div className="sg-field">
-                <label htmlFor="kb-failclosed">秘密扫描</label>
-                <label className="sg-row" style={{ gap: 6, cursor: 'pointer' }}>
-                  <input id="kb-failclosed" type="checkbox" checked={draft.secretScanFailClosed !== false}
-                    onChange={(e) => set('secretScanFailClosed', e.target.checked)} />
-                  <span className="sg-hint" style={{ margin: 0 }}>fail closed（命中不返回原文）</span>
-                </label>
-              </div>
-            </div>
+          <div className="sg-setting-list">
+            <SettingsRow title="分块最大字符数" htmlFor="kb-chunk" narrow>
+              <input id="kb-chunk" className="sg-input" type="number" min={500} max={8000}
+                value={draft.chunkMaxChars ?? EMPTY.chunkMaxChars}
+                onChange={(e) => set('chunkMaxChars', Number(e.target.value))} />
+            </SettingsRow>
+            <SettingsRow title="秘密扫描" description="fail closed（命中不返回原文）">
+              <SettingsToggle label="秘密扫描 fail closed" checked={draft.secretScanFailClosed !== false}
+                onChange={(checked) => set('secretScanFailClosed', checked)} />
+            </SettingsRow>
           </div>
         </SettingsSection>
 
         <SettingsSection title="项目指令文件（F07）" description="Agent 启动时按 全局→项目根→docs/ 聚合注入；层内容过秘密扫描，超限截断。生效预览可在任意项目上调用 context.instructions。">
-          <div className="sg-card sg-set-form">
-            <div className="sg-form-grid--2">
-              <div className="sg-field">
-                <label htmlFor="kb-instrfiles">指令文件名（逗号分隔，按序探测）</label>
-                <input id="kb-instrfiles" className="sg-input" type="text"
-                  value={(draft.instructionFileNames ?? EMPTY.instructionFileNames).join(', ')}
-                  onChange={(e) => set('instructionFileNames', e.target.value.split(',').map((x) => x.trim()).filter(Boolean))} />
-              </div>
-              <div className="sg-field">
-                <label htmlFor="kb-instrbytes">指令总上限（KB）</label>
-                <input id="kb-instrbytes" className="sg-input" type="number" min={1} max={256}
-                  value={Math.floor((draft.maxInstructionBytes ?? EMPTY.maxInstructionBytes) / 1024)}
-                  onChange={(e) => set('maxInstructionBytes', Number(e.target.value) * 1024)} />
-              </div>
-            </div>
+          <div className="sg-setting-list">
+            <SettingsRow title="指令文件名（逗号分隔，按序探测）" htmlFor="kb-instrfiles">
+              <input id="kb-instrfiles" className="sg-input" type="text"
+                value={(draft.instructionFileNames ?? EMPTY.instructionFileNames).join(', ')}
+                onChange={(e) => set('instructionFileNames', e.target.value.split(',').map((x) => x.trim()).filter(Boolean))} />
+            </SettingsRow>
+            <SettingsRow title="指令总上限（KB）" htmlFor="kb-instrbytes" narrow>
+              <input id="kb-instrbytes" className="sg-input" type="number" min={1} max={256}
+                value={Math.floor((draft.maxInstructionBytes ?? EMPTY.maxInstructionBytes) / 1024)}
+                onChange={(e) => set('maxInstructionBytes', Number(e.target.value) * 1024)} />
+            </SettingsRow>
           </div>
         </SettingsSection>
 
         <SettingsSection title="上下文压缩（F09）" description="输入估算超过阈值时自动压缩会话历史（保留冻结头与最近 K 轮工具往返，system 段不变）。">
-          <div className="sg-card sg-set-form">
-            <div className="sg-form-grid--2">
-              <div className="sg-field">
-                <label htmlFor="kb-compactthr">自动压缩阈值（tokens，估算 chars/4）</label>
-                <input id="kb-compactthr" className="sg-input" type="number" min={1000} max={200000}
-                  value={draft.autoCompactThresholdTokens ?? EMPTY.autoCompactThresholdTokens}
-                  onChange={(e) => set('autoCompactThresholdTokens', Number(e.target.value))} />
-              </div>
-              <div className="sg-field">
-                <label htmlFor="kb-compactkeep">保留最近工具轮数 K</label>
-                <input id="kb-compactkeep" className="sg-input" type="number" min={0} max={10}
-                  value={draft.compactionKeepTurns ?? EMPTY.compactionKeepTurns}
-                  onChange={(e) => set('compactionKeepTurns', Number(e.target.value))} />
-              </div>
-            </div>
+          <div className="sg-setting-list">
+            <SettingsRow title="自动压缩阈值（tokens，估算 chars/4）" htmlFor="kb-compactthr" narrow>
+              <input id="kb-compactthr" className="sg-input" type="number" min={1000} max={200000}
+                value={draft.autoCompactThresholdTokens ?? EMPTY.autoCompactThresholdTokens}
+                onChange={(e) => set('autoCompactThresholdTokens', Number(e.target.value))} />
+            </SettingsRow>
+            <SettingsRow title="保留最近工具轮数 K" htmlFor="kb-compactkeep" narrow>
+              <input id="kb-compactkeep" className="sg-input" type="number" min={0} max={10}
+                value={draft.compactionKeepTurns ?? EMPTY.compactionKeepTurns}
+                onChange={(e) => set('compactionKeepTurns', Number(e.target.value))} />
+            </SettingsRow>
           </div>
         </SettingsSection>
 
         <SettingsSection title="检索与上下文预算">
-          <div className="sg-card sg-set-form">
-            <div className="sg-form-grid--2">
-              <div className="sg-field">
-                <label htmlFor="kb-limit">默认结果数</label>
-                <input id="kb-limit" className="sg-input" type="number" min={5} max={50}
-                  value={draft.defaultResultLimit ?? EMPTY.defaultResultLimit}
-                  onChange={(e) => set('defaultResultLimit', Number(e.target.value))} />
-              </div>
-              <div className="sg-field">
-                <label htmlFor="kb-budget">上下文预算（KB）</label>
-                <input id="kb-budget" className="sg-input" type="number" min={16} max={1024}
-                  value={Math.floor((draft.contextBudgetBytes ?? EMPTY.contextBudgetBytes) / 1024)}
-                  onChange={(e) => set('contextBudgetBytes', Number(e.target.value) * 1024)} />
-              </div>
-            </div>
-            <div className="sg-field">
-              <label htmlFor="kb-tests" style={{ cursor: 'pointer' }}>
-                <input id="kb-tests" type="checkbox" checked={draft.includeTestsByDefault === true}
-                  onChange={(e) => set('includeTestsByDefault', e.target.checked)} />
-                默认包含测试文件（默认排除）
-              </label>
-            </div>
-            <div className="sg-row">
+          <div className="sg-setting-list">
+            <SettingsRow title="默认结果数" htmlFor="kb-limit" narrow>
+              <input id="kb-limit" className="sg-input" type="number" min={5} max={50}
+                value={draft.defaultResultLimit ?? EMPTY.defaultResultLimit}
+                onChange={(e) => set('defaultResultLimit', Number(e.target.value))} />
+            </SettingsRow>
+            <SettingsRow title="上下文预算（KB）" htmlFor="kb-budget" narrow>
+              <input id="kb-budget" className="sg-input" type="number" min={16} max={1024}
+                value={Math.floor((draft.contextBudgetBytes ?? EMPTY.contextBudgetBytes) / 1024)}
+                onChange={(e) => set('contextBudgetBytes', Number(e.target.value) * 1024)} />
+            </SettingsRow>
+            <SettingsRow title="默认包含测试文件" description="关闭时新建来源默认排除测试文件">
+              <SettingsToggle label="默认包含测试文件" checked={draft.includeTestsByDefault === true}
+                onChange={(checked) => set('includeTestsByDefault', checked)} />
+            </SettingsRow>
+            <div className="sg-set-form-actions">
               <button type="submit" className="sg-btn sg-btn--primary" disabled={!dirty || saving}>
                 <IconCheck size={14} />
                 {saving ? '保存中…' : '保存更改'}

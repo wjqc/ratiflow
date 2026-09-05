@@ -7,7 +7,6 @@ import {
   IconChevronRight,
   IconFolder,
   IconGear,
-  IconHome,
   IconInfo,
   IconLogo,
   IconPlus,
@@ -180,7 +179,11 @@ export function ProjectSidebar({
 
   return (
     <aside className="sg-sidebar" aria-label="项目导航">
-      <div className="sg-brand">
+      <button
+        className="sg-brand sg-brand-button"
+        onClick={() => onNavigate({ page: 'home' })}
+        aria-label="返回任务首页"
+      >
         <IconLogo size={20} className="sg-brand-logo" />
         <span>通关 SixGates</span>
         {coreReady === false ? (
@@ -188,16 +191,9 @@ export function ProjectSidebar({
             core 异常
           </span>
         ) : null}
-      </div>
+      </button>
 
       <nav style={{ padding: '0 8px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <button
-          className={`sg-nav-item ${route.page === 'home' ? 'sg-nav-item--active' : ''}`}
-          onClick={() => onNavigate({ page: 'home' })}
-        >
-          <IconHome size={15} />
-          需求入口
-        </button>
         <button
           className={`sg-nav-item ${route.page === 'new' ? 'sg-nav-item--active' : ''}`}
           onClick={() => activeProjectId && onNavigate({ page: 'new', projectId: activeProjectId })}
@@ -214,13 +210,6 @@ export function ProjectSidebar({
         >
           <IconShield size={15} />
           审批中心
-        </button>
-        <button
-          className={`sg-nav-item ${route.page === 'settings' ? 'sg-nav-item--active' : ''}`}
-          onClick={() => onNavigate({ page: 'settings' })}
-        >
-          <IconGear size={15} />
-          设置与诊断
         </button>
       </nav>
 
@@ -361,7 +350,7 @@ export function ProjectSidebar({
         })}
         {filteredProjects.length === 0 && (
           <div className="sg-sub" style={{ padding: '4px 14px' }}>
-            {q ? '无匹配项目' : '暂无项目，请到「设置与诊断 → 项目与目录」登记'}
+            {q ? '无匹配项目' : '暂无项目，请从左下角打开设置后添加'}
           </div>
         )}
       </div>

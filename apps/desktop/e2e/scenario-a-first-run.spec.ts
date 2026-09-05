@@ -10,18 +10,68 @@ test.afterEach(async () => {
   if (e2e) { await e2e.close(); e2e = undefined as unknown as E2eApp; }
 });
 
-test('A1 概览按影响展示阻塞（模型/GitLab 阻断 Agent Run）', async () => {
+test('A0 设置替换项目侧栏，高级能力按需展开', async ({}, testInfo) => {
   e2e = await launchApp();
+  const pageErrors: string[] = [];
+  const consoleErrors: string[] = [];
+  e2e.window.on('pageerror', (error) => pageErrors.push(error.message));
+  e2e.window.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
 
-  // 等待 settings.summary 数据加载（概览页按影响展示阻塞；默认落地页是需求入口，
-  // 须显式导航到概览——A1 的被测对象是概览的阻塞呈现，不是默认路由）。
-  await e2e.gotoSettings('overview');
-  await e2e.window.waitForSelector('text=模型', { timeout: 15000 });
+  await expect(e2e.window).toHaveTitle(/SixGates/);
+  await expect(e2e.window.getByRole('complementary', { name: '项目导航' })).toBeVisible();
+  await e2e.window.getByRole('button', { name: '设置' }).click();
 
-  const summary = await e2e.rpc<{ overallStatus: string; blockers: Array<{ id: string; capabilities: string[] }> }>('settings.summary');
-  expect(summary.overallStatus).toBe('action_required');
-  expect(summary.blockers.some((b) => b.id === 'model_not_configured' && b.capabilities.includes('agent_run'))).toBe(true);
-  expect(summary.blockers.some((b) => b.id === 'gitlab_not_configured')).toBe(true);
+  const settingsSidebar = e2e.window.getByRole('complementary', { name: '设置导航' });
+  await expect(settingsSidebar).toBeVisible();
+  await expect(e2e.window.getByRole('complementary', { name: '项目导航' })).toHaveCount(0);
+  await expect(e2e.window.locator('aside')).toHaveCount(1);
+  await expect(settingsSidebar.getByRole('button', { name: /^使用统计$/ })).toHaveCount(0);
+  await expect(settingsSidebar.getByRole('button', { name: '外部集成' })).toHaveCount(0);
+  await expect(settingsSidebar.getByRole('button', { name: '外观' })).toHaveCount(0);
+  await expect(e2e.window.getByRole('heading', { name: '常规', exact: true })).toBeVisible();
+  await expect(e2e.window.getByRole('heading', { name: '外观', exact: true })).toBeVisible();
+
+  await settingsSidebar.getByRole('button', { name: '高级设置' }).click();
+  await expect(settingsSidebar.getByRole('button', { name: /^使用统计$/ })).toBeVisible();
+  await expect(settingsSidebar.getByRole('button', { name: '审计日志' })).toHaveCount(0);
+  await expect(settingsSidebar.getByRole('button', { name: '日志与故障报告' })).toHaveCount(0);
+
+  // 外部集成是普通页：GitLab / SSH 目标机为页内区块，不是独立菜单。
+  await settingsSidebar.getByRole('button', { name: '外部集成' }).click();
+  await expect(e2e.window.getByRole('heading', { name: '外部集成', exact: true })).toBeVisible();
+  await expect(e2e.window.getByRole('heading', { name: 'GitLab', exact: true })).toBeVisible();
+  await expect(e2e.window.getByRole('heading', { name: 'SSH 目标机', exact: true })).toBeVisible();
+  await expect(settingsSidebar.getByRole('button', { name: 'GitLab' })).toHaveCount(0);
+
+  await e2e.window.screenshot({ path: testInfo.outputPath('settings-single-sidebar.png') });
+
+  await settingsSidebar.getByRole('button', { name: /^使用统计$/ }).click();
+  await expect(e2e.window.getByRole('heading', { name: '使用统计', exact: true })).toBeVisible();
+  await expect(e2e.window.getByRole('heading', { name: '模型 Token 用量' })).toBeVisible();
+  await expect(e2e.window.getByRole('heading', { name: '本地运行' })).toHaveCount(0);
+  await e2e.window.screenshot({ path: testInfo.outputPath('settings-runtime-observability.png') });
+
+  await e2e.gotoSettings('integrations');
+  await expect(e2e.window.getByRole('heading', { name: '外部集成', exact: true })).toBeVisible();
+  await e2e.window.getByRole('button', { name: '新增实例' }).click();
+  await expect(e2e.window.getByLabel('名称 *')).toBeVisible();
+  await e2e.window.screenshot({ path: testInfo.outputPath('settings-gitlab.png') });
+
+  await e2e.gotoSettings('knowledge-defaults');
+  await expect(e2e.window.getByRole('heading', { name: '知识库默认策略' })).toBeVisible();
+  await e2e.window.screenshot({ path: testInfo.outputPath('settings-knowledge-defaults.png') });
+
+  await e2e.gotoSettings('projects');
+  await expect(e2e.window.getByRole('heading', { name: '项目工作区' })).toBeVisible();
+  await e2e.window.screenshot({ path: testInfo.outputPath('settings-projects.png') });
+
+  await settingsSidebar.getByRole('button', { name: '返回工作区' }).click();
+  await expect(e2e.window.getByRole('complementary', { name: '项目导航' })).toBeVisible();
+  await expect(e2e.window.locator('vite-error-overlay')).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
 });
 
 test('A2 可创建本地项目并浏览（不要求集成就绪）', async () => {

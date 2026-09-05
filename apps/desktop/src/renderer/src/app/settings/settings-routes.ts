@@ -3,7 +3,6 @@
 import type { ComponentType } from 'react';
 import {
   IconBook,
-  IconCloud,
   IconCode,
   IconCpu,
   IconDb,
@@ -11,34 +10,27 @@ import {
   IconDownload,
   IconFolder,
   IconGear,
-  IconLayers,
   IconLink,
   IconServer,
-  IconShield,
   IconTarget,
   IconZap,
 } from '../../components/Icons';
 
 export type SettingsRouteId =
-  | 'overview'
   | 'app-general'
-  | 'appearance'
   | 'updates'
   | 'projects'
   | 'knowledge-defaults'
   | 'memory'
   | 'models'
   | 'tools'
+  | 'mcp'
   | 'execution'
   | 'agent-center'
-  | 'gitlab'
-  | 'ssh'
+  | 'integrations'
   | 'editors'
-  | 'credentials'
   | 'backup'
-  | 'audit'
-  | 'diagnostics'
-  | 'logs';
+  | 'diagnostics';
 
 /** real=真实 RPC 已接入；partial=部分真实部分待契约；pending=契约待 ZCode 提交。 */
 export type SettingsAvailability = 'real' | 'partial' | 'pending';
@@ -59,16 +51,9 @@ export interface SettingsNavGroup {
 
 export const SETTINGS_NAV: SettingsNavGroup[] = [
   {
-    label: '概览',
-    items: [
-      { id: 'overview', code: 'S00', name: '设置概览', availability: 'real', icon: IconTarget },
-    ],
-  },
-  {
     label: '应用',
     items: [
       { id: 'app-general', code: 'S01', name: '常规', availability: 'real', icon: IconGear },
-      { id: 'appearance', code: 'S02', name: '外观', availability: 'real', icon: IconLayers },
       { id: 'updates', code: 'S03', name: '更新与关于', availability: 'real', icon: IconDownload },
     ],
   },
@@ -85,6 +70,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     items: [
       { id: 'models', code: 'S20', name: '模型与路由', availability: 'real', icon: IconCpu },
       { id: 'tools', code: 'S21', name: '工具与审批', availability: 'real', icon: IconCode },
+      { id: 'mcp', code: 'S24', name: 'MCP 服务器', availability: 'real', icon: IconServer },
       { id: 'execution', code: 'S22', name: '执行与沙箱', availability: 'real', icon: IconZap },
       { id: 'agent-center', code: 'S23', name: 'Agent 中心', availability: 'real', icon: IconTarget },
     ],
@@ -92,30 +78,57 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
   {
     label: '集成',
     items: [
-      { id: 'gitlab', code: 'S30', name: 'GitLab', availability: 'real', icon: IconLink },
-      { id: 'ssh', code: 'S31', name: 'SSH 目标机', availability: 'real', icon: IconServer },
+      { id: 'integrations', code: 'S33', name: '外部集成', availability: 'real', icon: IconLink },
       { id: 'editors', code: 'S32', name: '编辑器', availability: 'pending', icon: IconDoc },
     ],
   },
   {
     label: '数据与安全',
     items: [
-      { id: 'credentials', code: 'S40', name: '凭据引用', availability: 'real', icon: IconShield },
       { id: 'backup', code: 'S41', name: '备份与恢复', availability: 'real', icon: IconDb },
-      { id: 'audit', code: 'S42', name: '审计日志', availability: 'real', icon: IconDoc },
     ],
   },
   {
     label: '支持',
     items: [
-      { id: 'diagnostics', code: 'S50', name: '运行与集成诊断', availability: 'real', icon: IconZap },
-      { id: 'logs', code: 'S51', name: '日志与故障报告', availability: 'real', icon: IconCloud },
+      { id: 'diagnostics', code: 'S50', name: '使用统计', availability: 'real', icon: IconZap },
     ],
   },
 ];
 
+const ALL_SETTINGS_ITEMS = SETTINGS_NAV.flatMap((group) => group.items);
+
+function settingsItems(ids: readonly SettingsRouteId[]): SettingsRouteMeta[] {
+  return ids.map((id) => {
+    const item = ALL_SETTINGS_ITEMS.find((candidate) => candidate.id === id);
+    if (!item) throw new Error(`未知设置路由 ${id}`);
+    return item;
+  });
+}
+
+/** 普通用户的高频入口；保持短列表，避免把实现与治理概念全部摊开。 */
+export const SETTINGS_PRIMARY_ITEMS = settingsItems([
+  'app-general',
+  'projects',
+  'models',
+]);
+
+/** 低频、治理或排障能力按需展开；未完成的编辑器页不在导航中曝光。 */
+export const SETTINGS_ADVANCED_ITEMS = settingsItems([
+  'knowledge-defaults',
+  'memory',
+  'agent-center',
+  'tools',
+  'mcp',
+  'execution',
+  'backup',
+  'diagnostics',
+  'updates',
+  'integrations',
+]);
+
 const ROUTE_MAP: ReadonlyMap<SettingsRouteId, SettingsRouteMeta> = new Map(
-  SETTINGS_NAV.flatMap((g) => g.items).map((m) => [m.id, m]),
+  ALL_SETTINGS_ITEMS.map((m) => [m.id, m]),
 );
 
 export function isSettingsRouteId(value: unknown): value is SettingsRouteId {
@@ -129,4 +142,4 @@ export function settingsRouteMeta(id: SettingsRouteId): SettingsRouteMeta {
 }
 
 /** 未知/缺失 section 的统一回退。 */
-export const DEFAULT_SETTINGS_ROUTE: SettingsRouteId = 'overview';
+export const DEFAULT_SETTINGS_ROUTE: SettingsRouteId = 'app-general';

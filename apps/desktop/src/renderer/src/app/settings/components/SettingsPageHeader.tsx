@@ -17,12 +17,14 @@ export function SettingsPageHeader({
   return (
     <header className="sg-set-header">
       <div className="sg-set-header-row">
-        <h1 className="sg-set-title">{title}</h1>
-        <span className="sg-set-scope">{scope}</span>
-        {status}
+        <div className="sg-set-heading">
+          <h1 className="sg-set-title">{title}</h1>
+          <span className="sg-set-scope">{scope}</span>
+          {status}
+        </div>
         {actions ? <div className="sg-set-header-actions">{actions}</div> : null}
       </div>
-      <p className="sg-hint" style={{ marginTop: 6 }}>{description}</p>
+      <p className="sg-set-description">{description}</p>
     </header>
   );
 }

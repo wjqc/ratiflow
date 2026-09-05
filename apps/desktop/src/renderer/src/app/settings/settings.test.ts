@@ -2,20 +2,27 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SETTINGS_ROUTE,
+  SETTINGS_ADVANCED_ITEMS,
   SETTINGS_NAV,
+  SETTINGS_PRIMARY_ITEMS,
   isSettingsRouteId,
   settingsRouteMeta,
 } from './settings-routes';
-import { deriveBlockers } from './OverviewPage';
-import { FIX_TARGET } from './DiagnosticsPage';
 import { redactSecrets, REDACTED } from '../../lib/redact';
-import type { DiagnosticsReport } from './types';
 
 describe('settings-routes', () => {
-  it('19 页路由全部注册且 id 唯一', () => {
+  it('14 页路由全部注册且 id 唯一', () => {
     const ids = SETTINGS_NAV.flatMap((g) => g.items.map((i) => i.id));
-    expect(ids.length).toBe(19);
-    expect(new Set(ids).size).toBe(19);
+    expect(ids.length).toBe(14);
+    expect(new Set(ids).size).toBe(14);
+  });
+
+  it('S24 MCP 服务器路由真实接入且位于 Agent 分组', () => {
+    const mcp = SETTINGS_NAV.flatMap((g) => g.items).find((i) => i.id === 'mcp');
+    expect(mcp?.code).toBe('S24');
+    expect(mcp?.name).toBe('MCP 服务器');
+    expect(mcp?.availability).toBe('real');
+    expect(isSettingsRouteId('mcp')).toBe(true);
   });
 
   it('S12 项目记忆路由真实接入且位于工作区分组', () => {
@@ -37,9 +44,29 @@ describe('settings-routes', () => {
     }
   });
 
+  it('常用导航保持精简，外部集成为高级设置末项，GitLab/SSH 不再是独立路由', () => {
+    expect(SETTINGS_PRIMARY_ITEMS.map((item) => item.id)).toEqual([
+      'app-general', 'projects', 'models',
+    ]);
+    expect(SETTINGS_ADVANCED_ITEMS.at(-1)?.id).toBe('integrations');
+    expect(SETTINGS_ADVANCED_ITEMS.some((item) => item.id === 'diagnostics')).toBe(true);
+    expect(SETTINGS_ADVANCED_ITEMS.some((item) => item.id === 'editors')).toBe(false);
+    const allNames = SETTINGS_NAV.flatMap((group) => group.items).map((item) => String(item.id));
+    expect(allNames).not.toContain('gitlab');
+    expect(allNames).not.toContain('ssh');
+    expect(allNames).not.toContain('credentials');
+    expect(allNames.some((item) => ['overview', 'audit', 'logs'].includes(item))).toBe(false);
+  });
+
   it('isSettingsRouteId 校验未知值并回退默认', () => {
-    expect(isSettingsRouteId('overview')).toBe(true);
+    expect(isSettingsRouteId('overview')).toBe(false);
+    expect(isSettingsRouteId('appearance')).toBe(false);
+    expect(isSettingsRouteId('audit')).toBe(false);
+    expect(isSettingsRouteId('logs')).toBe(false);
     expect(isSettingsRouteId('diagnostics')).toBe(true);
+    expect(isSettingsRouteId('gitlab')).toBe(false);
+    expect(isSettingsRouteId('ssh')).toBe(false);
+    expect(isSettingsRouteId('credentials')).toBe(false);
     expect(isSettingsRouteId('bogus')).toBe(false);
     expect(isSettingsRouteId(undefined)).toBe(false);
     expect(isSettingsRouteId(DEFAULT_SETTINGS_ROUTE)).toBe(true);
@@ -72,38 +99,5 @@ describe('redactSecrets', () => {
     expect(redactSecrets('token')).toBe('token');
     expect(redactSecrets(null)).toBe(null);
     expect(redactSecrets(42)).toBe(42);
-  });
-});
-
-describe('S00 deriveBlockers', () => {
-  const report = (statuses: Array<'ready' | 'pending' | 'error' | 'disabled'>): DiagnosticsReport => ({
-    generatedAt: '2026-08-22T10:00:00Z',
-    local: [],
-    integrations: [
-      { checkId: 'gitlab', label: 'GitLab', scope: 'integration', status: statuses[0], severity: 'error', durationMs: 1, detail: '', fixTarget: 'gitlab' },
-      { checkId: 'model', label: '模型', scope: 'integration', status: statuses[1], severity: 'error', durationMs: 1, detail: '', fixTarget: 'models' },
-      { checkId: 'ssh', label: 'SSH', scope: 'integration', status: statuses[2], severity: 'error', durationMs: 1, detail: '', fixTarget: 'ssh' },
-    ],
-  });
-
-  it('全部就绪时无阻塞', () => {
-    expect(deriveBlockers(report(['ready', 'ready', 'ready']))).toHaveLength(0);
-  });
-
-  it('未就绪项映射到目标设置页', () => {
-    const blockers = deriveBlockers(report(['error', 'pending', 'ready']));
-    expect(blockers.map((b) => b.section)).toEqual(['gitlab', 'models']);
-  });
-
-  it('空报告不产生阻塞', () => {
-    expect(deriveBlockers(null)).toHaveLength(0);
-  });
-});
-
-describe('S50 FIX_TARGET', () => {
-  it('六个检查项均有修复目标且为合法路由', () => {
-    for (const id of ['gitlab', 'model', 'ssh', 'sqlite', 'core', 'executor']) {
-      expect(isSettingsRouteId(FIX_TARGET[id])).toBe(true);
-    }
   });
 });

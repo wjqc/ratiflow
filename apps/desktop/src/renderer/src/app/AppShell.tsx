@@ -7,7 +7,12 @@ import NewTaskPage from './NewTaskPage';
 import ApprovalsPage from './ApprovalsPage';
 import KnowledgePage from './KnowledgePage';
 import SettingsShell from './settings/SettingsShell';
-import { isSettingsRouteId, type SettingsRouteId } from './settings/settings-routes';
+import { SettingsSidebar } from './settings/SettingsSidebar';
+import {
+  DEFAULT_SETTINGS_ROUTE,
+  isSettingsRouteId,
+  type SettingsRouteId,
+} from './settings/settings-routes';
 import { relativeTime } from '../lib/format';
 import { IconInbox, IconSend } from '../components/Icons';
 
@@ -69,6 +74,7 @@ export default function AppShell() {
   // 归档/移除后递增，驱动「最近任务」等派生列表重载。
   const [listVersion, setListVersion] = useState(0);
   const [coreReady, setCoreReady] = useState<boolean | null>(null);
+  const lastWorkspaceRoute = useRef<Route>({ page: 'home' });
 
   useEffect(() => {
     (async () => {
@@ -190,12 +196,9 @@ export default function AppShell() {
 
   const navigate = useCallback((next: Route) => {
     setRoute((prev) => {
-      // 进入设置中心未指定 section 时，沿用当前/最近的 section。
+      // 左下角齿轮始终进入常规；页面内深链仍显式携带 section。
       if (next.page === 'settings' && !next.section) {
-        const stored = loadStoredRoute();
-        const fallback =
-          prev.page === 'settings' ? prev.section : stored?.page === 'settings' ? stored.section : undefined;
-        return fallback ? { ...next, section: fallback } : next;
+        return { ...next, section: DEFAULT_SETTINGS_ROUTE };
       }
       return next;
     });
@@ -214,6 +217,7 @@ export default function AppShell() {
   // 路由/项目变化时持久化，供刷新与重启恢复。
   useEffect(() => {
     storeLast(route, activeProjectId);
+    if (route.page !== 'settings') lastWorkspaceRoute.current = route;
   }, [route, activeProjectId]);
 
   const openTask = useCallback(
@@ -306,26 +310,34 @@ export default function AppShell() {
 
   return (
     <div className="sg-shell">
-      <ProjectSidebar
-        projects={projects}
-        activeProjectId={activeProjectId}
-        tasksByProject={tasksByProject}
-        activeWorkItemId={route.page === 'task' ? route.workItemId : null}
-        coreReady={coreReady}
-        route={route}
-        knowledgeSources={knowledgeSources}
-        knowledgeCounts={knowledgeCounts}
-        onProjectChange={switchProject}
-        onExpandProject={expandProject}
-        onProjectRemove={(project) => void removeProject(project)}
-        onTaskRemove={(task) => void removeTask(task)}
-        // 任务所属项目以树节点为准（可多项目同时展开），不能假定是当前活动项目。
-        onTaskOpen={(workItemId, projectId) => {
-          const pid = projectId ?? activeProjectId;
-          if (pid) openTask(pid, workItemId);
-        }}
-        onNavigate={navigate}
-      />
+      {route.page === 'settings' ? (
+        <SettingsSidebar
+          section={route.section}
+          onNavigate={(section) => navigate({ page: 'settings', section })}
+          onBack={() => navigate(lastWorkspaceRoute.current)}
+        />
+      ) : (
+        <ProjectSidebar
+          projects={projects}
+          activeProjectId={activeProjectId}
+          tasksByProject={tasksByProject}
+          activeWorkItemId={route.page === 'task' ? route.workItemId : null}
+          coreReady={coreReady}
+          route={route}
+          knowledgeSources={knowledgeSources}
+          knowledgeCounts={knowledgeCounts}
+          onProjectChange={switchProject}
+          onExpandProject={expandProject}
+          onProjectRemove={(project) => void removeProject(project)}
+          onTaskRemove={(task) => void removeTask(task)}
+          // 任务所属项目以树节点为准（可多项目同时展开），不能假定是当前活动项目。
+          onTaskOpen={(workItemId, projectId) => {
+            const pid = projectId ?? activeProjectId;
+            if (pid) openTask(pid, workItemId);
+          }}
+          onNavigate={navigate}
+        />
+      )}
       <main className="sg-main">
         {coreReady === false ? (
           <CoreFailurePage />
@@ -345,7 +357,7 @@ export default function AppShell() {
                 projects={projects}
                 onCreated={(workItemId, createdProjectId) => openTask(createdProjectId, workItemId)}
                 onWorkspaceChanged={activateWorkspace}
-                onOpenRemote={() => navigate({ page: 'settings', section: 'ssh' })}
+                onOpenRemote={() => navigate({ page: 'settings', section: 'integrations' })}
                 onBack={() => navigate({ page: 'home' })}
               />
             )}
@@ -370,7 +382,9 @@ export default function AppShell() {
             {route.page === 'knowledge' && (
               <KnowledgePage projectId={route.projectId} projectName={activeProject?.name} />
             )}
-            {route.page === 'settings' && <SettingsShell section={route.section} />}
+            {route.page === 'settings' && (
+              <SettingsShell section={route.section} />
+            )}
           </>
         )}
       </main>
@@ -390,7 +404,7 @@ function CoreFailurePage() {
           <div className="sg-empty" style={{ padding: '40px 24px' }}>
             <div>本地核心（core）未就绪</div>
             <div className="sg-sub">
-              项目、任务与模型配置都保存在本地核心里；恢复前无法继续操作。可到「设置与诊断」查看诊断与日志。
+              项目、任务与模型配置都保存在本地核心里；恢复前无法继续操作。恢复后可在「设置 → 高级设置」查看诊断与日志。
             </div>
             <button
               className="sg-btn sg-btn--primary"
@@ -437,7 +451,7 @@ function HomePage({
                 <IconInbox size={32} style={{ color: 'var(--sg-border-strong)' }} />
                 <div>还没有项目</div>
                 <div className="sg-sub">
-                  先在「设置与诊断 → 项目与目录」登记一个本地项目目录，再回来发起需求
+                  先在「设置 → 项目与目录」登记一个本地项目目录，再回来发起需求
                 </div>
                 <button
                   className="sg-btn sg-btn--primary"

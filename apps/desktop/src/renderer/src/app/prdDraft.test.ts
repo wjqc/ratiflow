@@ -70,7 +70,7 @@ describe('PRD 自动起草', () => {
   });
 
   it('把内部模型错误转换为可操作提示', () => {
-    expect(friendlyAgentError('model:model_unavailable: script exhausted')).toContain('设置与诊断');
+    expect(friendlyAgentError('model:model_unavailable: script exhausted')).toContain('设置 → 模型');
     expect(friendlyAgentError('model_timeout: timed out')).toContain('需求已经保存');
   });
 });
