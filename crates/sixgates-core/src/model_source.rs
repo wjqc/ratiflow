@@ -5,6 +5,8 @@
 use std::sync::Arc;
 
 use sg_integrations::model::{CompletionRequest, CompletionResponse, ModelProvider};
+use sg_integrations::stream::{StreamFuture, StreamingModelProvider};
+use sg_integrations::FakeModel;
 use sg_settings::credentials::CredentialStore;
 use sg_settings::profiles;
 use sg_store::Store;
@@ -17,6 +19,8 @@ struct Resolved {
     max_output_tokens: Option<i64>,
     /// Profile 能力快照（ADR-033 M1）：codec 协商来源。
     capabilities: serde_json::Value,
+    /// Profile 数据策略（M4）：reasoningPersist / serverState 门控。
+    data_policy: serde_json::Value,
 }
 
 /// limits_json 约定键：maxOutputTokens（兼容 max_output_tokens）；<=0 视为未声明。
@@ -32,7 +36,8 @@ pub struct ProfileModel {
     store: Arc<Store>,
     credentials: Arc<dyn CredentialStore>,
     env_key: Option<String>,
-    fallback: Box<dyn ModelProvider>,
+    /// E2E fake 兜底（sync+streaming 同一实例，脚本状态共享；M2）。
+    fallback: Arc<FakeModel>,
     fallback_enabled: bool,
 }
 
@@ -40,17 +45,60 @@ impl ProfileModel {
     pub fn new(
         store: Arc<Store>,
         credentials: Arc<dyn CredentialStore>,
-        fallback: Box<dyn ModelProvider>,
+        fallback: Box<FakeModel>,
     ) -> Self {
         Self {
+            fallback: Arc::from(fallback),
             store,
             credentials,
             env_key: std::env::var("SIXGATES_MODEL_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty()),
-            fallback,
             fallback_enabled: std::env::var_os("SIXGATES_FAKE_MODEL_SCRIPT").is_some(),
         }
+    }
+
+    /// 指纹解析（不访问 Keychain）：同选择逻辑，凭据存在性不参与判定。
+    fn resolve_meta(&self) -> Option<(String, String)> {
+        let items = profiles::model_list(&self.store).ok()?;
+        let primary: Option<String> = profiles::route_get(&self.store).ok().and_then(|routes| {
+            routes.as_array().and_then(|list| {
+                list.iter()
+                    .filter(|r| {
+                        r.get("scope").and_then(|v| v.as_str()) == Some("global")
+                            && r.get("taskKind").and_then(|v| v.as_str()) == Some("default")
+                    })
+                    .map(|r| {
+                        r.get("primaryProfileId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .find(|id| !id.is_empty())
+            })
+        });
+        let meta_of = |profile: &profiles::ModelProfile| {
+            if !profiles::kind_runtime_usable(&profile.provider_kind) {
+                return None;
+            }
+            let base_url = profiles::resolve_base_url(&profile.provider_kind, &profile.base_url);
+            if base_url.is_empty() {
+                return None;
+            }
+            Some((base_url, profile.default_model.clone()))
+        };
+        if let Some(profile) = items
+            .iter()
+            .find(|p| Some(p.id.as_str()) == primary.as_deref())
+        {
+            if let Some(meta) = meta_of(profile) {
+                return Some(meta);
+            }
+        }
+        items
+            .iter()
+            .filter(|p| p.managed_source.is_none())
+            .find_map(meta_of)
     }
 
     /// 解析当前可用供应商：model_routes 主档优先，否则最早一个可运行的
@@ -98,6 +146,7 @@ impl ProfileModel {
                 api_key,
                 max_output_tokens: parse_max_output_tokens(&profile.limits),
                 capabilities: profile.capabilities.clone(),
+                data_policy: profile.data_policy.clone(),
             })
         };
 
@@ -183,6 +232,48 @@ impl ModelProvider for ProfileModel {
                 .map(|r| r.capabilities)
                 .unwrap_or(serde_json::json!({"nativeTools": false})),
         )
+    }
+
+    /// M4：Profile 数据策略（reasoningPersist/serverState 门控来源）。
+    fn data_policy(&self) -> Option<serde_json::Value> {
+        self.resolve().map(|r| r.data_policy)
+    }
+
+    /// M4：Provider 指纹 = sha256(base_url|default_model)；checkpoint 回放绑定。
+    /// 指纹解析不访问 Keychain（resolve_meta 无凭据路径）。
+    fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        match self.resolve_meta() {
+            Some((base_url, model)) => {
+                let hex = sg_store::ids::hex(
+                    Sha256::digest(format!("{base_url}|{model}").as_bytes()).as_slice(),
+                );
+                format!("sha256:{hex}")
+            }
+            None => "profile-routed".into(),
+        }
+    }
+}
+
+/// M2：流式委托——真实路由走 ModelHttp SSE；E2E fake 兜底共享同一脚本实例。
+impl StreamingModelProvider for ProfileModel {
+    fn stream_complete<'a>(
+        &'a self,
+        req: CompletionRequest,
+        sink: Arc<dyn sg_integrations::stream::StreamSink>,
+        cancel: sg_integrations::CancelToken,
+    ) -> StreamFuture<'a> {
+        Box::pin(async move {
+            match self.delegate_with(&req) {
+                Ok((http, req)) => http.stream_complete(req, sink, cancel).await,
+                Err(()) if self.fallback_enabled => {
+                    self.fallback.stream_complete(req, sink, cancel).await
+                }
+                Err(()) => {
+                    Err("model_unavailable: 未找到可用模型，请到“设置 → 模型”完成连接测试".into())
+                }
+            }
+        })
     }
 }
 

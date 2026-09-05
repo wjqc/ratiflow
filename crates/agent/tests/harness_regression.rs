@@ -100,6 +100,7 @@ fn budget_exhausted_fails_run() {
         None,
         &initial,
         &CompactPolicy::default(),
+        None,
     );
     assert!(result.is_err(), "预算耗尽必须失败");
     let final_run = get_run(&store, &run.id).unwrap();
@@ -156,6 +157,7 @@ fn rollout_kind_sequence_exact() {
         Some(rollout),
         &initial,
         &CompactPolicy::default(),
+        None,
     )
     .unwrap();
     assert_eq!(out.run.status, "completed_execution");
@@ -169,6 +171,8 @@ fn rollout_kind_sequence_exact() {
     assert_eq!(
         kinds,
         vec![
+            // M4：Run 启动冻结压缩策略（provider_opaque→local_structured→fail 链）。
+            "compaction_strategy",
             "instructions_assembled",
             "run_started",
             "model_request",

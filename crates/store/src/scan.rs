@@ -22,8 +22,10 @@ fn rules() -> &'static Vec<Rule> {
             Rule { kind: "github_token", re: Regex::new(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b").unwrap() },
             Rule { kind: "gitlab_token", re: Regex::new(r"\bglpat-[A-Za-z0-9_\-]{20,}\b").unwrap() },
             Rule { kind: "bearer_token", re: Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}\b").unwrap() },
-            Rule { kind: "password_assignment", re: Regex::new(r#"(?i)["']?password["']?[ \t]*[:=][ \t]*["']?[^\s"'`\n]{8,}"#).unwrap() },
-            Rule { kind: "api_key_assignment", re: Regex::new(r#"(?i)["']?(api[_-]?key|secret|token)["']?[ \t]*[:=][ \t]*["']?[^\s"'`\n]{16,}"#).unwrap() },
+            // 值限定为带引号字面量或秘密材料字符集（不含 : . < > ( ) ; 等代码标点），
+            // 避免 `let token = std::sync::Arc::new(...)` 之类代码赋值误报阻断快照/草稿落盘。
+            Rule { kind: "password_assignment", re: Regex::new(r#"(?i)["']?password["']?[ \t]*[:=][ \t]*(?:"[^"\n]{8,}"|'[^'\n]{8,}'|[A-Za-z0-9_\-+/=]{8,})"#).unwrap() },
+            Rule { kind: "api_key_assignment", re: Regex::new(r#"(?i)["']?(api[_-]?key|secret|token)["']?[ \t]*[:=][ \t]*(?:"[^"\n]{16,}"|'[^'\n]{16,}'|[A-Za-z0-9_\-+/=]{16,})"#).unwrap() },
             Rule { kind: "email_pii", re: Regex::new(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b").unwrap() },
         ]
     })

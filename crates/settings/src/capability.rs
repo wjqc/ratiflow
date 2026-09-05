@@ -163,7 +163,8 @@ pub fn record_probe(
     snapshot.digest = snapshot.canonical_digest();
 
     // manual 覆盖：只允许收紧——manual 中显式为 false/"none"/"unsupported" 的键优先。
-    let mut merged = serde_json::to_value(&snapshot).map_err(|e| sg_store::Error::Message(e.to_string()))?;
+    let mut merged =
+        serde_json::to_value(&snapshot).map_err(|e| sg_store::Error::Message(e.to_string()))?;
     if let Some(serde_json::Value::Object(manual)) = capabilities.get("manual") {
         if let Some(target) = merged.as_object_mut() {
             for (k, v) in manual {
@@ -179,7 +180,8 @@ pub fn record_probe(
         }
     }
 
-    let merged_json = serde_json::to_string(&merged).map_err(|e| sg_store::Error::Message(e.to_string()))?;
+    let merged_json =
+        serde_json::to_string(&merged).map_err(|e| sg_store::Error::Message(e.to_string()))?;
     store.with_conn(|conn| {
         conn.execute(
             "UPDATE model_profiles SET capabilities_json=?1, revision=revision+1, updated_at=?2

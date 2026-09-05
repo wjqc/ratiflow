@@ -51,6 +51,14 @@ pub struct CompletionResponse {
     pub cached_tokens: i64,
     #[serde(default)]
     pub reasoning_tokens: i64,
+    /// M4：本轮流式的 reasoning plaintext 经 AES-256-GCM 加密后的状态
+    /// （base64(nonce||ciphertext||tag)）。None = 未启用持久化/无 reasoning。
+    /// 网关层填充；明文永不出网关，不进 rollout/日志/UI。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_state_encrypted: Option<String>,
+    /// M4：reasoning 持久化状态（"encrypted"|"dropped_policy"|"dropped_key_unavailable"|"none"）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning_state_status: String,
 }
 
 pub trait ModelProvider: Send + Sync {
@@ -60,6 +68,14 @@ pub trait ModelProvider: Send + Sync {
     /// Provider 能力快照（ADR-033 §4.1）；None = 未验证 → 保守 legacy 路径。
     fn capability(&self) -> Option<serde_json::Value> {
         None
+    }
+    /// 数据策略（ADR-033 §4.1 dataPolicy）：reasoningPersist / serverState 等门控。
+    fn data_policy(&self) -> Option<serde_json::Value> {
+        None
+    }
+    /// Provider 指纹（checkpoint v2 绑定回放来源；跨 Provider 拒绝回放）。
+    fn fingerprint(&self) -> String {
+        self.name().to_string()
     }
 }
 
@@ -130,57 +146,7 @@ impl ModelProvider for ModelHttp {
         } else {
             req.model.clone()
         };
-        let native = req.tools_json.is_some();
-        let mut messages: Vec<serde_json::Value> = Vec::new();
-        if !req.system_prompt.is_empty() {
-            messages.push(serde_json::json!({"role": "system", "content": req.system_prompt}));
-        }
-        for msg in &req.messages {
-            // 原生 transcript：assistant tool_calls 与 tool 结果按 OpenAI 形状透传，
-            // call_id 原样保留（M1：不再把 tool 降级成 user）。
-            if native && msg.role == "assistant" {
-                if let Some(tc) = msg.tool_calls_json.as_deref() {
-                    let calls: serde_json::Value =
-                        serde_json::from_str(tc).unwrap_or(serde_json::Value::Null);
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": msg.content,
-                        "tool_calls": calls,
-                    }));
-                    continue;
-                }
-            }
-            if native && msg.role == "tool" {
-                if let Some(id) = msg.tool_call_id.as_deref() {
-                    messages.push(serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": id,
-                        "content": msg.content,
-                    }));
-                    continue;
-                }
-            }
-            // legacy 兼容性降级（语义保留）：
-            // - developer 是 OpenAI 新式角色，兼容端点（DeepSeek 等）只认 system 等；
-            // - harness 的 tool 消息是扁平文本、不带 tool_call_id，严格端点会 400，
-            //   统一转成 user 消息承载工具输出。
-            let role = match msg.role.as_str() {
-                "developer" => "system",
-                "tool" => "user",
-                other => other,
-            };
-            messages.push(serde_json::json!({"role": role, "content": msg.content}));
-        }
-        let mut body =
-            serde_json::json!({"model": model, "messages": messages, "max_tokens": req.max_tokens});
-        if native {
-            if let Some(tools) = req.tools_json.as_deref() {
-                if let Ok(defs) = serde_json::from_str::<serde_json::Value>(tools) {
-                    body["tools"] = defs;
-                    body["tool_choice"] = serde_json::json!("auto");
-                }
-            }
-        }
+        let body = build_chat_body(req, &model, false);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let send = |body: &serde_json::Value| {
             classify_ureq(
@@ -261,8 +227,69 @@ impl ModelProvider for ModelHttp {
             reasoning_tokens: parsed["usage"]["completion_tokens_details"]["reasoning_tokens"]
                 .as_i64()
                 .unwrap_or(0),
+            reasoning_state_encrypted: None,
+            reasoning_state_status: "none".into(),
         })
     }
+}
+
+/// OpenAI 兼容 /chat/completions 请求体（流式/非流式共用同一构造，M1 transcript 形状不变）。
+pub fn build_chat_body(req: &CompletionRequest, model: &str, stream: bool) -> serde_json::Value {
+    let native = req.tools_json.is_some();
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    if !req.system_prompt.is_empty() {
+        messages.push(serde_json::json!({"role": "system", "content": req.system_prompt}));
+    }
+    for msg in &req.messages {
+        // 原生 transcript：assistant tool_calls 与 tool 结果按 OpenAI 形状透传，
+        // call_id 原样保留（M1：不再把 tool 降级成 user）。
+        if native && msg.role == "assistant" {
+            if let Some(tc) = msg.tool_calls_json.as_deref() {
+                let calls: serde_json::Value =
+                    serde_json::from_str(tc).unwrap_or(serde_json::Value::Null);
+                messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": calls,
+                }));
+                continue;
+            }
+        }
+        if native && msg.role == "tool" {
+            if let Some(id) = msg.tool_call_id.as_deref() {
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": msg.content,
+                }));
+                continue;
+            }
+        }
+        // legacy 兼容性降级（语义保留）：
+        // - developer 是 OpenAI 新式角色，兼容端点（DeepSeek 等）只认 system 等；
+        // - harness 的 tool 消息是扁平文本、不带 tool_call_id，严格端点会 400，
+        //   统一转成 user 消息承载工具输出。
+        let role = match msg.role.as_str() {
+            "developer" => "system",
+            "tool" => "user",
+            other => other,
+        };
+        messages.push(serde_json::json!({"role": role, "content": msg.content}));
+    }
+    let mut body =
+        serde_json::json!({"model": model, "messages": messages, "max_tokens": req.max_tokens});
+    if stream {
+        body["stream"] = serde_json::json!(true);
+    }
+    if native {
+        if let Some(tools) = req.tools_json.as_deref() {
+            if let Ok(defs) = serde_json::from_str::<serde_json::Value>(tools) {
+                body["tools"] = defs;
+                body["tool_choice"] = serde_json::json!("auto");
+            }
+        }
+    }
+    body
 }
 
 /// OpenAI 兼容 GET /models（modelProfile.syncModels 用）；返回模型 ID 列表（排序去重）。
@@ -301,13 +328,36 @@ pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String>
 /// 脚本化 fake（内部队列加锁，complete 经 &self 调用）。
 /// `native=true` 时若请求带原生 tools，脚本中的 legacy action JSON 会被桥接为
 /// 原生 tool_calls 响应（final 动作仍为正文）——同一脚本可测双协议。
+/// 流式桥（M2）：`enable_streaming` 后同一脚本经 delta 拆分走 StreamingModelProvider。
 #[derive(Default)]
 pub struct FakeModel {
-    script: std::sync::Mutex<std::collections::VecDeque<CompletionResponse>>,
-    errors: std::sync::Mutex<std::collections::VecDeque<String>>,
+    pub(crate) script: std::sync::Mutex<std::collections::VecDeque<CompletionResponse>>,
+    pub(crate) errors: std::sync::Mutex<std::collections::VecDeque<String>>,
     pub calls: std::sync::Mutex<Vec<CompletionRequest>>,
     pub native: std::sync::atomic::AtomicBool,
-    call_counter: std::sync::atomic::AtomicU64,
+    /// 流式能力声明 + 流式路径开关（M2 测试桥）。
+    pub(crate) streaming: std::sync::atomic::AtomicBool,
+    /// 首 delta 前挂起直到取消（取消时序测试）。
+    pub(crate) hold_until_cancel: std::sync::atomic::AtomicBool,
+    /// 第 n 个 delta 后挂起 millis 毫秒再检查取消（流中段取消测试）。
+    pub(crate) stall_after_delta: std::sync::Mutex<Option<(usize, u64)>>,
+    /// M4：数据策略（reasoningPersist 门控测试位）。
+    pub(crate) data_policy: std::sync::Mutex<Option<serde_json::Value>>,
+    /// M4：流式发射的 reasoning 明文（仅测试路径；网关加密后明文即弃）。
+    pub(crate) reasoning_text: std::sync::Mutex<Option<String>>,
+    pub(crate) call_counter: std::sync::atomic::AtomicU64,
+}
+
+impl FakeModel {
+    /// 声明数据策略（测试用：reasoningPersist=encrypted_at_rest 等）。
+    pub fn set_data_policy(&self, policy: serde_json::Value) {
+        *self.data_policy.lock().unwrap() = Some(policy);
+    }
+
+    /// M4 测试：流式时发射 reasoning_content delta（DeepSeek 形状）。
+    pub fn set_reasoning_text(&self, text: &str) {
+        *self.reasoning_text.lock().unwrap() = Some(text.into());
+    }
 }
 
 impl FakeModel {
@@ -323,6 +373,24 @@ impl FakeModel {
 
     pub fn push_error(&self, error: &str) {
         self.errors.lock().unwrap().push_back(error.into());
+    }
+
+    /// M4：带缓存命中 tokens 的脚本响应（缓存观测测试）。
+    pub fn push_response_cached(
+        &self,
+        content: &str,
+        tokens_in: i64,
+        tokens_out: i64,
+        cached: i64,
+    ) {
+        self.script.lock().unwrap().push_back(CompletionResponse {
+            content: content.into(),
+            tokens_in,
+            tokens_out,
+            cached_tokens: cached,
+            finish_reason: "stop".into(),
+            ..CompletionResponse::default()
+        });
     }
 
     /// 声明原生工具能力（ADR-033：fake 以 manual 来源宣称，仅供测试路径）。
@@ -343,13 +411,14 @@ impl ModelProvider for FakeModel {
 
     fn capability(&self) -> Option<serde_json::Value> {
         if self.native.load(std::sync::atomic::Ordering::Relaxed) {
+            let streaming = self.streaming.load(std::sync::atomic::Ordering::Relaxed);
             Some(serde_json::json!({
                 "schemaVersion": 1,
                 "protocols": ["chat_completions"],
                 "preferredProtocol": "chat_completions",
                 "nativeTools": true,
-                "streamText": false,
-                "streamToolArguments": false,
+                "streamText": streaming,
+                "streamToolArguments": streaming,
                 "reasoningTransport": "none",
                 "compaction": "local_structured",
                 "cache": "implicit",
@@ -361,6 +430,10 @@ impl ModelProvider for FakeModel {
         } else {
             None
         }
+    }
+
+    fn data_policy(&self) -> Option<serde_json::Value> {
+        self.data_policy.lock().unwrap().clone()
     }
 
     fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, String> {

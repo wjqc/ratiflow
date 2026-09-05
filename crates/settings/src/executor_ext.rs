@@ -42,7 +42,7 @@ pub fn update(store: &Store, settings: &Value, expected_revision: i64) -> Settin
     if let Some(m) = mode {
         if !matches!(
             m,
-            "docker" | "safe_restricted" | "unsafe_explicit" | "disabled"
+            "docker" | "kernel_restricted" | "safe_restricted" | "unsafe_explicit" | "disabled"
         ) {
             return Err(
                 SettingsError::new("INVALID_PARAMS", format!("未知执行模式 {m}"))
@@ -92,7 +92,9 @@ pub struct SelfCheckStep {
     pub detail: String,
 }
 
-/// 运行自检：Docker 探测（版本/一次性容器/写临时文件/销毁/清理验证）或受限模式只读验证。
+/// 运行自检：Docker 探测（版本/一次性容器/写临时文件/销毁/清理验证）、
+/// 内核沙箱真实验证（允许面读通过 + 敏感面读被拒 + 禁网生效）或受限模式只读验证。
+/// 同时返回 sandbox capability（backend/version/保护范围/阻塞原因）。
 pub fn check(store: &Store) -> SettingsResult<Value> {
     let settings = get(store)?;
     let mode = settings
@@ -145,29 +147,126 @@ pub fn check(store: &Store) -> SettingsResult<Value> {
                 "error"
             }
         }
-        _ => {
-            // 受限/禁用模式：验证只读命令白名单可用（不产生任何写副作用）。
-            let ran = std::process::Command::new("ls").arg("/tmp").output();
-            let ok = ran.map(|o| o.status.success()).unwrap_or(false);
-            steps.push(step(
-                "restricted_readonly_probe",
-                ok,
-                if ok {
-                    "只读探测通过；自动写/执行保持禁用".into()
-                } else {
-                    "受限模式探测失败".into()
-                },
-            ));
-            if ok {
+        "kernel_restricted" | "safe_restricted" | "disabled" => {
+            let cap = sg_executor::sandbox::probe();
+            if mode == "kernel_restricted" || mode == "disabled" {
+                steps.push(step(
+                    "sandbox_backend_probe",
+                    cap.backend != "unavailable",
+                    if cap.backend != "unavailable" {
+                        format!("{} ({})", cap.backend, cap.version)
+                    } else {
+                        cap.blocked_reason.clone()
+                    },
+                ));
+            }
+            // 内核沙箱真实验证：允许面读通过、敏感面读被拒（真实 runner，非 mock）。
+            if cap.backend != "unavailable" {
+                let dir = std::env::temp_dir().join(format!(
+                    "sg-exec-check-{}-{}",
+                    std::process::id(),
+                    sg_store::ids::new_id("t")
+                ));
+                let _ = std::fs::create_dir_all(&dir);
+                let probe_file = dir.join("probe.txt");
+                let _ = std::fs::write(&probe_file, "kernel-ok");
+                let mk = |argv: Vec<String>| sg_executor::ExecutionManifest {
+                    argv,
+                    work_dir: String::new(),
+                    image: String::new(),
+                    network_off: true,
+                    memory_mb: 0,
+                    cpus: 0.0,
+                    timeout_sec: 10,
+                    writes_files: false,
+                    sandbox_read_paths: vec![dir.to_string_lossy().to_string()],
+                    sandbox_write_paths: vec![dir.to_string_lossy().to_string()],
+                };
+                let allowed = sg_executor::execute(
+                    sg_executor::Mode::KernelRestricted,
+                    &mk(vec!["cat".into(), probe_file.to_string_lossy().to_string()]),
+                );
+                let allowed_ok = allowed
+                    .as_ref()
+                    .map(|r| r.stdout.contains("kernel-ok"))
+                    .unwrap_or(false);
+                steps.push(step(
+                    "sandbox_allowed_read",
+                    allowed_ok,
+                    match &allowed {
+                        Ok(r) => format!("exit={} stdout={:?}", r.exit_code, r.stdout.trim()),
+                        Err(e) => e.to_string(),
+                    },
+                ));
+                let denied = sg_executor::execute(
+                    sg_executor::Mode::KernelRestricted,
+                    &mk(vec!["cat".into(), "/etc/passwd".into()]),
+                );
+                let denied_ok = denied
+                    .as_ref()
+                    .map(|r| r.exit_code != 0 && !r.stdout.contains("root"))
+                    .unwrap_or_else(|_| {
+                        matches!(
+                            denied.as_ref().err(),
+                            Some(sg_executor::ExecError::SandboxUnavailable(_))
+                                | Some(sg_executor::ExecError::SandboxDenied(_))
+                        )
+                    });
+                steps.push(step(
+                    "sandbox_sensitive_read_denied",
+                    denied_ok,
+                    match &denied {
+                        Ok(r) => format!("exit={}", r.exit_code),
+                        Err(e) => e.to_string(),
+                    },
+                ));
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            if mode == "safe_restricted" {
+                // 本机白名单（非强隔离）：不做沙箱声明，只验证只读命令可用。
+                let ran = std::process::Command::new("ls").arg("/tmp").output();
+                let ok = ran.map(|o| o.status.success()).unwrap_or(false);
+                steps.push(step(
+                    "argv_allowlist_only",
+                    ok,
+                    if ok {
+                        "本机白名单（非强隔离）；自动写/执行保持禁用".into()
+                    } else {
+                        "白名单探测失败".into()
+                    },
+                ));
+            }
+            if steps.iter().all(|s| s["status"] == json!("passed")) {
                 "ready"
             } else {
                 "error"
             }
         }
+        _ => "error",
     };
-    Ok(
-        json!({"mode": mode, "status": overall, "steps": steps, "checkedAt": sg_store::timefmt::now()}),
-    )
+    let cap = sg_executor::sandbox::probe();
+    Ok(json!({
+        "mode": mode,
+        "status": overall,
+        "steps": steps,
+        "sandbox": {
+            "backend": cap.backend,
+            "version": cap.version,
+            "blockedReason": cap.blocked_reason,
+            "protectionScope": if cap.backend == "unavailable" {
+                json!(null)
+            } else {
+                json!({
+                    "kind": if cap.backend == "mac_seatbelt" { "Seatbelt（内核 MAC，非容器）" }
+                            else if cap.backend == "linux_landlock" { "Landlock（内核 LSM 路径限制，非容器；网络隔离需 ABI≥4）" }
+                            else { "容器" },
+                    "writeScope": "仅受管 worktree、run 工件目录与进程临时目录",
+                    "network": "manifest.network_off 时拒绝全部连接（Landlock 除外，见 ADR-034）",
+                })
+            },
+        },
+        "checkedAt": sg_store::timefmt::now(),
+    }))
 }
 
 fn step(name: &str, ok: bool, detail: String) -> Value {

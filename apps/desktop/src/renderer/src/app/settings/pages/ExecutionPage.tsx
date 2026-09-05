@@ -15,10 +15,22 @@ interface ExecutorSettings {
   revision: number;
 }
 interface CheckStep { name: string; status: string; detail: string }
+interface SandboxCapability {
+  backend: string;
+  version: string;
+  blockedReason: string;
+  protectionScope?: {
+    kind: string;
+    writeScope: string;
+    network: string;
+  } | null;
+}
+interface CheckResponse { status: string; steps: CheckStep[]; sandbox?: SandboxCapability }
 
 const MODE_HINT: Record<string, string> = {
   docker: '推荐。一次性容器、禁网、资源限制。',
-  safe_restricted: '只读命令白名单；自动写/执行禁用。',
+  kernel_restricted: '内核沙箱（macOS Seatbelt / Linux Landlock）强制路径与网络边界；写仅限受管 worktree 与工件目录。无 Docker 时推荐。',
+  safe_restricted: '本机白名单（非强隔离）；自动写/执行禁用。',
   disabled: '全部执行禁用。',
   unsafe_explicit: '不提供容器隔离；所有执行进入日志与证据标注。',
 };
@@ -31,7 +43,7 @@ export function ExecutionPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
-  const [check, setCheck] = useState<{ status: string; steps: CheckStep[] } | null>(null);
+  const [check, setCheck] = useState<CheckResponse | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
@@ -65,7 +77,7 @@ export function ExecutionPage() {
   const runCheck = async () => {
     setChecking(true); setError(null);
     try {
-      setCheck(await rpc<{ status: string; steps: CheckStep[] }>('executor.check', {}));
+      setCheck(await rpc<CheckResponse>('executor.check', {}));
     } catch (e) {
       setError(e instanceof Error ? e.message : '自检失败');
     } finally { setChecking(false); }
@@ -89,11 +101,17 @@ export function ExecutionPage() {
             <label htmlFor="ex-mode">执行模式</label>
             <select id="ex-mode" className="sg-select" value={draft.mode ?? 'safe_restricted'} onChange={(e) => set('mode', e.target.value)}>
               <option value="docker">Docker（推荐）</option>
-              <option value="safe_restricted">安全受限（只读白名单）</option>
+              <option value="kernel_restricted">内核沙箱（无 Docker 时推荐）</option>
+              <option value="safe_restricted">本机白名单（非强隔离）</option>
               <option value="disabled">禁用</option>
               <option value="unsafe_explicit">显式不安全（需确认）</option>
             </select>
             <p className="sg-hint">{MODE_HINT[draft.mode ?? 'safe_restricted']}</p>
+            {draft.mode === 'safe_restricted' ? (
+              <div className="sg-banner sg-banner--warning" role="alert" style={{ marginTop: 4 }}>
+                本机白名单（非强隔离）：仅按命令名白名单执行，无内核强制隔离。
+              </div>
+            ) : null}
             {draft.mode === 'unsafe_explicit' ? (
               <div className="sg-banner sg-banner--warning" role="alert" style={{ marginTop: 4 }}>
                 不安全模式不提供容器级隔离；保存即视为二次确认。
@@ -133,25 +151,35 @@ export function ExecutionPage() {
         </form>
       </SettingsSection>
 
-      <SettingsSection title="运行自检" description="创建一次性容器（禁网）→ 写入临时文件 → 销毁并验证清理">
+      <SettingsSection title="运行自检" description="内核沙箱验证（允许面读/敏感面拒/禁网）或一次性容器全流程">
         <div className="sg-card sg-set-form">
           <button className="sg-btn" disabled={checking} onClick={() => void runCheck()} aria-live="polite">
             <IconZap size={14} />
             {checking ? '自检运行中…' : '运行自检'}
           </button>
           {check ? (
-            <table className="sg-table" style={{ marginTop: 8 }} aria-label="自检步骤">
-              <thead><tr><th>步骤</th><th>状态</th><th>详情</th></tr></thead>
-              <tbody>
-                {check.steps.map((s) => (
-                  <tr key={s.name}>
-                    <td>{s.name}</td>
-                    <td><StatusPill kind={s.status === 'passed' ? 'ready' : 'error'} label={s.status} /></td>
-                    <td className="sg-muted">{s.detail.slice(0, 80)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <>
+              {check.sandbox ? (
+                <div className="sg-hint" style={{ marginTop: 8 }} role="note">
+                  沙箱后端：{check.sandbox.backend}
+                  {check.sandbox.version ? `（${check.sandbox.version}）` : ''}
+                  {check.sandbox.blockedReason ? ` — 阻塞：${check.sandbox.blockedReason}` : ''}
+                  {check.sandbox.protectionScope ? `；实际保护范围：${check.sandbox.protectionScope.kind}；写限 ${check.sandbox.protectionScope.writeScope}` : ''}
+                </div>
+              ) : null}
+              <table className="sg-table" style={{ marginTop: 8 }} aria-label="自检步骤">
+                <thead><tr><th>步骤</th><th>状态</th><th>详情</th></tr></thead>
+                <tbody>
+                  {check.steps.map((s) => (
+                    <tr key={s.name}>
+                      <td>{s.name}</td>
+                      <td><StatusPill kind={s.status === 'passed' ? 'ready' : 'error'} label={s.status} /></td>
+                      <td className="sg-muted">{s.detail.slice(0, 80)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
           ) : null}
         </div>
       </SettingsSection>

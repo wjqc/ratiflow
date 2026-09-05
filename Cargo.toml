@@ -40,6 +40,10 @@ base64 = "0.22"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time"] }
 ureq = { version = "2", features = ["json"] }
+# ADR-033 M2：模型调用路径的可取消 async HTTP/SSE 客户端（GitLab 等 ureq 适配器暂不迁移）。
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+aes-gcm = "0.10"
 
 # 内部 crate
 sg-protocol = { path = "crates/protocol" }

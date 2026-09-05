@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use sg_protocol::{ErrorCode, RpcError};
 use sg_store::{objects, outbox, Error, Store};
 
+use crate::settings_dispatch::serr;
 use crate::state::AppState;
 
 type RpcResult = Result<Value, RpcError>;
@@ -281,6 +282,33 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             )
             .map_err(store_err)?;
             Ok(serde_json::to_value(src).unwrap_or_default())
+        }
+        "knowledge.syncFromRepo" => {
+            if !sg_knowledge::flags::manifest_enabled(store).map_err(store_err)? {
+                return Ok(json!({"status": "feature_disabled"}));
+            }
+            let project_id = str_param(params, "projectId")?;
+            let root =
+                sg_knowledge::reconcile::project_root(store, &project_id).map_err(store_err)?;
+            let reconcile = sg_knowledge::reconcile::sync_from_repo(store, &project_id, &root)
+                .map_err(store_err)?;
+            let (generation_id, generation_status) =
+                sg_knowledge::reconcile::build_and_activate_generation(store, &project_id, &root)
+                    .map_err(store_err)?;
+            Ok(json!({
+                "reconcile": reconcile,
+                "generationId": generation_id,
+                "generationStatus": generation_status,
+            }))
+        }
+        "knowledge.manifestCreate" => {
+            sg_knowledge::manifest::manifest_create(store, params).map_err(store_err)
+        }
+        "knowledge.manifestUpdate" => {
+            sg_knowledge::manifest::manifest_update(store, params).map_err(store_err)
+        }
+        "knowledge.manifestRemove" => {
+            sg_knowledge::manifest::manifest_remove(store, params).map_err(store_err)
         }
         "knowledge.search" => {
             let hits = sg_knowledge::search(
@@ -1058,16 +1086,53 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             if terminal {
                 return Ok(json!({"runId": run_id, "status": run.status}));
             }
-            if let Some(flag) = state.runs.get(&run_id) {
-                // 活跃任务：置位取消旗标；循环在下一检查点收尾并发 run.cancelled。
-                // 阻塞中的模型调用不可中断（诚实语义），终态经事件/agent.get 可见。
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(token) = state.runs.get(&run_id) {
+                // 活跃任务：置位取消令牌——阻塞中的模型 HTTP/SSE 在 select 点即时
+                // 中止（放弃 future 即关闭 socket，目标 <1s），Run 循环以 cancelled
+                // 终态收尾并发恰好一条 run.cancelled。
+                token.cancel();
                 Ok(json!({"runId": run_id, "status": "cancelling"}))
             } else {
                 // 无活跃任务（遗留 running/paused 行，如进程崩溃后）：直接置库收尾。
                 sg_agent::cancel(store, &run_id).map_err(store_err)?;
                 Ok(json!({"runId": run_id, "status": "cancelled"}))
             }
+        }
+        // --- M6：受控 MCP ToolProvider（ADR-035）---
+        "mcp.serverAdd" => {
+            let args_list = str_list_param(params, "args");
+            sg_settings::mcp_ext::server_add(
+                store,
+                &str_param(params, "name")?,
+                &str_param(params, "command")?,
+                &args_list,
+            )
+            .map_err(serr)
+        }
+        "mcp.serverApprove" => sg_settings::mcp_ext::server_approve(
+            store,
+            &str_param(params, "serverId")?,
+            &str_param(params, "decidedBy")?,
+        )
+        .map_err(serr),
+        "mcp.serverList" => sg_settings::mcp_ext::server_list(store).map_err(serr),
+        "mcp.serverRemove" => sg_settings::mcp_ext::server_revoke(
+            store,
+            &str_param(params, "serverId")?,
+            &str_param(params, "decidedBy")?,
+            &opt_str_param(params, "reason").unwrap_or_default(),
+        )
+        .map_err(serr),
+        "mcp.serverRefresh" => {
+            sg_settings::mcp_ext::server_refresh(store, &str_param(params, "serverId")?)
+                .map_err(serr)
+        }
+        "mcp.toolsList" => mcp_tools_list(store, opt_str_param(params, "serverId").as_deref()),
+
+        // M4：模型缓存与压缩观测（不含任何 reasoning 正文）。
+        "model.usage" => {
+            let run_id = opt_str_param(params, "runId");
+            model_usage(state, store, run_id.as_deref())
         }
         "agent.proposals" => {
             let items =
@@ -1992,6 +2057,32 @@ fn assemble_policy_snapshot(store: &Store) -> (sg_policy::Snapshot, Value) {
             "requiresApproval": requires_approval,
         }));
     }
+    // M6（ADR-035）：活跃 MCP 工具纳入策略快照——
+    // read_only → Low/免审批；写 → High/必须审批；data_level=external；
+    // 沙箱标注：本地 stdio 进程直启（沙箱包裹为后续硬化项），远端不受本机沙箱保护。
+    for t in sg_settings::mcp_ext::active_tools(store) {
+        let model_name = format!("mcp__{}__{}", t.server_name, t.tool_name);
+        rules.push(sg_policy::ToolRule {
+            tool: model_name.clone(),
+            risk: if t.read_only {
+                sg_policy::Risk::Low
+            } else {
+                sg_policy::Risk::High
+            },
+            requires_approval: !t.read_only,
+            data_level: "external".into(),
+            max_result_bytes: 64 * 1024,
+            timeout_sec: 60,
+        });
+        sources.push(json!({
+            "tool": model_name,
+            "source": "mcp",
+            "server": t.server_name,
+            "schemaDigest": t.schema_digest,
+            "readOnly": t.read_only,
+            "sandboxed": false,
+        }));
+    }
     (
         sg_policy::Snapshot {
             tool_rules: rules,
@@ -2005,6 +2096,7 @@ fn assemble_policy_snapshot(store: &Store) -> (sg_policy::Snapshot, Value) {
 pub(crate) fn mode_str(m: sg_executor::Mode) -> &'static str {
     match m {
         sg_executor::Mode::Docker => "docker",
+        sg_executor::Mode::KernelRestricted => "kernel_restricted",
         sg_executor::Mode::SafeRestricted => "safe_restricted",
         sg_executor::Mode::UnsafeExplicit => "unsafe_explicit",
         sg_executor::Mode::Disabled => "disabled",
@@ -2019,6 +2111,7 @@ pub(crate) fn effective_executor_mode(
         .ok()
         .and_then(|m| match m.as_str() {
             "docker" => Some(sg_executor::Mode::Docker),
+            "kernel_restricted" => Some(sg_executor::Mode::KernelRestricted),
             "safe_restricted" => Some(sg_executor::Mode::SafeRestricted),
             "unsafe_explicit" => Some(sg_executor::Mode::UnsafeExplicit),
             "disabled" => Some(sg_executor::Mode::Disabled),
@@ -2032,6 +2125,10 @@ pub(crate) fn effective_executor_mode(
     match prof["mode"].as_str() {
         Some("docker") if sg_executor::docker_available() => {
             (sg_executor::Mode::Docker, "settings")
+        }
+        // kernel_restricted 要求内核沙箱实际可用（不可用 → 探测回落，fail-closed）。
+        Some("kernel_restricted") if sg_executor::sandbox::probe().backend != "unavailable" => {
+            (sg_executor::Mode::KernelRestricted, "settings")
         }
         Some("safe_restricted") => (sg_executor::Mode::SafeRestricted, "settings"),
         Some("unsafe_explicit") if confirmed => (sg_executor::Mode::UnsafeExplicit, "settings"),
@@ -2070,6 +2167,8 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
     // 否则装配（注册表+toolPolicy 覆盖）并落库 policy_snapshot 列。
     let parse_mode = |v: &str| match v {
         "docker" => Some(sg_executor::Mode::Docker),
+        "kernel_restricted" => Some(sg_executor::Mode::KernelRestricted),
+        // 旧值兼容读取（ADR-034）：safe_restricted 仅 argv 只读白名单，无内核强制。
         "safe_restricted" => Some(sg_executor::Mode::SafeRestricted),
         "unsafe_explicit" => Some(sg_executor::Mode::UnsafeExplicit),
         "disabled" => Some(sg_executor::Mode::Disabled),
@@ -2112,11 +2211,39 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
     } else {
         let (snap, sources) = assemble_policy_snapshot(store);
         let (m, src) = effective_executor_mode(state, store);
+        // ADR-034 M3：内核沙箱能力与本次 Run 的策略 digest 固化进执行快照
+        // （backend/version/digest；审计与放行对账可回查）。
+        let sandbox_probe = sg_executor::sandbox::probe();
+        let sandbox_policy = sg_executor::sandbox::SandboxPolicy {
+            read_paths: work_dir
+                .as_ref()
+                .map(|p| vec![p.to_string_lossy().to_string()])
+                .unwrap_or_default(),
+            write_paths: vec![
+                work_dir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                store
+                    .data_dir
+                    .join("artifacts")
+                    .join(run_id)
+                    .to_string_lossy()
+                    .to_string(),
+            ],
+            network_off: true,
+        };
         let envelope = json!({
             "snapshot": serde_json::to_value(&snap).unwrap_or_default(),
             "sources": sources["sources"],
             "mode": mode_str(m),
             "modeSource": src,
+            "sandbox": {
+                "backend": sandbox_probe.backend,
+                "version": sandbox_probe.version,
+                "policyDigest": sandbox_policy.digest(),
+                "blockedReason": sandbox_probe.blocked_reason,
+            },
         });
         let _ = store.with_conn(|conn| {
             conn.execute(
@@ -2281,8 +2408,12 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
             let _ = r.append("memory_block_missing", missing);
         }
     }
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state.runs.register(run_id, flag.clone());
+    let token = Arc::new(sg_integrations::CancelToken::new());
+    state.runs.register(run_id, token.clone());
+    // M2：高频 UI delta 转发器（易失通道；不落库）。
+    let forwarder: Arc<dyn sg_agent::modelgw::TurnDeltaForwarder> = Arc::new(
+        crate::deltas::HubForwarder::new(state.deltas.clone(), run_id, &workitem_id),
+    );
     let run_store = state.run_store.clone();
     let audit_store = state.run_store.clone();
     let gateway = state.model.clone();
@@ -2329,10 +2460,11 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
                 Some(executor.as_ref()),
                 &config,
                 &run_id_inner,
-                Some(&flag),
+                Some(&token),
                 rollout.take(),
                 &initial,
                 &compact_policy,
+                Some(forwarder),
             );
             (out, rollout)
         })
@@ -2390,4 +2522,150 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         registry.unregister(&run_id_owned);
     });
     Ok(summary.as_ref().clone())
+}
+
+/// M4：model.usage 聚合——model_turns 的 token/缓存/延迟观测 + 压缩次数与前后估算。
+fn model_usage(_state: &AppState, store: &Store, run_id: Option<&str>) -> RpcResult {
+    let (calls, tokens_in, tokens_out, cached, reasoning, ttft_avg, ttft_p95, total_ms, compactions, compact_before, compact_after) =
+        store
+            .with_conn(|conn| {
+                let turns: (i64, i64, i64, i64, i64, Option<f64>, Option<i64>, i64) = conn
+                    .query_row(
+                        "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), COALESCE(SUM(cached_tokens),0), COALESCE(SUM(reasoning_tokens),0), AVG(ttft_ms), MAX(ttft_ms), COALESCE(SUM(total_ms),0) FROM model_turns WHERE (?1 IS NULL OR agent_run_id=?1)",
+                        rusqlite::params![run_id],
+                        |r| {
+                            Ok((
+                                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+                                r.get(5)?, r.get(6)?, r.get(7)?,
+                            ))
+                        },
+                    )
+                    .map_err(Error::from)?;
+                let comp: (i64, i64, i64) = conn
+                    .query_row(
+                        "SELECT COUNT(*), COALESCE(MAX(json_extract(payload,'$.beforeEst')),-1), COALESCE(MAX(json_extract(payload,'$.afterEst')),-1) FROM events_outbox WHERE type='run.compacted' AND (?1 IS NULL OR aggregate_id=?1)",
+                        rusqlite::params![run_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .map_err(Error::from)?;
+                Ok((
+                    turns.0, turns.1, turns.2, turns.3, turns.4,
+                    turns.5, turns.6, turns.7,
+                    comp.0, comp.1, comp.2,
+                ))
+            })
+            .map_err(store_err)?;
+    let hit_ratio = if tokens_in > 0 {
+        Some((cached as f64 / tokens_in as f64 * 1000.0).round() / 1000.0)
+    } else {
+        None
+    };
+    Ok(json!({
+        "scope": run_id,
+        "calls": calls,
+        "tokensIn": tokens_in,
+        "tokensOut": tokens_out,
+        "cachedTokens": cached,
+        "cacheHitRatio": hit_ratio,
+        "reasoningTokens": reasoning,
+        "ttftAvgMs": ttft_avg.map(|v| (v * 10.0).round() / 10.0),
+        "ttftP95Ms": ttft_p95,
+        "totalMs": total_ms,
+        "compactions": compactions,
+        "compactionBeforeEst": if compact_before >= 0 { json!(compact_before) } else { json!(null) },
+        "compactionAfterEst": if compact_after >= 0 { json!(compact_after) } else { json!(null) },
+        "costMicros": 0,
+        "costNote": "未接价格表；成本恒 0（诚实口径）",
+    }))
+}
+
+/// M6：工具清单（候选/活跃/撤销状态 + schema digest）。
+fn mcp_tools_list(store: &Store, server_id: Option<&str>) -> RpcResult {
+    let items: Vec<Value> = store
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT t.id, t.server_id, s.name, t.tool_name, t.description, t.schema_json, t.schema_digest, t.read_only_hint, t.status
+                 FROM mcp_server_tools t JOIN mcp_servers s ON s.id=t.server_id
+                 WHERE (?1 IS NULL OR t.server_id=?1)
+                 ORDER BY s.name, t.tool_name",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![server_id], |r| {
+                Ok(json!({
+                    "toolId": r.get::<_, String>(0)?,
+                    "serverId": r.get::<_, String>(1)?,
+                    "serverName": r.get::<_, String>(2)?,
+                    "toolName": r.get::<_, String>(3)?,
+                    "description": r.get::<_, String>(4)?,
+                    "schema": serde_json::from_str::<Value>(&r.get::<_, String>(5)?).unwrap_or(Value::Null),
+                    "schemaDigest": r.get::<_, String>(6)?,
+                    "readOnlyHint": r.get::<_, i64>(7)? == 1,
+                    "status": r.get::<_, String>(8)?,
+                    "modelName": format!("mcp__{}__{}", r.get::<_, String>(2)?, r.get::<_, String>(3)?),
+                }))
+            })?;
+            let out = rows.flatten().collect::<Vec<_>>();
+            Ok(out)
+        })
+        .map_err(store_err)?;
+    Ok(json!({"items": items}))
+}
+
+#[cfg(test)]
+mod m6_zero_change_tests {
+    use super::*;
+
+    /// M6 退出标准：默认无 MCP server 时零行为变化——
+    /// 策略快照不含任何 mcp 来源；注册+批准后出现（写工具 High/必审批）。
+    #[test]
+    fn policy_snapshot_unchanged_without_mcp_servers() {
+        let dir = std::env::temp_dir().join(format!("sg-mcp-zero-{}", sg_store::ids::new_id("t")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir, "test").unwrap();
+        let (snap, envelope) = assemble_policy_snapshot(&store);
+        let any_mcp = envelope["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["source"] == "mcp");
+        assert!(!any_mcp, "无 MCP server 时策略快照不得出现 mcp 来源");
+        let before_count = snap.tool_rules.len();
+
+        // 注册+批准（需要 python3 跑 fake server；缺失时跳过该半段）。
+        let has_python = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if has_python {
+            let v = sg_settings::mcp_ext::server_add(
+                &store,
+                "srvzero",
+                "python3",
+                &["/tmp/sg-mcp-e2e/fake_server.py".into(), "ok".into()],
+            )
+            .unwrap();
+            sg_settings::mcp_ext::server_approve(&store, v["serverId"].as_str().unwrap(), "admin")
+                .unwrap();
+            let (snap2, envelope2) = assemble_policy_snapshot(&store);
+            let mcp_rules: Vec<_> = snap2
+                .tool_rules
+                .iter()
+                .filter(|r| r.tool.starts_with("mcp__"))
+                .collect();
+            assert_eq!(mcp_rules.len(), 2, "活跃 MCP 工具进策略快照");
+            let write_rule = mcp_rules
+                .iter()
+                .find(|r| r.tool.ends_with("send_thing"))
+                .unwrap();
+            assert!(write_rule.requires_approval, "写工具必须审批");
+            assert_eq!(write_rule.data_level, "external");
+            assert!(envelope2["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["source"] == "mcp" && s["sandboxed"] == json!(false)));
+            assert_eq!(snap.tool_rules.len(), before_count, "基线规则集不变");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

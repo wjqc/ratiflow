@@ -368,9 +368,11 @@ fn run_capture_worker(
     let req = CompletionRequest {
         model: mem::capture::TASK_KIND.into(),
         system_prompt: CAPTURE_SYSTEM_PROMPT.into(),
+        tools_json: None,
         messages: vec![ChatMessage {
             role: "user".into(),
             content: summary.to_string(),
+            ..Default::default()
         }],
         max_tokens: 2048,
         response_schema: None,

@@ -3273,6 +3273,110 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "model.usage",
+      "params": [
+        {
+          "name": "runId",
+          "type": "string",
+          "required": false,
+          "desc": "可选：限定单个 Run；缺省 = 全局聚合"
+        }
+      ],
+      "result": "value",
+      "desc": "M4 模型缓存与压缩观测：cached tokens、命中率、reasoning tokens、TTFT/总延迟、压缩次数与前后估算（不含任何 reasoning 正文）"
+    },
+    {
+      "name": "mcp.serverAdd",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "command",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "args",
+          "type": "array",
+          "required": false
+        }
+      ],
+      "result": "value",
+      "desc": "M6:注册 MCP server(立即探针 initialize+tools/list,工具以候选落库;https 本构建 fail-closed)"
+    },
+    {
+      "name": "mcp.serverApprove",
+      "params": [
+        {
+          "name": "serverId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value",
+      "desc": "M6:管理员批准(server+工具候选转 active;审计)"
+    },
+    {
+      "name": "mcp.serverList",
+      "params": [],
+      "result": "value",
+      "desc": "M6:列出 MCP server(含状态/探针错误/审批信息)"
+    },
+    {
+      "name": "mcp.serverRemove",
+      "params": [
+        {
+          "name": "serverId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value",
+      "desc": "M6:撤销(明确失败而非换工具;审计)"
+    },
+    {
+      "name": "mcp.serverRefresh",
+      "params": [
+        {
+          "name": "serverId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value",
+      "desc": "M6:重新探针;Schema digest 漂移→新候选,不热更新活跃集(refreshDrift 标注)"
+    },
+    {
+      "name": "mcp.toolsList",
+      "params": [
+        {
+          "name": "serverId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value",
+      "desc": "M6:列出工具候选/活跃/撤销状态与 schema digest"
     }
   ],
   "events": [

@@ -64,16 +64,15 @@ fn load_materials(store: &Store, manifest_id: &str) -> Result<Vec<SourceMaterial
     })?;
     let mut materials = Vec::new();
     for source_id in rows {
-        let (name, origin, stable_id): (String, String, String) = store
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT name, COALESCE(origin,'local'), COALESCE(stable_id,'')
+        let (name, origin, stable_id): (String, String, String) = store.with_conn(|conn| {
+            conn.query_row(
+                "SELECT name, COALESCE(origin,'local'), COALESCE(stable_id,'')
                      FROM knowledge_sources WHERE id=?1",
-                    [&source_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .map_err(|e| Error::Message(format!("legacy_unverifiable:source:{e}")))
-            })?;
+                [&source_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| Error::Message(format!("legacy_unverifiable:source:{e}")))
+        })?;
         let chunk_shas: Vec<String> = store.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT object_sha256 FROM knowledge_chunks WHERE source_id=?1 ORDER BY ordinal",
@@ -87,9 +86,8 @@ fn load_materials(store: &Store, manifest_id: &str) -> Result<Vec<SourceMaterial
         })?;
         let mut chunks = Vec::new();
         for sha in chunk_shas {
-            let body = objects::open(store, &sha).map_err(|e| {
-                Error::Message(format!("legacy_unverifiable:object:{sha}:{e}"))
-            })?;
+            let body = objects::open(store, &sha)
+                .map_err(|e| Error::Message(format!("legacy_unverifiable:object:{sha}:{e}")))?;
             chunks.push(ChunkRef {
                 sha,
                 text: String::from_utf8_lossy(&body).to_string(),
@@ -160,7 +158,11 @@ pub fn freeze_knowledge_blocks(store: &Store, manifest_id: &str) -> Result<Value
     Ok(json!({"frozen": true, "blocks": 1, "bytes": bytes.len()}))
 }
 
-pub(crate) fn set_replay_status(store: &Store, manifest_id: &str, status: &str) -> Result<(), Error> {
+pub(crate) fn set_replay_status(
+    store: &Store,
+    manifest_id: &str,
+    status: &str,
+) -> Result<(), Error> {
     store.with_conn(|c| {
         c.execute(
             "UPDATE context_manifests SET replay_status=?2 WHERE id=?1",
@@ -276,12 +278,7 @@ fn reconstruct(store: &Store, manifest_id: &str) -> Result<(), Error> {
                 "INSERT INTO context_manifest_item_sources(manifest_id, block_ordinal,
                  source_ordinal, source_key, source_id, chunk_shas)
                  VALUES (?1,0,?2,?3,?4,'[]')",
-                rusqlite::params![
-                    manifest_id,
-                    m.source_id,
-                    source_key_of(m),
-                    m.source_id
-                ],
+                rusqlite::params![manifest_id, m.source_id, source_key_of(m), m.source_id],
             )?;
         }
         Ok(())
@@ -314,15 +311,14 @@ pub fn run_legacy_migration(store: &Store, max: usize) -> Result<Value, Error> {
         }
         migrated += 1;
     }
-    let unverifiable = store
-        .with_conn(|c| {
-            c.query_row(
-                "SELECT COUNT(*) FROM context_manifests WHERE replay_status='legacy_unverifiable'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_err(Into::into)
-        })? as usize;
+    let unverifiable = store.with_conn(|c| {
+        c.query_row(
+            "SELECT COUNT(*) FROM context_manifests WHERE replay_status='legacy_unverifiable'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(Into::into)
+    })? as usize;
     Ok(json!({
         "ensured": ensured,
         "migrated": migrated,
@@ -372,7 +368,14 @@ mod tests {
                 .map_err(Into::into)
             })
             .unwrap();
-        let src = sg_knowledge::create_source(&store, "pj", "repo_path", "测试文档", docs.to_str().unwrap()).unwrap();
+        let src = sg_knowledge::create_source(
+            &store,
+            "pj",
+            "repo_path",
+            "测试文档",
+            docs.to_str().unwrap(),
+        )
+        .unwrap();
         sg_knowledge::scan_source(&store, &src.id, None, 100, 2 << 20).unwrap();
         (store, Tmp(dir), src.id.clone(), String::new(), docs)
     }
@@ -383,11 +386,20 @@ mod tests {
         let (store, _t, source_id, _source2, _docs) = setup();
         let manifest = crate::build_manifest(
             &store,
-            &crate::BuildInput { project_id: "pj", workitem_id: "wi", goal: "认证", selected_sources: &[] },
+            &crate::BuildInput {
+                project_id: "pj",
+                workitem_id: "wi",
+                goal: "认证",
+                selected_sources: &[],
+            },
         )
         .unwrap();
-        eprintln!("manifest freeze detail: {}", manifest["freeze"]);
-        assert_eq!(manifest["freeze"]["frozen"], json!(true), "freeze: {:?}", manifest["freeze"]);
+        assert_eq!(
+            manifest["freeze"]["frozen"],
+            json!(true),
+            "freeze: {:?}",
+            manifest["freeze"]
+        );
         let mid = manifest["id"].as_str().unwrap().to_string();
         let before = crate::blocks::manifest_blocks(&store, &mid, 64 << 10).unwrap();
         assert!(before["totalBytes"].as_i64().unwrap() > 0);
@@ -404,8 +416,11 @@ mod tests {
                     [&source_id],
                 )
                 .map_err(Error::from)?;
-                c.execute("DELETE FROM knowledge_chunks WHERE source_id=?1", [&source_id])
-                    .map_err(Error::from)?;
+                c.execute(
+                    "DELETE FROM knowledge_chunks WHERE source_id=?1",
+                    [&source_id],
+                )
+                .map_err(Error::from)?;
                 c.execute("DELETE FROM knowledge_sources WHERE id=?1", [&source_id])
                     .map_err(Error::from)
             })
@@ -416,7 +431,13 @@ mod tests {
             before["blocks"][0]["text"].as_str().unwrap(),
             "冻结对象逐字节回放"
         );
-        assert!(after["blocks"][0]["text"].as_str().unwrap().starts_with(BOUNDARY_DECLARATION), "边界声明是固定前缀");
+        assert!(
+            after["blocks"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with(BOUNDARY_DECLARATION),
+            "边界声明是固定前缀"
+        );
     }
 
     /// A34：存量 legacy_pending manifest 迁移 —— 可重建 → migrated_reconstructed；
@@ -427,9 +448,15 @@ mod tests {
         // 第二来源：chunk 指向不存在对象（模拟 objects 文件丢失）。
         let docs2 = docs.parent().unwrap().join("docs-lost");
         std::fs::create_dir_all(&docs2).unwrap();
-        let source_id2 = sg_knowledge::create_source(&store, "pj", "repo_path", "丢失来源", docs2.to_str().unwrap())
-            .unwrap()
-            .id;
+        let source_id2 = sg_knowledge::create_source(
+            &store,
+            "pj",
+            "repo_path",
+            "丢失来源",
+            docs2.to_str().unwrap(),
+        )
+        .unwrap()
+        .id;
         store
             .with_conn(|c| {
                 c.execute(
@@ -474,8 +501,20 @@ mod tests {
         assert_eq!(summary["migrated"], json!(2));
         let (ok_rs, gone_rs): (String, String) = store
             .with_conn(|c| {
-                let a: String = c.query_row("SELECT replay_status FROM context_manifests WHERE id='cm_ok'", [], |r| r.get(0)).map_err(Error::from)?;
-                let b: String = c.query_row("SELECT replay_status FROM context_manifests WHERE id='cm_gone'", [], |r| r.get(0)).map_err(Error::from)?;
+                let a: String = c
+                    .query_row(
+                        "SELECT replay_status FROM context_manifests WHERE id='cm_ok'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(Error::from)?;
+                let b: String = c
+                    .query_row(
+                        "SELECT replay_status FROM context_manifests WHERE id='cm_gone'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(Error::from)?;
                 Ok((a, b))
             })
             .unwrap();
@@ -484,15 +523,23 @@ mod tests {
         // 可重建的迁移有 blocks 行可装载；unverifiable 无伪 block。
         let ok_blocks: i64 = store
             .with_conn(|c| {
-                c.query_row("SELECT COUNT(*) FROM context_manifest_blocks WHERE manifest_id='cm_ok'", [], |r| r.get(0))
-                    .map_err(Into::into)
+                c.query_row(
+                    "SELECT COUNT(*) FROM context_manifest_blocks WHERE manifest_id='cm_ok'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(Into::into)
             })
             .unwrap();
         assert_eq!(ok_blocks, 1);
         let gone_blocks: i64 = store
             .with_conn(|c| {
-                c.query_row("SELECT COUNT(*) FROM context_manifest_blocks WHERE manifest_id='cm_gone'", [], |r| r.get(0))
-                    .map_err(Into::into)
+                c.query_row(
+                    "SELECT COUNT(*) FROM context_manifest_blocks WHERE manifest_id='cm_gone'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(Into::into)
             })
             .unwrap();
         assert_eq!(gone_blocks, 0, "legacy_unverifiable 不写伪 block");

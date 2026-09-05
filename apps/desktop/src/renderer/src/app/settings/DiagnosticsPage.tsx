@@ -65,6 +65,48 @@ function CheckTable({
   );
 }
 
+interface ModelUsage {
+  calls: number;
+  tokensIn: number;
+  tokensOut: number;
+  cachedTokens: number;
+  cacheHitRatio: number | null;
+  reasoningTokens: number;
+  ttftAvgMs: number | null;
+  totalMs: number;
+  compactions: number;
+  compactionBeforeEst: number | null;
+  compactionAfterEst: number | null;
+  costMicros: number;
+}
+
+/** M4：模型缓存与压缩观测（仅 token 计量与延迟；不展示任何 reasoning 正文）。 */
+function ModelUsageCard() {
+  const [usage, setUsage] = useState<ModelUsage | null>(null);
+  useEffect(() => {
+    rpc<ModelUsage>('model.usage', {})
+      .then(setUsage)
+      .catch(() => setUsage(null));
+  }, []);
+  if (!usage) {
+    return <div className="sg-hint">暂无模型调用观测数据。</div>;
+  }
+  const pct = usage.cacheHitRatio == null ? '—' : `${Math.round(usage.cacheHitRatio * 100)}%`;
+  return (
+    <table className="sg-table" aria-label="模型缓存与压缩观测">
+      <tbody>
+        <tr><td>模型调用轮次</td><td>{usage.calls}</td></tr>
+        <tr><td>输入 / 输出 tokens</td><td>{usage.tokensIn} / {usage.tokensOut}</td></tr>
+        <tr><td>缓存命中 tokens（命中率）</td><td>{usage.cachedTokens}（{pct}）</td></tr>
+        <tr><td>reasoning tokens（仅计量）</td><td>{usage.reasoningTokens}</td></tr>
+        <tr><td>首 token 平均延迟</td><td>{usage.ttftAvgMs == null ? '—' : `${usage.ttftAvgMs} ms`}</td></tr>
+        <tr><td>压缩次数（前后估算 tokens）</td><td>{usage.compactions}（{usage.compactionBeforeEst ?? '—'} → {usage.compactionAfterEst ?? '—'}）</td></tr>
+        <tr><td>成本</td><td>未接价格表（诚实口径：恒 0）</td></tr>
+      </tbody>
+    </table>
+  );
+}
+
 export function DiagnosticsPage({ onNavigate }: { onNavigate: (section: SettingsRouteId) => void }) {
   const [report, setReport] = useState<DiagnosticsReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -116,6 +158,13 @@ export function DiagnosticsPage({ onNavigate }: { onNavigate: (section: Settings
             <div className="sg-skeleton-row" />
           </div>
         )}
+      </SettingsSection>
+
+      <SettingsSection
+        title="模型缓存与压缩观测"
+        description="cached tokens / 命中率 / reasoning tokens（仅计量）/ 首 token 延迟 / 压缩次数与前后估算；不含任何 reasoning 正文。"
+      >
+        <ModelUsageCard />
       </SettingsSection>
 
       <SettingsSection

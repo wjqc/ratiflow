@@ -201,11 +201,20 @@ fn workspace_manifest(
     }];
     let mut patch_sha = String::new();
     if !dirty_lines.is_empty() {
-        // 脏 patch 落 objects（快照只读采集，不做任何写回）。
+        // 脏 patch 落 objects（快照只读采集，不做任何写回）。快照是对工作区的忠实采集，
+        // 仅本地入库供回滚还原、不经出网，秘密治理在出网侧 mask；这里不阻断采集，
+        // findings 仍登记 objects.secret_findings 留审计。
         let diff = git_output(&root_path, &["diff"]).unwrap_or_default();
         let patch = format!("{diff}\n--- untracked ---\n{dirty}");
-        let info = objects::put(store, patch.as_bytes(), objects::PutOptions::default())
-            .map_err(|e| Error::Message(format!("snapshot_failed: patch 存储失败 {e}")))?;
+        let info = objects::put(
+            store,
+            patch.as_bytes(),
+            objects::PutOptions {
+                allow_secrets: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| Error::Message(format!("snapshot_failed: patch 存储失败 {e}")))?;
         patch_sha = info.sha256;
         resources.push(SnapshotResource {
             resource_type: "git_dirty_patch".into(),

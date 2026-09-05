@@ -37,10 +37,13 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0022_model_profile_models.sql"),
     ),
     (23, include_str!("../migrations/0023_project_memory.sql")),
+    (24, include_str!("../migrations/0024_model_turns.sql")),
     (
-        24,
-        include_str!("../migrations/0024_model_turns.sql"),
+        25,
+        include_str!("../migrations/0025_knowledge_manifest_v2.sql"),
     ),
+    (26, include_str!("../migrations/0026_model_usage.sql")),
+    (27, include_str!("../migrations/0027_mcp_servers.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

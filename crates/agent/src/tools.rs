@@ -30,6 +30,13 @@ fn params_search_knowledge() -> Value {
     json!({"type":"object","required":["query"],"properties":{
         "query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20,"default":5}}})
 }
+fn params_apply_patch() -> Value {
+    json!({"type":"object","required":["patch"],"properties":{
+        "patch":{"type":"string","description":"unified diff 补丁文本"},
+        "baseHead":{"type":"string","description":"期望的 worktree HEAD（CAS；缺省跳过 HEAD 校验）"},
+        "expectedHashes":{"type":"object","description":"可选：路径 → 期望的当前内容 sha256"}}})
+}
+
 fn params_write_file() -> Value {
     json!({"type":"object","required":["path","content"],"properties":{
         "path":{"type":"string","description":"草稿区内相对路径"},
@@ -40,6 +47,15 @@ const MIB: usize = 1 << 20;
 
 /// 注册表（name 字典序 canonical）。
 pub fn registry() -> Vec<&'static ToolDef> {
+    static APPLY_PATCH: ToolDef = ToolDef {
+        name: "apply_patch",
+        description: "对受管 worktree 应用 unified diff 增量修改（高风险需审批；CAS 防漂移；主工作区不受影响）",
+        risk: Risk::High,
+        data_level: "internal",
+        max_result_bytes: MIB,
+        timeout_sec: 60,
+        parameters: params_apply_patch,
+    };
     static READ_FILE: ToolDef = ToolDef {
         name: "read_file",
         description: "读取项目内相对路径文件内容（只读，路径不得逃逸项目根）",
@@ -76,8 +92,14 @@ pub fn registry() -> Vec<&'static ToolDef> {
         timeout_sec: 60,
         parameters: params_write_file,
     };
-    // 字典序：read_file < run_command < search_knowledge < write_file
-    vec![&READ_FILE, &RUN_COMMAND, &SEARCH_KNOWLEDGE, &WRITE_FILE]
+    // 字典序：apply_patch < read_file < run_command < search_knowledge < write_file
+    vec![
+        &APPLY_PATCH,
+        &READ_FILE,
+        &RUN_COMMAND,
+        &SEARCH_KNOWLEDGE,
+        &WRITE_FILE,
+    ]
 }
 
 pub fn find(name: &str) -> Option<&'static ToolDef> {
@@ -115,11 +137,26 @@ pub struct ToolCtx {
 
 /// 提案参数 → 受约束 ExecutionManifest（read_file / run_command）。
 /// write_file/search_knowledge 不走进程，由装配层直接执行。
+/// M3（ADR-034）：manifest 携带沙箱路径——读=work_dir，写=受管 worktree + 工件草稿区。
 pub fn build_manifest(
     def: &ToolDef,
     args: &Value,
     ctx: &ToolCtx,
 ) -> Result<ExecutionManifest, String> {
+    let sandbox_read_paths: Vec<String> = ctx
+        .work_dir
+        .as_ref()
+        .map(|p| vec![p.to_string_lossy().to_string()])
+        .unwrap_or_default();
+    let sandbox_write_paths: Vec<String> = ctx
+        .work_dir
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .into_iter()
+        .chain(std::iter::once(
+            ctx.artifacts_dir.to_string_lossy().to_string(),
+        ))
+        .collect();
     match def.name {
         "read_file" => {
             let rel = args
@@ -139,6 +176,8 @@ pub fn build_manifest(
                 cpus: 0.5,
                 timeout_sec: def.timeout_sec,
                 writes_files: false,
+                sandbox_read_paths,
+                sandbox_write_paths: vec![ctx.artifacts_dir.to_string_lossy().to_string()],
             })
         }
         "run_command" => {
@@ -171,6 +210,8 @@ pub fn build_manifest(
                     .get("writes_files")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                sandbox_read_paths,
+                sandbox_write_paths,
             })
         }
         other => Err(format!("tool {other} 不经由 manifest 执行")),
@@ -324,7 +365,13 @@ mod tests {
         let names: Vec<&str> = registry().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
-            vec!["read_file", "run_command", "search_knowledge", "write_file"]
+            vec![
+                "apply_patch",
+                "read_file",
+                "run_command",
+                "search_knowledge",
+                "write_file"
+            ]
         );
         let a = serde_json::to_string(&registry().iter().map(|d| d.to_json()).collect::<Vec<_>>())
             .unwrap();

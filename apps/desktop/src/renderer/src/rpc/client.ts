@@ -22,6 +22,10 @@ export interface TimelineEvent {
   occurredAt: string;
   summary: string;
   detail?: unknown;
+  /** M2 流式增量事件（run.output_delta 等）专用字段：易失、不落库。 */
+  aggregateId?: string;
+  payload?: { workItemId?: string; text?: string; droppedBytes?: number };
+  volatile?: boolean;
 }
 
 export interface AgentRunInfo {

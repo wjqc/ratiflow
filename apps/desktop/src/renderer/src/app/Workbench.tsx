@@ -27,6 +27,7 @@ import {
 } from '../components/Icons';
 import { ModelPicker } from './ModelPicker';
 import { renderMarkdown } from '../lib/markdown';
+import { isDeltaEvent, streamBuffer, type RunStreamSnapshot } from '../lib/streamBuffer';
 import { useTwoStepConfirm } from './settings/components/useTwoStepConfirm';
 import {
   clearAutomaticPrd,
@@ -285,8 +286,13 @@ export function Workbench({
   }, [loadAll, workItemId]);
 
   // F02 事件驱动刷新：sg:event 推送触发对账拉取；30s 轮询仅作断线降级。
+  // M2：流式 delta 是易失高频事件，进 streamBuffer 增量渲染，不触发全量刷新。
   useEffect(() => {
-    const off = window.sixgates.onEvent(() => {
+    const off = window.sixgates.onEvent((event) => {
+      if (isDeltaEvent(event)) {
+        streamBuffer.ingest(event);
+        return;
+      }
       void loadAll();
     });
     const t = setInterval(loadAll, 30000);
@@ -1023,6 +1029,16 @@ function ConversationTurn({
   const [turnTrace, setTurnTrace] = useState<RunTrace | null>(isLatest ? latestTrace : null);
   const running = run.status === 'running' || run.status === 'queued';
 
+  // M2 增量渲染：运行中订阅流式 delta 视图；终态后清缓冲（以 run.result 为准）。
+  const [stream, setStream] = useState<RunStreamSnapshot>(() => streamBuffer.snapshot(run.id));
+  useEffect(() => {
+    if (!running) {
+      streamBuffer.clear(run.id);
+      return;
+    }
+    return streamBuffer.subscribe(run.id, setStream);
+  }, [running, run.id]);
+
   useEffect(() => {
     if (isLatest) {
       setTurnTrace(latestTrace);
@@ -1071,6 +1087,12 @@ function ConversationTurn({
 
           {running ? (
             <div className="sg-conv-thinking">
+              {stream.text ? (
+                <div className="sg-conv-streaming" data-testid="sg-streaming-output">
+                  {stream.text}
+                  <span className="sg-conv-streaming-caret">▍</span>
+                </div>
+              ) : null}
               {liveSteps.length > 0 ? (
                 liveSteps.slice(-4).map((s) => (
                   <div key={s.seq} className="sg-conv-step">

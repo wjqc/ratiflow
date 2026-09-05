@@ -377,6 +377,16 @@ try {
       assert(propB.decision === 'executed' && propB.result.includes('hello-m3'),
         `设置来源生效：read_file 读到真实内容（decision=${propB.decision}）`);
       console.log('Agent 模式来源 E2E 通过。');
+
+      // M4：model.usage 观测 RPC——token/缓存/延迟聚合与压缩计数。
+      const usage = await modeClient.rpc('model.usage', { runId: sb.runId });
+      assert(usage.calls >= 1, `model.usage 应有调用轮次（${usage.calls}）`);
+      assert(typeof usage.tokensIn === 'number' && typeof usage.tokensOut === 'number');
+      assert(usage.cachedTokens === 0, `fake 脚本无缓存命中（${usage.cachedTokens}）`);
+      assert(usage.compactions === 0, `无压缩事件（${usage.compactions}）`);
+      const usageAll = await modeClient.rpc('model.usage', {});
+      assert(usageAll.calls >= usage.calls, '全局聚合 ≥ 单 Run');
+      console.log('模型用量观测（model.usage）E2E 通过。');
     } finally {
       modeClient.kill();
       rmSync(dataDir4, { recursive: true, force: true });

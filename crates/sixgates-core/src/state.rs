@@ -1,28 +1,31 @@
 //! 应用状态：DB actor 句柄 + Run 运行时 + 适配器装配。Rust core 是业务唯一写入者。
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, Mutex};
 
 use sg_agent::Gateway;
-use sg_integrations::{FakeGitLab, FakeSSH};
+use sg_integrations::{CancelToken, FakeGitLab, FakeSSH};
 use sg_store::Store;
 
 use crate::db::Db;
+use crate::deltas::DeltaHub;
 
-/// 活跃 Run 的取消句柄注册表：cancel 置位旗标，Run 任务在迭代边界观察并自清理（M0-②）。
+/// 活跃 Run 的取消注册表（M2）：登记取消令牌；agent.cancel 置位后，
+/// 阻塞中的模型 HTTP/SSE 经 select 即时中止（放弃 future 即关闭 socket），
+/// Run 任务在收尾处写 cancelled 终态并自清理。
 #[derive(Default)]
 pub struct RunRegistry {
-    inner: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    inner: Mutex<HashMap<String, Arc<CancelToken>>>,
 }
 
 impl RunRegistry {
-    pub fn register(&self, run_id: &str, flag: Arc<AtomicBool>) {
-        self.inner.lock().unwrap().insert(run_id.into(), flag);
+    pub fn register(&self, run_id: &str, token: Arc<CancelToken>) {
+        self.inner.lock().unwrap().insert(run_id.into(), token);
     }
     pub fn unregister(&self, run_id: &str) {
         self.inner.lock().unwrap().remove(run_id);
     }
-    pub fn get(&self, run_id: &str) -> Option<Arc<AtomicBool>> {
+    pub fn get(&self, run_id: &str) -> Option<Arc<CancelToken>> {
         self.inner.lock().unwrap().get(run_id).cloned()
     }
 }
@@ -33,6 +36,8 @@ pub struct AppState {
     pub run_store: Arc<Store>,
     /// 活跃 Run 取消注册表。
     pub runs: Arc<RunRegistry>,
+    /// 高频 UI delta 通道（易失，不落库）。
+    pub deltas: DeltaHub,
     /// tokio 运行时句柄（Run 任务派发）。
     pub handle: tokio::runtime::Handle,
     pub gitlab: Arc<dyn sg_integrations::GitLabClient>,
@@ -50,7 +55,13 @@ impl AppState {
         &self.core_version
     }
 
-    pub fn new(db: Db, run_store: Arc<Store>, initial_watermark: i64, core_version: &str) -> Self {
+    pub fn new(
+        db: Db,
+        run_store: Arc<Store>,
+        initial_watermark: i64,
+        core_version: &str,
+        deltas: DeltaHub,
+    ) -> Self {
         // 适配器按环境装配：未配置时使用 fake 并在诊断中标记 not_ready。
         let (gitlab, gitlab_fake) = match (
             std::env::var("SIXGATES_GITLAB_URL"),
@@ -79,12 +90,18 @@ impl AppState {
             std::env::var("SIXGATES_MODEL_API_KEY"),
         ) {
             (Ok(base), Ok(key)) if !base.is_empty() && !key.is_empty() => {
-                Gateway::new(Box::new(sg_integrations::ModelHttp {
+                // M2：env 直连装配同样提供流式路径（reqwest+SSE，可取消）；同一实例双接口。
+                let http: Arc<sg_integrations::ModelHttp> = Arc::new(sg_integrations::ModelHttp {
                     name_value: "openai-compatible".into(),
                     base_url: base.clone(),
                     api_key: key,
                     model: std::env::var("SIXGATES_MODEL_NAME").unwrap_or_default(),
-                }))
+                });
+                let gateway = Gateway::with_shared(http.clone(), Some(http));
+                gateway.set_reasoning_vault(Arc::new(
+                    sg_agent::reasoning_state::ReasoningVault::new(credentials.clone()),
+                ));
+                gateway
             }
             _ => {
                 // E2E 钩子（仅未配置真实模型时生效）：SIXGATES_FAKE_MODEL_SCRIPT 指向
@@ -104,12 +121,18 @@ impl AppState {
                     }
                 }
                 // 设置域 Profile 优先（model_routes 主档 → 最早可用档案），
-                // 无可用 Profile 时回落 fake 脚本。
-                Gateway::new(Box::new(crate::model_source::ProfileModel::new(
+                // 无可用 Profile 时回落 fake 脚本。sync/streaming 共享同一实例。
+                let pm = Arc::new(crate::model_source::ProfileModel::new(
                     run_store.clone(),
                     credentials.clone(),
                     Box::new(fake),
-                )))
+                ));
+                let gateway = Gateway::with_shared(pm.clone(), Some(pm));
+                // M4：reasoning 状态保险库（Keychain 派生密钥；密钥不可用时明确回退）。
+                gateway.set_reasoning_vault(Arc::new(
+                    sg_agent::reasoning_state::ReasoningVault::new(credentials.clone()),
+                ));
+                gateway
             }
         };
         let ssh: Arc<dyn sg_integrations::SSHAdapter> = Arc::new(FakeSSH::default());
@@ -120,6 +143,7 @@ impl AppState {
             .ok()
             .and_then(|m| match m.as_str() {
                 "docker" => Some(sg_executor::Mode::Docker),
+                "kernel_restricted" => Some(sg_executor::Mode::KernelRestricted),
                 "safe_restricted" => Some(sg_executor::Mode::SafeRestricted),
                 "unsafe_explicit" => Some(sg_executor::Mode::UnsafeExplicit),
                 "disabled" => Some(sg_executor::Mode::Disabled),
@@ -137,6 +161,7 @@ impl AppState {
             db,
             run_store,
             runs: Arc::new(RunRegistry::default()),
+            deltas,
             handle: tokio::runtime::Handle::current(),
             gitlab,
             model: Arc::new(model),

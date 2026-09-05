@@ -3,6 +3,7 @@
 //! 子命令：app-server（默认）| migrate-v2 --from <dir> --to <dir>
 
 mod db;
+mod deltas;
 mod dispatch;
 mod model_source;
 
@@ -186,12 +187,6 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
         std::process::exit(1);
     }
     let db = db::Db::spawn(store);
-    let app = Arc::new(state::AppState::new(
-        db,
-        run_store,
-        initial_seq,
-        core_version,
-    ));
 
     // stdout 单写者任务：hello、响应、事件通知统一经 mpsc 排队写出，无并发交错。
     let (wtx, mut wrx) = tokio::sync::mpsc::channel::<String>(256);
@@ -206,6 +201,19 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
             let _ = writer.flush().await;
         }
     });
+
+    // M2 高频 UI delta 通道：40ms 合并 + 64KiB 背压上限，经同一 stdout 单写者
+    // 发出（volatile 事件，不落 outbox/SQLite；丢帧不产生假终态）。
+    let (delta_hub, delta_coalescer) = deltas::channel();
+    tokio::spawn(delta_coalescer.run(wtx.clone()));
+
+    let app = Arc::new(state::AppState::new(
+        db,
+        run_store,
+        initial_seq,
+        core_version,
+        delta_hub,
+    ));
 
     // hello 握手（main 校验 protocolVersion；不兼容时不创建业务窗口）。
     let hello = Hello {

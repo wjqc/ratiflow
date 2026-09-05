@@ -181,7 +181,14 @@ export type RpcMethodName =
   | 'knowledge.manifestCreate'
   | 'knowledge.manifestUpdate'
   | 'knowledge.manifestRemove'
-  | 'knowledge.syncFromRepo';
+  | 'knowledge.syncFromRepo'
+  | 'model.usage'
+  | 'mcp.serverAdd'
+  | 'mcp.serverApprove'
+  | 'mcp.serverList'
+  | 'mcp.serverRemove'
+  | 'mcp.serverRefresh'
+  | 'mcp.toolsList';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -363,6 +370,13 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'knowledge.manifestUpdate',
   'knowledge.manifestRemove',
   'knowledge.syncFromRepo',
+  'model.usage',
+  'mcp.serverAdd',
+  'mcp.serverApprove',
+  'mcp.serverList',
+  'mcp.serverRemove',
+  'mcp.serverRefresh',
+  'mcp.toolsList',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -1425,4 +1439,35 @@ export interface KnowledgeManifestRemoveParams {
 
 export interface KnowledgeSyncFromRepoParams {
   projectId: string;
+}
+
+export interface ModelUsageParams {
+  runId?: string;
+}
+
+export interface McpServerAddParams {
+  name: string;
+  command: string;
+  args?: unknown[];
+}
+
+export interface McpServerApproveParams {
+  serverId: string;
+  decidedBy: string;
+}
+
+export type McpServerListParams = Record<string, never>;
+
+export interface McpServerRemoveParams {
+  serverId: string;
+  decidedBy: string;
+  reason?: string;
+}
+
+export interface McpServerRefreshParams {
+  serverId: string;
+}
+
+export interface McpToolsListParams {
+  serverId?: string;
 }

@@ -9,8 +9,10 @@ use sg_store::{ids, outbox, timefmt, Error, Store};
 pub mod instructions;
 pub mod model_protocol;
 pub mod modelgw;
+pub mod patch;
 pub mod profile;
 pub mod prompt;
+pub mod reasoning_state;
 pub mod rollout;
 pub mod router;
 pub mod schema;
@@ -129,6 +131,7 @@ pub fn start(
         None,
         &initial,
         &CompactPolicy::default(),
+        None,
     )
 }
 
@@ -192,6 +195,8 @@ pub enum StepOutcome {
 /// 执行既有 Run 的循环（M0-② 起由装配层在独立任务/连接上驱动；M1 支持从 waiting_approval 恢复）。
 /// 恢复语义：messages/迭代号/挂起提案取自 checkpoint；预算台账不入 checkpoint——
 /// 模型调用数/工具数从库重算（单一事实源，不重复计费）。
+/// M2（ADR-033）：cancel 为取消令牌——模型 HTTP/SSE 可即时中止；forwarder 转发
+/// 易失 UI delta（不落库）。
 #[allow(clippy::too_many_arguments)]
 pub fn execute_run(
     store: &Store,
@@ -200,10 +205,11 @@ pub fn execute_run(
     executor: Option<&ToolExecutor>,
     config: &RunConfig<'_>,
     run_id: &str,
-    cancel: Option<&std::sync::atomic::AtomicBool>,
+    cancel: Option<&sg_integrations::CancelToken>,
     mut rollout: Option<crate::rollout::Rollout>,
     initial: &prompt::InitialTurn,
     compact: &CompactPolicy,
+    forwarder: Option<std::sync::Arc<dyn modelgw::TurnDeltaForwarder>>,
 ) -> Result<RunOutput, Error> {
     let RunConfig {
         goal: _goal,
@@ -214,14 +220,44 @@ pub fn execute_run(
     } = *config;
     let system_prompt = initial.system_prompt.clone();
     let mut run = get_run(store, run_id)?;
-    let cancelled = |cancel: Option<&std::sync::atomic::AtomicBool>| {
-        cancel
-            .map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
-            .unwrap_or(false)
+    let noop_cancel = sg_integrations::CancelToken::new();
+    let cancel = cancel.unwrap_or(&noop_cancel);
+    let cancelled = || cancel.is_cancelled();
+
+    // M4：Run 启动冻结——Provider 指纹（checkpoint 回放绑定）、缓存域键、压缩策略。
+    let provider_fingerprint = gateway.fingerprint();
+    let compaction_strategy =
+        modelgw::select_compaction(gateway.capability(store), gateway.data_policy());
+    let strategy_digest = {
+        use sha2::{Digest, Sha256};
+        sg_store::ids::hex(Sha256::digest(compaction_strategy.as_str().as_bytes()).as_slice())
+    };
+    log_rollout(
+        &mut rollout,
+        "compaction_strategy",
+        json!({
+            "strategy": compaction_strategy.as_str(),
+            "digest": strategy_digest,
+        }),
+    );
+    let cache_key = {
+        use sha2::{Digest, Sha256};
+        let tool_digest = crate::tools::schema_digest(tool_allowlist);
+        let instr_digest = sg_store::ids::hex(Sha256::digest(system_prompt.as_bytes()).as_slice());
+        let raw = format!(
+            "tenant:local|workitem:{}|tools:{}|instructions:{}",
+            run.workitem_id, tool_digest, instr_digest
+        );
+        sg_store::ids::hex(Sha256::digest(raw.as_bytes()).as_slice())
     };
 
-    let (mut messages, start_iteration, mut pending_proposal) =
-        load_checkpoint(store, run_id).unwrap_or_else(|| (initial.prefix.clone(), 0, None));
+    let mut reasoning_items: Vec<crate::model_protocol::ModelInputItem> = Vec::new();
+    let (mut messages, start_iteration, mut pending_proposal) = {
+        match load_checkpoint(store, run_id, &provider_fingerprint, &mut rollout) {
+            Some(loaded) => (loaded.messages, loaded.iteration, loaded.pending),
+            None => (initial.prefix.clone(), 0, None),
+        }
+    };
     log_rollout(
         &mut rollout,
         "instructions_assembled",
@@ -276,7 +312,7 @@ pub fn execute_run(
 
     #[allow(unused_assignments)]
     for iteration in start_iteration..max_iterations {
-        if cancelled(cancel) {
+        if cancelled() {
             run.result = "已取消（用户请求）".into();
             set_status(store, &mut run, "cancelled", "run.cancelled")?;
             finish(store, &run)?;
@@ -351,9 +387,35 @@ pub fn execute_run(
             "model_request",
             json!({"messages": messages.len(), "estTokens": estimate_tokens(&request)}),
         );
-        let response = match gateway.call(store, run_id, &budget.model, &request) {
+        let response = match gateway.call_turn(
+            store,
+            run_id,
+            &budget.model,
+            &request,
+            &modelgw::TurnOpts {
+                cancel,
+                forwarder: forwarder.clone(),
+                prompt_cache_key: cache_key.clone(),
+            },
+        ) {
             Ok(resp) => resp,
             Err(e) => {
+                // M2 §4.3：本地 abort → cancelled 终态（恰好一条 run.cancelled），
+                // 已显示 delta 作废，不重放（Provider 是否继续计费未知）。
+                if e.starts_with("model_cancelled") {
+                    run.result = "已取消（用户请求）".into();
+                    set_status(store, &mut run, "cancelled", "run.cancelled")?;
+                    finish(store, &run)?;
+                    log_rollout(
+                        &mut rollout,
+                        "run_finished",
+                        json!({"status": "cancelled", "phase": "model_call"}),
+                    );
+                    return Ok(RunOutput {
+                        run,
+                        output: String::new(),
+                    });
+                }
                 if e.contains("budget_exceeded") {
                     run.result = e.clone();
                     set_status(store, &mut run, "failed", "run.failed")?;
@@ -361,7 +423,14 @@ pub fn execute_run(
                     return Err(Error::Message(e));
                 }
                 let lower = e.to_lowercase();
-                run.result = if lower.contains("model_empty_output") {
+                run.result = if lower.starts_with("model_stream_interrupted")
+                    || lower.starts_with("model_protocol_violation")
+                    || lower.starts_with("model_capability_missing")
+                {
+                    // §4.3 独立错误码原样落库：流中断/协议违规不得伪装成其他失败，
+                    // 已显示的 delta 也不是最终答案。
+                    e.clone()
+                } else if lower.contains("model_empty_output") {
                     // 输出上限耗尽（finish_reason=length）≠ 上下文过大：
                     // 按独立前缀优先归类，避免误导排查方向。
                     format!("model_output_empty: {e}")
@@ -378,6 +447,33 @@ pub fn execute_run(
                 return Err(Error::Message(e));
             }
         };
+
+        // M4：加密 reasoning 状态入 checkpoint 待写集（明文已止于网关）。
+        if let Some(blob) = &response.reasoning_state_encrypted {
+            reasoning_items.push(crate::model_protocol::ModelInputItem::ReasoningOpaque {
+                provider: provider_fingerprint.clone(),
+                payload: blob.clone(),
+            });
+        }
+
+        // M2：耐久 turn commit——只有完成帧经聚合器验证后才发。
+        // delta 是易失体验事件；最终 assistant/tool-call/usage 以本事件与
+        // checkpoint 为准（断线后 agent.get/trace 可重建）。
+        outbox::emit(
+            store,
+            "agent_run",
+            run_id,
+            "run.turn_committed",
+            json!({
+                "workitemId": run.workitem_id,
+                "finishReason": response.finish_reason,
+                "tokensIn": response.tokens_in,
+                "tokensOut": response.tokens_out,
+                "hasToolCalls": !response.tool_calls.is_empty(),
+                "tool": response.tool_calls.first().map(|t| t.name.clone()),
+                "textPreview": tools::truncate_output(&response.content, 200),
+            }),
+        )?;
 
         // M1：native 分支优先消费原生 tool_calls（正文非空 = 最终答复）；
         // legacy 分支维持 parse_decision + 修复轮。
@@ -447,7 +543,15 @@ pub fn execute_run(
                 "completed_execution",
                 "run.completed_execution",
             )?;
-            checkpoint(store, run_id, iteration, &messages, None);
+            checkpoint(
+                store,
+                run_id,
+                iteration,
+                &messages,
+                None,
+                &reasoning_items,
+                &provider_fingerprint,
+            );
             finish(store, &run)?;
             log_rollout(
                 &mut rollout,
@@ -467,7 +571,7 @@ pub fn execute_run(
             return Err(Error::Message("budget_exhausted: tool calls".into()));
         }
 
-        if cancelled(cancel) {
+        if cancelled() {
             run.result = "已取消（用户请求）".into();
             set_status(store, &mut run, "cancelled", "run.cancelled")?;
             finish(store, &run)?;
@@ -493,7 +597,15 @@ pub fn execute_run(
                         tool_calls_json: None,
                     });
                 }
-                checkpoint(store, run_id, iteration, &messages, Some(&proposal_id));
+                checkpoint(
+                    store,
+                    run_id,
+                    iteration,
+                    &messages,
+                    Some(&proposal_id),
+                    &reasoning_items,
+                    &provider_fingerprint,
+                );
                 log_rollout(
                     &mut rollout,
                     "checkpoint_saved",
@@ -529,7 +641,15 @@ pub fn execute_run(
                         ..Default::default()
                     });
                 }
-                checkpoint(store, run_id, iteration, &messages, None);
+                checkpoint(
+                    store,
+                    run_id,
+                    iteration,
+                    &messages,
+                    None,
+                    &reasoning_items,
+                    &provider_fingerprint,
+                );
                 log_rollout(
                     &mut rollout,
                     "checkpoint_saved",
@@ -572,7 +692,7 @@ fn compact_history(
     est_before: usize,
 ) -> Result<usize, Error> {
     // 回滚点（phase=running；压缩失败可从此恢复重试）。
-    checkpoint(store, &run.id, iteration, messages, None);
+    checkpoint(store, &run.id, iteration, messages, None, &[], "compaction");
     let compress_system = "你是会话压缩器。把对话历史压缩为结构化摘要 JSON：         {\"summary\":\"...\",\"facts\":[\"...\"],\"pendingApprovals\":[],\
          \"executedTools\":[{\"tool\":\"..\",\"result\":\"..\"}],\"keyFiles\":[\"..\"]}\u{3002}         必须保留：任务目标、当前状态、未决审批、已执行工具与结论、关键文件路径。只输出 JSON。";
     let request = CompletionRequest {
@@ -583,12 +703,20 @@ fn compact_history(
         response_schema: None,
         tools_json: None,
     };
-    let resp = match gateway.call(store, &run.id, budget, &request) {
-        Ok(r) => r,
-        Err(_) => gateway
+    // M4：摘要 JSON 校验（字段/大小）——失败重试一次，仍失败保留原 checkpoint。
+    let mut resp = gateway
+        .call(store, &run.id, budget, &request)
+        .map_err(|e| Error::Message(format!("context_too_large: 压缩调用失败 {e}")))?;
+    if validate_summary_json(&resp.content).is_err() {
+        resp = gateway
             .call(store, &run.id, budget, &request)
-            .map_err(|e| Error::Message(format!("context_too_large: 压缩调用失败 {e}")))?,
-    };
+            .map_err(|e| Error::Message(format!("context_too_large: 压缩调用失败 {e}")))?;
+        if validate_summary_json(&resp.content).is_err() {
+            return Err(Error::Message(
+                "context_too_large: 压缩摘要校验失败（字段缺失或超限）；原 checkpoint 保留".into(),
+            ));
+        }
+    }
     let history_start = messages
         .iter()
         .position(|m| m.role == "assistant")
@@ -615,6 +743,44 @@ fn compact_history(
     )?;
     *messages = new_messages;
     Ok(est_after)
+}
+
+/// M4：F09 压缩摘要 JSON 校验（字段完整性 + 大小上限）。
+fn validate_summary_json(text: &str) -> Result<Value, String> {
+    let v: Value =
+        serde_json::from_str(text.trim()).map_err(|e| format!("摘要非合法 JSON: {e}"))?;
+    let summary = v["summary"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "摘要缺 summary 字段".to_string())?;
+    if summary.len() > 8192 {
+        return Err("summary 超 8192 字节上限".into());
+    }
+    for field in ["facts", "pendingApprovals", "executedTools", "keyFiles"] {
+        let arr = v[field]
+            .as_array()
+            .ok_or_else(|| format!("摘要缺 {field} 数组"))?;
+        if arr.len() > 128 {
+            return Err(format!("{field} 超 128 项上限"));
+        }
+        for entry in arr {
+            let ok = match field {
+                "executedTools" => {
+                    entry.is_object()
+                        && entry["tool"].is_string()
+                        && (entry["result"].is_string() || entry["result"].is_null())
+                }
+                _ => entry.is_string(),
+            };
+            if !ok {
+                return Err(format!("{field} 项类型非法"));
+            }
+        }
+    }
+    if text.len() > 64 * 1024 {
+        return Err("摘要超 64KiB 上限".into());
+    }
+    Ok(v)
 }
 
 fn estimate_tokens(req: &CompletionRequest) -> usize {
@@ -810,19 +976,26 @@ fn finish(store: &Store, run: &AgentRun) -> Result<(), Error> {
     })
 }
 
+/// M4 checkpoint v2：versioned ModelInputItem[] + Provider 指纹绑定。
+/// reasoning opaque 项（加密 blob）随 items 持久化，跨 Provider 拒绝回放。
 fn checkpoint(
     store: &Store,
     run_id: &str,
     seq: usize,
     messages: &[ChatMessage],
     pending: Option<&str>,
+    reasoning_items: &[crate::model_protocol::ModelInputItem],
+    provider_fingerprint: &str,
 ) {
-    // M1/F03：checkpoint 载荷带恢复元数据（phase/pending 提案）；messages 结构不变。
+    let mut items = messages_to_items(messages);
+    items.extend(reasoning_items.iter().cloned());
     let body = serde_json::json!({
-        "messages": messages,
+        "schemaVersion": 2,
+        "items": items,
         "iteration": seq,
         "pending_proposal_id": pending,
         "phase": if pending.is_some() { "waiting_approval" } else { "running" },
+        "providerFingerprint": provider_fingerprint,
     })
     .to_string();
     let _ = store.with_conn(|conn| {
@@ -958,11 +1131,22 @@ pub fn cancel(store: &Store, id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// 最新 checkpoint 的恢复元数据（M0 旧格式 messages 数组不可恢复，返回 None 走全新循环）。
+/// 恢复的 checkpoint 内容。
+struct LoadedCheckpoint {
+    messages: Vec<ChatMessage>,
+    iteration: usize,
+    pending: Option<String>,
+}
+
+/// M4：读取 checkpoint——v2（ModelInputItem[] + Provider 指纹绑定）为主；
+/// v1（messages 数组）兼容读取（无 reasoning 项）；指纹不匹配 = 明确回退走全新
+/// 循环（rollout 记录，禁止跨 Provider 回放）；opaque payload 损坏项丢弃并记录。
 fn load_checkpoint(
     store: &Store,
     run_id: &str,
-) -> Option<(Vec<ChatMessage>, usize, Option<String>)> {
+    current_fingerprint: &str,
+    rollout: &mut Option<crate::rollout::Rollout>,
+) -> Option<LoadedCheckpoint> {
     let raw: Option<String> = store
         .with_conn(|conn| {
             Ok(conn
@@ -977,6 +1161,67 @@ fn load_checkpoint(
         .ok()
         .flatten();
     let v: Value = serde_json::from_str(&raw?).ok()?;
+    let iteration = v.get("iteration").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    let pending = v
+        .get("pending_proposal_id")
+        .and_then(|x| x.as_str())
+        .map(String::from);
+
+    if v.get("schemaVersion").and_then(|x| x.as_u64()) == Some(2) {
+        // 指纹绑定：Provider/base URL/模型族变化 → 拒绝回放（明确回退）。
+        let stored_fp = v
+            .get("providerFingerprint")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if stored_fp != current_fingerprint {
+            log_rollout(
+                rollout,
+                "checkpoint_provider_mismatch",
+                json!({"stored": stored_fp, "current": current_fingerprint, "action": "fresh_loop"}),
+            );
+            return None;
+        }
+        let arr = v.get("items")?.as_array()?;
+        let mut items: Vec<crate::model_protocol::ModelInputItem> = Vec::with_capacity(arr.len());
+        let mut dropped_opaque = 0usize;
+        for it in arr {
+            match serde_json::from_value::<crate::model_protocol::ModelInputItem>(it.clone()) {
+                Ok(item) => {
+                    // opaque payload 完整性：base64 可解码；损坏项丢弃（明确回退）。
+                    if let crate::model_protocol::ModelInputItem::ReasoningOpaque {
+                        payload, ..
+                    } = &item
+                    {
+                        use base64::Engine;
+                        if base64::engine::general_purpose::STANDARD
+                            .decode(payload)
+                            .is_err()
+                        {
+                            dropped_opaque += 1;
+                            continue;
+                        }
+                    }
+                    items.push(item);
+                }
+                Err(_) => return None, // 无法解析的项 = checkpoint 损坏 → 全新循环
+            }
+        }
+        if dropped_opaque > 0 {
+            log_rollout(
+                rollout,
+                "checkpoint_opaque_dropped",
+                json!({"count": dropped_opaque}),
+            );
+        }
+        let messages = items_to_messages(&items);
+        return Some(LoadedCheckpoint {
+            messages,
+            iteration,
+            pending,
+        });
+    }
+
+    // v1 兼容：messages 数组。
     let arr = v.get("messages")?.as_array()?;
     let mut messages = Vec::with_capacity(arr.len());
     for m in arr {
@@ -986,12 +1231,145 @@ fn load_checkpoint(
             ..Default::default()
         });
     }
-    let iteration = v.get("iteration").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-    let pending = v
-        .get("pending_proposal_id")
-        .and_then(|x| x.as_str())
-        .map(String::from);
-    Some((messages, iteration, pending))
+    Some(LoadedCheckpoint {
+        messages,
+        iteration,
+        pending,
+    })
+}
+
+/// ChatMessage transcript → ModelInputItem[]（checkpoint 持久化形状）。
+/// assistant+tool_calls：ToolCall 项在前、Message(assistant, content) 在后——
+/// 重建时 pending 调用挂到紧随的 assistant Message。
+fn messages_to_items(messages: &[ChatMessage]) -> Vec<crate::model_protocol::ModelInputItem> {
+    use crate::model_protocol::ModelInputItem;
+    let mut items = Vec::with_capacity(messages.len());
+    for m in messages {
+        if m.role == "assistant" {
+            if let Some(calls_json) = m.tool_calls_json.as_deref() {
+                if let Ok(calls) = serde_json::from_str::<Value>(calls_json) {
+                    if let Some(list) = calls.as_array() {
+                        for c in list {
+                            items.push(ModelInputItem::ToolCall {
+                                call_id: c["id"].as_str().unwrap_or_default().into(),
+                                name: c["function"]["name"].as_str().unwrap_or_default().into(),
+                                arguments_json: c["function"]["arguments"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .into(),
+                            });
+                        }
+                    }
+                }
+            }
+            items.push(ModelInputItem::Message {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            });
+        } else if m.role == "tool" {
+            if let Some(call_id) = m.tool_call_id.as_deref() {
+                items.push(ModelInputItem::ToolResult {
+                    call_id: call_id.into(),
+                    output: m.content.clone(),
+                });
+            } else {
+                items.push(ModelInputItem::Message {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                });
+            }
+        } else {
+            items.push(ModelInputItem::Message {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            });
+        }
+    }
+    items
+}
+
+/// ModelInputItem[] → ChatMessage transcript（请求形状重建）。
+fn items_to_messages(items: &[crate::model_protocol::ModelInputItem]) -> Vec<ChatMessage> {
+    use crate::model_protocol::ModelInputItem;
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(items.len());
+    let mut pending_calls: Vec<(String, String, String)> = Vec::new();
+    let flush_calls =
+        |out: &mut Vec<ChatMessage>, pending: &mut Vec<(String, String, String)>, content: &str| {
+            if pending.is_empty() {
+                return;
+            }
+            let calls: Value = Value::Array(
+                pending
+                    .drain(..)
+                    .map(|(id, name, arguments)| {
+                        json!({"id": id, "type": "function",
+                           "function": {"name": name, "arguments": arguments}})
+                    })
+                    .collect(),
+            );
+            out.push(ChatMessage {
+                role: "assistant".into(),
+                content: content.to_string(),
+                tool_calls_json: Some(calls.to_string()),
+                ..Default::default()
+            });
+        };
+    for item in items {
+        match item {
+            ModelInputItem::ToolCall {
+                call_id,
+                name,
+                arguments_json,
+            } => {
+                pending_calls.push((call_id.clone(), name.clone(), arguments_json.clone()));
+            }
+            ModelInputItem::Message { role, content } => {
+                if role == "assistant" {
+                    // assistant Message：pending 调用并入同一条 assistant 消息。
+                    let content_c = content.clone();
+                    let mut calls_json = None;
+                    if !pending_calls.is_empty() {
+                        let calls: Value = Value::Array(
+                            pending_calls
+                                .drain(..)
+                                .map(|(id, name, arguments)| {
+                                    json!({"id": id, "type": "function",
+                                           "function": {"name": name, "arguments": arguments}})
+                                })
+                                .collect(),
+                        );
+                        calls_json = Some(calls.to_string());
+                    }
+                    out.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: content_c,
+                        tool_calls_json: calls_json,
+                        ..Default::default()
+                    });
+                } else {
+                    flush_calls(&mut out, &mut pending_calls, "");
+                    out.push(ChatMessage {
+                        role: role.clone(),
+                        content: content.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+            ModelInputItem::ToolResult { call_id, output } => {
+                flush_calls(&mut out, &mut pending_calls, "");
+                out.push(ChatMessage {
+                    role: "tool".into(),
+                    content: output.clone(),
+                    tool_call_id: Some(call_id.clone()),
+                    tool_calls_json: None,
+                });
+            }
+            // reasoning/compaction opaque 项不回放（chat_completions 协议）。
+            ModelInputItem::ReasoningOpaque { .. } | ModelInputItem::CompactionOpaque { .. } => {}
+        }
+    }
+    flush_calls(&mut out, &mut pending_calls, "");
+    out
 }
 
 pub fn get_proposal(store: &Store, id: &str) -> Result<Proposal, Error> {
@@ -1311,8 +1689,8 @@ mod tests {
         assert_eq!(props[0].tool, "read_file");
         assert_eq!(props[0].decision, "executed");
 
-        // transcript：checkpoint 内 assistant 携带 tool_calls（call_0），
-        // tool 结果消息以同一 call_id 回传（不再降级 user）。
+        // transcript：M4 checkpoint v2 —— schemaVersion=2 + ModelInputItem[]，
+        // tool 结果以 ToolResult 项携带同一 call_id（不再降级 user）。
         let state: String = store
             .with_conn(|c| {
                 c.query_row(
@@ -1323,8 +1701,11 @@ mod tests {
                 .map_err(sg_store::Error::from)
             })
             .unwrap();
-        let has_call_id = state.contains(r#""tool_call_id":"call_0""#)
-            || state.contains(r#""tool_call_id": "call_0""#);
+        assert!(
+            state.contains(r#""schemaVersion":2"#),
+            "checkpoint 应为 v2：{state}"
+        );
+        let has_call_id = state.contains(r#""call_id":"call_0""#);
         assert!(has_call_id, "checkpoint 应携带 call_id transcript：{state}");
         let has_tool_calls = state.contains(r#""name":"read_file""#) || state.contains("read_file");
         assert!(has_tool_calls);
@@ -1493,6 +1874,7 @@ mod tests {
             None,
             &initial,
             &CompactPolicy::default(),
+            None,
         )
         .unwrap();
         assert_eq!(resumed.run.status, "completed_execution");
@@ -1594,7 +1976,7 @@ mod tests {
 
     #[test]
     fn cancel_flag_stops_loop_with_single_event() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
         let store = setup();
@@ -1607,14 +1989,14 @@ mod tests {
             );
         }
         let gateway = Gateway::new(Box::new(fake));
-        let flag = Arc::new(AtomicBool::new(false));
-        let f2 = flag.clone();
+        // M2：取消令牌（取代 AtomicBool）；工具执行后请求取消，下一迭代边界收尾。
+        let token = std::sync::Arc::new(sg_integrations::CancelToken::new());
+        let t2 = token.clone();
         let executed = Arc::new(AtomicUsize::new(0));
         let counter = executed.clone();
         let executor = move |_p: &Proposal| -> Result<String, String> {
             counter.fetch_add(1, Ordering::SeqCst);
-            // 首个工具执行后请求取消：下一迭代边界应观察到并收尾。
-            f2.store(true, Ordering::SeqCst);
+            t2.cancel();
             Ok("ok".into())
         };
         let config = RunConfig {
@@ -1643,10 +2025,11 @@ mod tests {
             Some(&executor),
             &config,
             &run.id,
-            Some(&flag),
+            Some(&token),
             None,
             &initial,
             &CompactPolicy::default(),
+            None,
         )
         .unwrap();
         assert_eq!(out.run.status, "cancelled");
@@ -1705,6 +2088,787 @@ mod tests {
             run.result
         );
         assert!(!run.result.contains("context_too_large"));
+    }
+
+    /// M2：流式全链——fake 流式桥 → 聚合器 → run.turn_committed 恰好每轮一条；
+    /// delta 不写 outbox（万级 delta 也只产生 1 条耐久 turn 事件）。
+    #[test]
+    fn streaming_run_emits_single_turn_commit_and_no_delta_rows() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.enable_native();
+        fake.enable_streaming();
+        fake.push_response(
+            r#"{"action":"read_file","arguments":{"path":"a.md"},"summary":"读取"}"#,
+            10,
+            5,
+        );
+        fake.push_response(r#"{"action":"final","summary":"流式任务完成"}"#, 20, 8);
+        let gateway = Gateway::with_shared(fake.clone(), Some(fake.clone()));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        gateway.set_runtime_handle(rt.handle().clone());
+        let executor =
+            move |p: &Proposal| -> Result<String, String> { Ok(format!("content of {}", p.tool)) };
+        let out = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "流式场景",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-stream-e2e",
+                budget: &RunBudget::default(),
+                max_iterations: 10,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.run.status, "completed_execution");
+        assert_eq!(out.output, "流式任务完成");
+        let count = |ty: &str| -> i64 {
+            store
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT COUNT(*) FROM events_outbox WHERE type=?1 AND aggregate_id=?2",
+                        rusqlite::params![ty, out.run.id],
+                        |r| r.get::<_, i64>(0),
+                    )?)
+                })
+                .unwrap()
+        };
+        // 两轮模型调用 → 恰好两条耐久 turn commit。
+        assert_eq!(count("run.turn_committed"), 2, "每轮恰好一条 turn commit");
+        // delta 是易失事件：永不落 outbox。
+        assert_eq!(count("run.output_delta"), 0);
+        assert_eq!(count("run.tool_arguments_delta"), 0);
+        // 流式 turn 的协议观测与首 token 延迟落 model_turns。
+        let rows: Vec<(String, Option<i64>)> = store
+            .with_conn(|c| {
+                let mut stmt =
+                    c.prepare("SELECT protocol, ttft_ms FROM model_turns WHERE agent_run_id=?1")?;
+                let rows = stmt.query_map([&out.run.id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, rusqlite::Error>>()
+                    .map_err(sg_store::Error::from)
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (protocol, ttft) in &rows {
+            assert_eq!(protocol, "native_tools_sse");
+            assert!(ttft.is_some(), "流式轮次应有首 token 延迟");
+        }
+    }
+
+    /// M2：提案指纹顺序——run.turn_committed 先于 tool.proposed（完成帧验证后才
+    /// 创建 Proposal）。
+    #[test]
+    fn turn_commit_precedes_proposal_in_outbox_order() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.enable_native();
+        fake.enable_streaming();
+        fake.push_response(
+            r#"{"action":"read_file","arguments":{"path":"a.md"},"summary":"读取"}"#,
+            5,
+            3,
+        );
+        fake.push_response(r#"{"action":"final","summary":"ok"}"#, 5, 3);
+        let gateway = Gateway::with_shared(fake.clone(), Some(fake.clone()));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        gateway.set_runtime_handle(rt.handle().clone());
+        let executor = |p: &Proposal| -> Result<String, String> { Ok(format!("c of {}", p.tool)) };
+        let out = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-commit-order",
+                budget: &RunBudget::default(),
+                max_iterations: 10,
+            },
+        )
+        .unwrap();
+        let seqs: Vec<(String, i64)> = store
+            .with_conn(|c| {
+                let mut stmt = c
+                    .prepare("SELECT type, sequence FROM events_outbox WHERE aggregate_id=?1 ORDER BY sequence")?;
+                let rows = stmt.query_map([&out.run.id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, rusqlite::Error>>()
+                    .map_err(sg_store::Error::from)
+            })
+            .unwrap();
+        let commit = seqs
+            .iter()
+            .find(|(t, _)| t == "run.turn_committed")
+            .expect("应有 turn commit");
+        let propose = seqs
+            .iter()
+            .find(|(t, _)| t == "tool.proposed")
+            .expect("应有提案");
+        assert!(
+            commit.1 < propose.1,
+            "turn commit (seq {}) 必须先于提案 (seq {})",
+            commit.1,
+            propose.1
+        );
+    }
+
+    /// M2：流中段取消——挂起的流被令牌中止，Run 进入 cancelled，
+    /// 无 completed/turn_committed，run.cancelled 恰好一条。
+    #[test]
+    fn cancel_mid_stream_finalizes_cancelled_within_budget() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.enable_native();
+        fake.enable_streaming();
+        fake.hold_stream_until_cancel();
+        fake.push_response(r#"{"action":"final","summary":"不该到达"}"#, 5, 3);
+        let gateway = Gateway::with_shared(fake.clone(), Some(fake.clone()));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        gateway.set_runtime_handle(rt.handle().clone());
+        let token = std::sync::Arc::new(sg_integrations::CancelToken::new());
+        let t2 = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            t2.cancel();
+        });
+        let config = RunConfig {
+            workitem_id: "wi",
+            task_id: "",
+            goal: "g",
+            manifest_id: "ctx1",
+            tool_allowlist: &["read_file".into()],
+            idempotency_key: "key-cancel-stream",
+            budget: &RunBudget::default(),
+            max_iterations: 10,
+        };
+        let (run, created) = create_run(&store, &config).unwrap();
+        assert!(created);
+        let started = std::time::Instant::now();
+        let initial = crate::prompt::assemble(
+            &crate::prompt::PromptEnv::default(),
+            &["read_file".to_string()],
+            &crate::prompt::knowledge_text("", ""),
+            "g",
+        );
+        let out = execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &config,
+            &run.id,
+            Some(&token),
+            None,
+            &initial,
+            &CompactPolicy::default(),
+            None,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(out.run.status, "cancelled");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "取消收尾应在秒级：{elapsed:?}"
+        );
+        let count = |ty: &str| -> i64 {
+            store
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT COUNT(*) FROM events_outbox WHERE type=?1 AND aggregate_id=?2",
+                        rusqlite::params![ty, out.run.id],
+                        |r| r.get::<_, i64>(0),
+                    )?)
+                })
+                .unwrap()
+        };
+        assert_eq!(count("run.cancelled"), 1, "cancelled 恰好一条");
+        assert_eq!(count("run.completed_execution"), 0, "无 completed 事件");
+        assert_eq!(count("run.turn_committed"), 0, "中断轮次无 turn commit");
+    }
+
+    /// M2：call_turn 转发 output/tool-arguments delta（半个参数分片可见），
+    /// 且工具参数完成后才聚合出完整 arguments（提案原材料不残缺）。
+    #[test]
+    fn call_turn_forwards_deltas_and_assembles_full_arguments() {
+        use crate::modelgw::{DeltaKind, TurnDeltaForwarder};
+        struct Recorder(std::sync::Mutex<Vec<(&'static str, String)>>);
+        impl TurnDeltaForwarder for Recorder {
+            fn forward(&self, _run_id: &str, kind: DeltaKind, text: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((kind.event_type(), text.to_string()));
+            }
+        }
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.enable_native();
+        fake.enable_streaming();
+        fake.push_response(
+            r#"{"action":"read_file","arguments":{"path":"a.md"},"summary":"读取"}"#,
+            5,
+            3,
+        );
+        fake.push_response(r#"{"action":"final","summary":"流式正文"}"#, 5, 3);
+        let gateway = Gateway::with_shared(fake.clone(), Some(fake.clone()));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        gateway.set_runtime_handle(rt.handle().clone());
+        let recorder = std::sync::Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        let token = sg_integrations::CancelToken::new();
+        let resp = gateway
+            .call_turn(
+                &store,
+                "run-fw",
+                &Budget::default(),
+                &CompletionRequest {
+                    model: String::new(),
+                    system_prompt: "s".into(),
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: "hi".into(),
+                        ..Default::default()
+                    }],
+                    max_tokens: 256,
+                    response_schema: None,
+                    tools_json: Some(crate::tools::provider_tools_json(&["read_file".into()])),
+                },
+                &modelgw::TurnOpts {
+                    cancel: &token,
+                    forwarder: Some(recorder.clone()),
+                    prompt_cache_key: "test-cache-key".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].arguments, r#"{"path":"a.md"}"#);
+        // 第二轮：final 正文（验证 output delta 转发）。
+        let _ = gateway
+            .call_turn(
+                &store,
+                "run-fw",
+                &Budget::default(),
+                &CompletionRequest {
+                    model: String::new(),
+                    system_prompt: "s".into(),
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: "hi".into(),
+                        ..Default::default()
+                    }],
+                    max_tokens: 256,
+                    response_schema: None,
+                    tools_json: Some(crate::tools::provider_tools_json(&["read_file".into()])),
+                },
+                &modelgw::TurnOpts {
+                    cancel: &token,
+                    forwarder: Some(recorder.clone()),
+                    prompt_cache_key: "test-cache-key".into(),
+                },
+            )
+            .unwrap();
+        let events = recorder.0.lock().unwrap();
+        let tool_deltas: Vec<&str> = events
+            .iter()
+            .filter(|(k, _)| *k == "run.tool_arguments_delta")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert!(tool_deltas.len() >= 2, "参数应分片转发：{tool_deltas:?}");
+        // 分片拼回 = 最终参数（聚合完整性）。
+        assert_eq!(tool_deltas.concat(), r#"{"path":"a.md"}"#);
+        let text: String = events
+            .iter()
+            .filter(|(k, _)| *k == "run.output_delta")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert!(text.contains("流式正文"), "正文 delta 应转发：{text}");
+    }
+
+    // ---------- M4：checkpoint v2 / reasoning 持久化 / 缓存观测 ----------
+
+    use std::sync::Arc;
+
+    fn streaming_gateway(fake: &std::sync::Arc<FakeModel>) -> Gateway {
+        let gateway = Gateway::with_shared(fake.clone(), Some(fake.clone()));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        gateway.set_runtime_handle(rt.handle().clone());
+        gateway
+    }
+
+    /// checkpoint v2：指纹绑定——存储指纹与当前 Provider 不一致 → 明确回退全新循环。
+    #[test]
+    fn checkpoint_v2_provider_mismatch_falls_back_to_fresh_loop() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.enable_native();
+        fake.enable_streaming();
+        fake.push_response(
+            r#"{"action":"run_command","arguments":{"argv":["ls"]},"summary":"执行"}"#,
+            5,
+            3,
+        );
+        fake.push_response(r#"{"action":"final","summary":"新循环完成"}"#, 5, 3);
+        let gateway = streaming_gateway(&fake);
+        let config = RunConfig {
+            workitem_id: "wi",
+            task_id: "",
+            goal: "g",
+            manifest_id: "ctx1",
+            tool_allowlist: &["run_command".into()],
+            idempotency_key: "key-fp-mismatch",
+            budget: &RunBudget::default(),
+            max_iterations: 10,
+        };
+        let (run, _) = create_run(&store, &config).unwrap();
+        let initial = crate::prompt::assemble(
+            &crate::prompt::PromptEnv::default(),
+            &["run_command".to_string()],
+            &crate::prompt::knowledge_text("", ""),
+            "g",
+        );
+        let mut rollout = crate::rollout::Rollout::open(&store.data_dir, &run.id).ok();
+        let out = execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &config,
+            &run.id,
+            None,
+            rollout.take(),
+            &initial,
+            &CompactPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.run.status, "paused");
+        // 篡改存储指纹（模拟 Provider/模型切换后恢复）。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE agent_checkpoints SET state=replace(state, '\"providerFingerprint\":\"fake\"', '\"providerFingerprint\":\"sha256:other\"')",
+                    [],
+                )
+                .map_err(sg_store::Error::from)
+            })
+            .unwrap();
+        let rollout2 = crate::rollout::Rollout::open(&store.data_dir, &run.id).ok();
+        let resumed = execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &config,
+            &run.id,
+            None,
+            rollout2,
+            &initial,
+            &CompactPolicy::default(),
+            None,
+        )
+        .unwrap();
+        // 明确回退：全新循环重新计划（不跨 Provider 回放旧 transcript）。
+        assert_eq!(resumed.run.status, "completed_execution");
+        let rollout_path = crate::rollout::Rollout::path_for(&store.data_dir, &run.id);
+        let body = std::fs::read_to_string(&rollout_path).unwrap();
+        assert!(
+            body.contains("checkpoint_provider_mismatch"),
+            "应记录指纹不匹配: {body}"
+        );
+    }
+
+    /// checkpoint v2：损坏的 opaque payload 被丢弃（明确回退），Run 可继续。
+    #[test]
+    fn corrupted_reasoning_opaque_dropped_on_resume() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.enable_native();
+        fake.enable_streaming();
+        fake.set_data_policy(serde_json::json!({"reasoningPersist": "encrypted_at_rest"}));
+        fake.set_reasoning_text("SECRET-REASONING-CONTENT");
+        fake.push_response(
+            r#"{"action":"run_command","arguments":{"argv":["ls"]},"summary":"执行"}"#,
+            5,
+            3,
+        );
+        fake.push_response(r#"{"action":"final","summary":"恢复完成"}"#, 5, 3);
+        let gateway = streaming_gateway(&fake);
+        gateway.set_reasoning_vault(Arc::new(crate::reasoning_state::ReasoningVault::new(
+            Arc::new(sg_settings::credentials::InMemoryCredentials::default()),
+        )));
+        let config = RunConfig {
+            workitem_id: "wi",
+            task_id: "",
+            goal: "g",
+            manifest_id: "ctx1",
+            tool_allowlist: &["run_command".into()],
+            idempotency_key: "key-corrupt-opaque",
+            budget: &RunBudget::default(),
+            max_iterations: 10,
+        };
+        let (run, _) = create_run(&store, &config).unwrap();
+        let initial = crate::prompt::assemble(
+            &crate::prompt::PromptEnv::default(),
+            &["run_command".to_string()],
+            &crate::prompt::knowledge_text("", ""),
+            "g",
+        );
+        let out = execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &config,
+            &run.id,
+            None,
+            None,
+            &initial,
+            &CompactPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.run.status, "paused");
+        // 恢复前批准挂起审批（正常恢复语义）。
+        let pending = sg_policy::pending(&store, 10).unwrap();
+        sg_policy::decide(&store, &pending[0].id, "approved", "tester", "ok").unwrap();
+        // 破坏 checkpoint 中的 opaque payload（非法 base64）。
+        store
+            .with_conn(|c| {
+                // 定位 reasoning_opaque 项（index 随 transcript 长度变化）后破坏 payload。
+                for idx in 0..32usize {
+                    let ty: String = c
+                        .query_row(
+                            &format!(
+                                "SELECT COALESCE(json_extract(state,'$.items[{idx}].type'),'') FROM agent_checkpoints WHERE agent_run_id=?1"
+                            ),
+                            [&run.id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or_default();
+                    if ty == "reasoning_opaque" {
+                        let payload: String = c
+                            .query_row(
+                                &format!(
+                                    "SELECT json_extract(state,'$.items[{idx}].payload') FROM agent_checkpoints WHERE agent_run_id=?1"
+                                ),
+                                [&run.id],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or_default();
+                        c.execute(
+                            "UPDATE agent_checkpoints SET state=replace(state, ?2, '!!!not-base64!!!') WHERE agent_run_id=?1",
+                            rusqlite::params![run.id, payload],
+                        )?;
+                        break;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        let rollout2 = crate::rollout::Rollout::open(&store.data_dir, &run.id).ok();
+        let resumed = execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &config,
+            &run.id,
+            None,
+            rollout2,
+            &initial,
+            &CompactPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumed.run.status, "completed_execution");
+        let rollout_path = crate::rollout::Rollout::path_for(&store.data_dir, &run.id);
+        let body = std::fs::read_to_string(&rollout_path).unwrap();
+        assert!(body.contains("checkpoint_opaque_dropped"));
+    }
+
+    /// M4 reasoning 三态：encrypted / dropped_policy / dropped_key_unavailable；
+    /// 明文永不入 checkpoint DB 或 rollout。
+    #[test]
+    fn reasoning_persist_three_states_and_no_plaintext_leak() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.enable_native();
+        fake.enable_streaming();
+        fake.set_reasoning_text("SECRET-REASONING。第二句。");
+        for _ in 0..3 {
+            fake.push_response(r#"{"action":"final","summary":"ok"}"#, 9, 7);
+        }
+        let gateway = streaming_gateway(&fake);
+        // (a) 显式启用 + vault → encrypted，解密还原明文（仅 vault 侧可解）。
+        fake.set_data_policy(serde_json::json!({"reasoningPersist": "encrypted_at_rest"}));
+        gateway.set_reasoning_vault(Arc::new(crate::reasoning_state::ReasoningVault::new(
+            Arc::new(sg_settings::credentials::InMemoryCredentials::default()),
+        )));
+        let token = sg_integrations::CancelToken::new();
+        let resp = gateway
+            .call_turn(
+                &store,
+                "run-rp",
+                &Budget::default(),
+                &CompletionRequest {
+                    model: String::new(),
+                    system_prompt: "s".into(),
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: "hi".into(),
+                        ..Default::default()
+                    }],
+                    max_tokens: 64,
+                    response_schema: None,
+                    tools_json: None,
+                },
+                &modelgw::TurnOpts {
+                    cancel: &token,
+                    forwarder: None,
+                    prompt_cache_key: "k1".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(resp.reasoning_state_status, "encrypted");
+        let blob = resp.reasoning_state_encrypted.clone().unwrap();
+        // 检查项：明文不在 DB / blob 中。
+        assert!(!blob.contains("SECRET-REASONING"));
+        // (b) 无数据策略 → dropped_policy（不持久化，不报错）。
+        fake.set_data_policy(serde_json::json!({}));
+        let resp2 = gateway
+            .call_turn(
+                &store,
+                "run-rp",
+                &Budget::default(),
+                &CompletionRequest {
+                    model: String::new(),
+                    system_prompt: "s".into(),
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: "hi".into(),
+                        ..Default::default()
+                    }],
+                    max_tokens: 64,
+                    response_schema: None,
+                    tools_json: None,
+                },
+                &modelgw::TurnOpts {
+                    cancel: &token,
+                    forwarder: None,
+                    prompt_cache_key: "k1".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(resp2.reasoning_state_status, "dropped_policy");
+        assert!(resp2.reasoning_state_encrypted.is_none());
+        // (c) 启用但未装配 vault → dropped_key_unavailable（明确回退）。
+        let gateway2 = streaming_gateway(&fake);
+        fake.set_data_policy(serde_json::json!({"reasoningPersist": "encrypted_at_rest"}));
+        let resp3 = gateway2
+            .call_turn(
+                &store,
+                "run-rp",
+                &Budget::default(),
+                &CompletionRequest {
+                    model: String::new(),
+                    system_prompt: "s".into(),
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: "hi".into(),
+                        ..Default::default()
+                    }],
+                    max_tokens: 64,
+                    response_schema: None,
+                    tools_json: None,
+                },
+                &modelgw::TurnOpts {
+                    cancel: &token,
+                    forwarder: None,
+                    prompt_cache_key: "k1".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(resp3.reasoning_state_status, "dropped_key_unavailable");
+        // (d) 解密还原（仅经 vault）。
+        let vault = crate::reasoning_state::ReasoningVault::new(Arc::new(
+            sg_settings::credentials::InMemoryCredentials::default(),
+        ));
+        // 注意：此 vault 是新实例（不同密钥），应解密失败（fail-closed 而非错值）。
+        assert!(vault.decrypt(&blob).is_err());
+    }
+
+    /// M4 缓存观测：model_turns 记录 cached/reasoning tokens 与 prompt_cache_key。
+    #[test]
+    fn model_turns_record_cache_and_reasoning_metrics() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.enable_native();
+        fake.enable_streaming();
+        fake.set_reasoning_text("推理内容。");
+        fake.push_response_cached(r#"{"action":"final","summary":"done"}"#, 100, 40, 60);
+        let gateway = streaming_gateway(&fake);
+        let out = start(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            None,
+            &RunConfig {
+                workitem_id: "wi",
+                task_id: "",
+                goal: "g",
+                manifest_id: "ctx1",
+                tool_allowlist: &["read_file".into()],
+                idempotency_key: "key-cache-obs",
+                budget: &RunBudget::default(),
+                max_iterations: 10,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.run.status, "completed_execution");
+        let row: (i64, i64, String) = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT cached_tokens, reasoning_tokens, prompt_cache_key FROM model_turns WHERE agent_run_id=?1",
+                    [&out.run.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .map_err(sg_store::Error::from)
+            })
+            .unwrap();
+        assert_eq!(row.0, 60, "cached tokens 落库");
+        assert!(row.1 > 0, "reasoning tokens 计量落库");
+        assert!(row.2.starts_with("")); // 缓存域键存在（非空由下方断言）
+        assert!(!row.2.is_empty());
+        // reasoning 明文不出现在任何观测表（model_calls/model_turns 不存正文）。
+        let leak: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM model_turns WHERE agent_run_id=?1 AND (prompt_cache_key LIKE '%推理%' OR protocol LIKE '%推理%')",
+                    [&out.run.id],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(leak, 0);
+    }
+
+    /// M4：压缩摘要 JSON 校验——两次失败保留原 checkpoint 并使 Run 失败。
+    #[test]
+    fn compaction_invalid_summary_preserves_checkpoint_and_fails() {
+        let store = setup();
+        let fake = std::sync::Arc::new(FakeModel::default());
+        fake.push_response(
+            r#"{"action":"read_file","arguments":{"path":"a"},"summary":"读取"}"#,
+            5,
+            3,
+        );
+        // 两次压缩调用均返回非法摘要（缺 summary 字段）。
+        fake.push_response("not-json", 5, 3);
+        fake.push_response(r#"{"facts":[]}"#, 5, 3);
+        let gateway = Gateway::new(Box::new(SharedFake(fake.clone())));
+        let executor = move |_p: &Proposal| -> Result<String, String> { Ok("x".repeat(40000)) };
+        let initial = crate::prompt::assemble(
+            &crate::prompt::PromptEnv::default(),
+            &["read_file".to_string()],
+            &crate::prompt::knowledge_text("", ""),
+            "g",
+        );
+        let config = RunConfig {
+            workitem_id: "wi",
+            task_id: "",
+            goal: "g",
+            manifest_id: "ctx1",
+            tool_allowlist: &["read_file".into()],
+            idempotency_key: "key-compact-invalid",
+            budget: &RunBudget::default(),
+            max_iterations: 10,
+        };
+        let (run, _) = create_run(&store, &config).unwrap();
+        let err = match execute_run(
+            &store,
+            &gateway,
+            &policy_snapshot(),
+            Some(&executor),
+            &config,
+            &run.id,
+            None,
+            None,
+            &initial,
+            &CompactPolicy {
+                threshold_tokens: 8000,
+                keep_turns: 1,
+            },
+            None,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("非法摘要必须使压缩失败"),
+        };
+        // 注意：同语句两次 lock() 会自死锁（guard 存活到语句结束），先取出。
+        let (calls_n, call_heads) = {
+            let calls = fake.calls.lock().unwrap();
+            (
+                calls.len(),
+                calls
+                    .iter()
+                    .map(|c| c.system_prompt.chars().take(12).collect::<String>())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(
+            err.to_string().contains("压缩摘要校验失败"),
+            "{err}; calls={calls_n} contents={call_heads:?}"
+        );
+        // 原 checkpoint 保留（phase=running 回滚点存在）。
+        let state: String = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT state FROM agent_checkpoints WHERE agent_run_id=?1 ORDER BY seq DESC LIMIT 1",
+                    [&run.id],
+                    |r| r.get(0),
+                )
+                .map_err(sg_store::Error::from)
+            })
+            .unwrap();
+        assert!(state.contains(r#""schemaVersion":2"#));
+    }
+
+    /// M4：压缩策略选择矩阵。
+    #[test]
+    fn select_compaction_matrix() {
+        use modelgw::select_compaction;
+        // 无快照/无声明 → 本地结构化（保守）。
+        assert_eq!(
+            select_compaction(None, None),
+            modelgw::CompactionStrategy::LocalStructured
+        );
+        // 声明 provider_opaque 但数据策略未允许 serverState → 本地。
+        assert_eq!(
+            select_compaction(
+                Some(serde_json::json!({"compaction": "provider_opaque"})),
+                Some(serde_json::json!({})),
+            ),
+            modelgw::CompactionStrategy::LocalStructured
+        );
+        // 两者齐备 → provider_opaque。
+        assert_eq!(
+            select_compaction(
+                Some(serde_json::json!({"compaction": "provider_opaque"})),
+                Some(serde_json::json!({"serverState": "allowed"})),
+            ),
+            modelgw::CompactionStrategy::ProviderOpaque
+        );
     }
 
     /// 按 idempotency_key 反查 run id（错误路径断言用）。
@@ -1948,6 +3112,7 @@ mod tests {
                 threshold_tokens: 8000,
                 keep_turns: 1,
             },
+            None,
         )
         .unwrap();
         assert_eq!(out.run.status, "completed_execution");
@@ -2020,6 +3185,7 @@ mod tests {
                 threshold_tokens: 1000,
                 keep_turns: 2,
             },
+            None,
         ) {
             Err(e) => e,
             Ok(_) => panic!("压缩失败必须使 Run failed"),

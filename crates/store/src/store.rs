@@ -24,6 +24,11 @@ pub struct Store {
 
 impl Store {
     /// 打开/创建数据目录并应用迁移。拒绝网络文件系统（WAL 不安全）。
+    ///
+    /// Schema 纪元（RFC v1.0 §19.1）：manifest 域 schema（0024+）写入 `sixgates-v2.db`，
+    /// 旧版本应用只打开 `sixgates.db` —— 物理隔离，旧包读写不到新数据。
+    /// v2 不存在而 legacy 存在时，用 SQLite backup API 做一次性在线拷贝（含 WAL 一致性），
+    /// 旧文件保留只读（回滚 = 删除 v2 切回旧路径）。
     pub fn open(data_dir: &Path, version: &str) -> Result<Self, Error> {
         std::fs::create_dir_all(data_dir.join("objects"))?;
         std::fs::create_dir_all(data_dir.join("logs"))?;
@@ -31,7 +36,11 @@ impl Store {
         check_filesystem(data_dir)?;
         write_probe(data_dir)?;
 
-        let db_path = data_dir.join("sixgates.db");
+        let legacy_path = data_dir.join("sixgates.db");
+        let db_path = data_dir.join("sixgates-v2.db");
+        if !db_path.exists() && legacy_path.exists() {
+            Self::import_legacy_epoch(&legacy_path, &db_path)?;
+        }
         let conn = Connection::open(&db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
@@ -44,6 +53,23 @@ impl Store {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// 一次性纪元导入：legacy `sixgates.db` → `sixgates-v2.db`（在线 backup API，含 WAL 一致性）。
+    /// 旧文件保留不动；导入失败删除半成品 v2，回滚即切回旧路径（§19.1）。
+    fn import_legacy_epoch(legacy: &Path, v2: &Path) -> Result<(), Error> {
+        let src = Connection::open_with_flags(legacy, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut dst = Connection::open(v2)?;
+        let import = (|| -> Result<(), rusqlite::Error> {
+            let bc = rusqlite::backup::Backup::new(&src, &mut dst)?;
+            bc.run_to_completion(64, std::time::Duration::from_millis(5), None)?;
+            Ok(())
+        })();
+        if let Err(e) = import {
+            let _ = std::fs::remove_file(v2);
+            return Err(e.into());
+        }
+        Ok(())
     }
 
     /// 在锁内执行数据库操作（单写者串行）。

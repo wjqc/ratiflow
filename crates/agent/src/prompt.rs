@@ -43,7 +43,10 @@ pub fn base_system_prompt(allowlist: &[String]) -> String {
 pub fn boundary_content(env: &PromptEnv) -> String {
     let mode = match env.mode {
         Some(sg_executor::Mode::Docker) => "docker 隔离",
-        Some(sg_executor::Mode::SafeRestricted) => "安全受限（只读白名单）",
+        Some(sg_executor::Mode::KernelRestricted) => {
+            "内核沙箱受限（Seatbelt/Landlock 强制路径与网络边界）"
+        }
+        Some(sg_executor::Mode::SafeRestricted) => "本机白名单（非强隔离；只读白名单）",
         Some(sg_executor::Mode::UnsafeExplicit) => "显式不安全（用户已确认）",
         Some(sg_executor::Mode::Disabled) | None => "禁用",
     };
@@ -220,7 +223,8 @@ mod tests {
         );
         assert_eq!(initial.prefix.len(), 3);
         assert_eq!(initial.prefix[0].role, "developer");
-        assert!(initial.prefix[0].content.contains("安全受限"));
+        // ADR-034：SafeRestricted 诚实标注为"本机白名单（非强隔离）"，不得称安全沙箱。
+        assert!(initial.prefix[0].content.contains("本机白名单（非强隔离"));
         assert!(
             initial.prefix[1].content.contains("约定 A")
                 && initial.prefix[1].content.contains("块 B")

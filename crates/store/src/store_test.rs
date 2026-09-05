@@ -224,6 +224,26 @@ mod tests {
     }
 
     #[test]
+    fn scan_assignment_rules_ignore_code_shapes() {
+        // 代码赋值不是秘密：值含代码标点（:: < > ( ) ;）不命中（快照/write_draft 曾被误拒）。
+        let code = concat!(
+            "let token = std::sync::Arc::new(sg_integrations::CancelToken::new());\n",
+            "pub fn register(&self, run_id: &str, token: Arc<CancelToken>) {}\n",
+            "let secret = format!(\"{}\", value);\n",
+            "let password = input.trim().to_string();\n",
+        );
+        assert!(
+            !scan::has_high_risk(&scan::scan(code.as_bytes())),
+            "代码赋值不应命中: {:?}",
+            scan::scan(code.as_bytes())
+        );
+        // 带引号或秘密材料字符集的裸值仍命中。
+        assert!(scan::has_high_risk(&scan::scan(b"password = \"hunter2pass\"")));
+        assert!(scan::has_high_risk(&scan::scan(b"API_KEY=abcdef1234567890abcdef")));
+        assert!(scan::has_high_risk(&scan::scan(b"token: 'ghp_0123456789abcdefghijklmnopqrstuvwxyz'")));
+    }
+
+    #[test]
     fn outbox_emit_replay() {
         let (store, _guard) = open();
         let s1 = outbox::emit(
@@ -256,5 +276,154 @@ mod tests {
         let snap = backup::snapshot(&store).unwrap();
         assert!(snap.manifest["snapshotSha256"].as_str().unwrap().len() == 64);
         assert_eq!(snap.manifest["objectsCount"].as_i64().unwrap(), 1);
+    }
+
+    /// A34（RFC v1.0 §17）：populated v23 库经 0024 闭包换表后存量知识数据完整保留，
+    /// 来源转 origin='local'+legacy_local，chunks 补 project_id，replay_status=legacy_pending。
+    #[test]
+    fn migration_0024_preserves_knowledge_data() {
+        let dir = tempdir::make("sg-mig-0024");
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+            conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
+                .unwrap();
+            for (v, body) in crate::migration::MIGRATIONS
+                .iter()
+                .filter(|(v, _)| *v <= 23)
+            {
+                conn.execute_batch(body).unwrap();
+                conn.execute("INSERT INTO schema_migrations(version) VALUES (?1)", [v])
+                    .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                 VALUES ('pj', 'u', 'n', 'p', 'main', '2026-01-01T00:00:00.000Z')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO workitems(id, project_id, title, created_at, updated_at)
+                 VALUES ('w1', 'pj', 't', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO knowledge_sources(id, project_id, kind, name, locator, scan_state, created_at, updated_at)
+                 VALUES ('ks1', 'pj', 'repo_path', '主仓库', '/tmp/x', 'indexed', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO knowledge_chunks(id, source_id, ordinal, object_sha256) VALUES ('kc1', 'ks1', 0, 'aa')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                 VALUES ('cm1', 'w1', 'standard', 'standard', '2026-01-01T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO context_manifest_items(manifest_id, source_id, object_sha256, purpose, included, ordinal)
+                 VALUES ('cm1', 'ks1', '', 'retrieval', 1, 0)",
+                [],
+            ).unwrap();
+        }
+        let store = Store::open(dir.path(), "test").unwrap();
+        assert_eq!(store.schema_version().unwrap(), 27);
+        store.with_conn(|c| {
+            // 来源：origin/local/legacy_local/present。
+            let (origin, legacy, present): (String, i64, i64) = c.query_row(
+                "SELECT origin, legacy_local, present FROM knowledge_sources WHERE id='ks1'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            assert_eq!((origin.as_str(), legacy, present), ("local", 1, 1));
+            // chunks：project_id 回填，generation_id 空。
+            let (pid, gid): (String, Option<String>) = c.query_row(
+                "SELECT project_id, generation_id FROM knowledge_chunks WHERE id='kc1'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            assert_eq!(pid.as_str(), "pj");
+            assert!(gid.is_none());
+            // context items 保留 + replay_status 默认。
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM context_manifest_items WHERE manifest_id='cm1'", [], |r| r.get(0))?;
+            assert_eq!(n, 1);
+            let rs: String = c.query_row("SELECT replay_status FROM context_manifests WHERE id='cm1'", [], |r| r.get(0))?;
+            assert_eq!(rs, "legacy_pending");
+            // 新表全部存在。
+            for t in ["knowledge_generations","knowledge_generation_sources","knowledge_generation_active",
+                      "knowledge_generation_retention","knowledge_generation_activation_history",
+                      "knowledge_ops","context_manifest_blocks","context_manifest_item_sources","context_migration_jobs"] {
+                let ok: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [t], |r| r.get(0))?;
+                assert_eq!(ok, 1, "缺表 {t}");
+            }
+            // manifest 来源 partial unique index 存在。
+            let idx: i64 = c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_src_manifest_stable'",
+                [], |r| r.get(0)).or_else(|_| c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'sqlite_autoindex%'",
+                [], |r| r.get(0)))?;
+            assert!(idx >= 1);
+            Ok(())
+        }).unwrap();
+        store.quick_check().unwrap();
+    }
+
+    /// A38（§19.1）：legacy 纪元文件被保留且不被新 schema 污染；v2 承接数据。
+    #[test]
+    fn legacy_epoch_file_isolated_and_v2_carries_data() {
+        let dir = tempdir::make("sg-epoch");
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+            conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
+                .unwrap();
+            for (v, body) in crate::migration::MIGRATIONS
+                .iter()
+                .filter(|(v, _)| *v <= 23)
+            {
+                conn.execute_batch(body).unwrap();
+                conn.execute("INSERT INTO schema_migrations(version) VALUES (?1)", [v])
+                    .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                 VALUES ('pj', 'u', 'n', 'p', 'main', '2026-01-01T00:00:00.000Z')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO knowledge_sources(id, project_id, kind, name, locator, created_at, updated_at)
+                 VALUES ('ks_old', 'pj', 'document', 'n', 'l', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+                [],
+            ).unwrap();
+        }
+        let store = Store::open(dir.path(), "test").unwrap();
+        let n: i64 = store
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM knowledge_sources", [], |r| r.get(0))
+                    .map_err(crate::Error::from)
+            })
+            .unwrap();
+        assert_eq!(n, 1, "v2 承接 legacy 数据");
+        // 旧文件 schema_migrations 仍停在 23（只读保留，未被 0024 污染）。
+        let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+        let maxv: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(maxv, 23);
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM knowledge_sources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 1);
+    }
+
+    /// A38（§19.1）：DB 含高于支持上限的 schema 版本 → 拒绝打开。
+    #[test]
+    fn future_schema_version_refuses_open() {
+        let dir = tempdir::make("sg-future-schema");
+        let store = Store::open(dir.path(), "test").unwrap();
+        drop(store);
+        let conn = rusqlite::Connection::open(dir.path().join("sixgates-v2.db")).unwrap();
+        conn.execute("INSERT INTO schema_migrations(version) VALUES (999)", [])
+            .unwrap();
+        drop(conn);
+        let result = Store::open(dir.path(), "test");
+        assert!(result.is_err(), "未来 schema 版本必须拒启");
     }
 }

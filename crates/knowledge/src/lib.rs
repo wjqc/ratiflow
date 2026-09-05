@@ -7,6 +7,11 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sg_store::{ids, objects, outbox, scan, timefmt, Error, Store};
 
+pub mod flags;
+pub mod gc;
+pub mod manifest;
+pub mod reconcile;
+pub mod scan_modes;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Source {
