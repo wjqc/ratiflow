@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use sg_store::{Error, Store};
 
-use crate::{stages, Gate};
+use crate::stages;
 
 pub fn progress(store: &Store, workitem_id: &str) -> Result<Value, Error> {
     let wi = crate::get(store, workitem_id)?;
@@ -28,7 +28,12 @@ pub fn progress(store: &Store, workitem_id: &str) -> Result<Value, Error> {
         .map_err(Error::from)
     })?;
 
-    let current_gate = Gate::parse(&wi.current_gate);
+    // M1-04：gateIndex 按实例顺序计算（自定义模板无六值假设）。
+    let gate_index = crate::gate_refs(store, workitem_id).ok().and_then(|refs| {
+        refs.iter()
+            .position(|g| g.gate_id == wi.current_gate)
+            .map(|i| i as i64)
+    });
     let mut blocked_reason = Value::Null;
     for stage in &stages {
         if stage.gate == wi.current_gate {
@@ -47,7 +52,7 @@ pub fn progress(store: &Store, workitem_id: &str) -> Result<Value, Error> {
         "workItemId": wi.id,
         "title": wi.title,
         "currentGate": wi.current_gate,
-        "gateIndex": current_gate.map(|g| Gate::ALL.iter().position(|x| *x == g).unwrap_or(0)),
+        "gateIndex": gate_index,
         "stages": stages,
         "evidenceCount": evidence_count,
         "pendingApprovals": pending_approvals,

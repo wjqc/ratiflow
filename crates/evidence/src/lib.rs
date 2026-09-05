@@ -158,18 +158,17 @@ pub struct Passport {
     pub gates: Vec<GateSummary>,
 }
 
-/// 签发通关文牒：六关必须全部 passed。
+/// 签发通关文牒：实例全部关卡必须 passed（M1-06：关卡数按实例定义，不再假设 6）。
 pub fn issue_passport(
     store: &Store,
     workitem_id: &str,
     gates: &[GateSummary],
     shared_summary: &str,
 ) -> Result<Passport, Error> {
-    if gates.len() != 6 {
-        return Err(Error::Message(format!(
-            "passport_incomplete_gates: 需要 6 关结论，收到 {}",
-            gates.len()
-        )));
+    if gates.is_empty() {
+        return Err(Error::Message(
+            "passport_incomplete_gates: 实例无关卡结论".into(),
+        ));
     }
     if gates.iter().any(|g| !g.passed) {
         return Err(Error::Message(
@@ -339,8 +338,11 @@ mod tests {
     #[test]
     fn passport_requires_all_six_passed() {
         let s = setup();
+        // M1-06：关卡数按实例定义——空序列拒绝、存在未通过关拒绝；
+        // 全部通过的 N 关（任意 N≥1）均可签发（5 关实例合法）。
+        assert!(issue_passport(&s, "wi", &[], "").is_err());
         let five = &all_gates_pass()[..5];
-        assert!(issue_passport(&s, "wi", five, "").is_err());
+        assert!(issue_passport(&s, "wi", five, "").is_ok());
         let mut gates = all_gates_pass();
         gates[3].passed = false;
         assert!(issue_passport(&s, "wi", &gates, "").is_err());

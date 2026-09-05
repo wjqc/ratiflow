@@ -197,7 +197,16 @@ export type RpcMethodName =
   | 'skill.setEnabled'
   | 'skill.remove'
   | 'memory.syncFromRepo'
-  | 'project.gitStatus';
+  | 'project.gitStatus'
+  | 'workflowTemplate.list'
+  | 'workflowTemplate.get'
+  | 'workflowTemplate.create'
+  | 'workflowTemplate.updateDraft'
+  | 'workflowTemplate.activate'
+  | 'workflowTemplate.deprecate'
+  | 'workflow.getInstance'
+  | 'workflow.migrationPreview'
+  | 'workflow.migrate';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -395,6 +404,15 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'skill.remove',
   'memory.syncFromRepo',
   'project.gitStatus',
+  'workflowTemplate.list',
+  'workflowTemplate.get',
+  'workflowTemplate.create',
+  'workflowTemplate.updateDraft',
+  'workflowTemplate.activate',
+  'workflowTemplate.deprecate',
+  'workflow.getInstance',
+  'workflow.migrationPreview',
+  'workflow.migrate',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -489,6 +507,9 @@ export const EVENT_TYPES: readonly string[] = [
   'tool.started',
   'trace.edge_created',
   'workitem.created',
+  'workflow.template_activated',
+  'workflow.instance_created',
+  'workflow.instance_migrated',
 ] as const;
 
 export interface TimelineEvent {
@@ -630,6 +651,7 @@ export interface WorkitemCreateParams {
   description?: string;
   gitlabIssueIid?: string;
   labels?: unknown[];
+  templateId?: string;
 }
 
 export interface WorkitemProgressParams {
@@ -1534,4 +1556,48 @@ export interface MemorySyncFromRepoParams {
 
 export interface ProjectGitStatusParams {
   projectId: string;
+}
+
+export type WorkflowTemplateListParams = Record<string, never>;
+
+export interface WorkflowTemplateGetParams {
+  templateId: string;
+}
+
+export interface WorkflowTemplateCreateParams {
+  key: string;
+  name: string;
+  gates: unknown[];
+  idempotencyKey: string;
+}
+
+export interface WorkflowTemplateUpdateDraftParams {
+  versionId: string;
+  gates: unknown[];
+  idempotencyKey: string;
+}
+
+export interface WorkflowTemplateActivateParams {
+  versionId: string;
+  idempotencyKey: string;
+}
+
+export interface WorkflowTemplateDeprecateParams {
+  versionId: string;
+  idempotencyKey: string;
+}
+
+export interface WorkflowGetInstanceParams {
+  workItemId: string;
+}
+
+export interface WorkflowMigrationPreviewParams {
+  workItemId: string;
+  targetVersionId: string;
+}
+
+export interface WorkflowMigrateParams {
+  workItemId: string;
+  targetVersionId: string;
+  idempotencyKey: string;
 }

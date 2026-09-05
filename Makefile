@@ -43,6 +43,7 @@ e2e: ## Protocol E2E golden flow + agent lifecycle + settings + trace + gate rel
 	node tests/e2e-protocol/agent-routing-e2e.mjs
 	node tests/e2e-protocol/memory-e2e.mjs
 	node tests/e2e-protocol/mcp-e2e.mjs
+	node tests/e2e-protocol/workflow-template-e2e.mjs
 
 test-contract: ## Contract fixtures + decoders + secret probe (F11/M4)
 	node tests/contract/run.mjs

@@ -441,6 +441,11 @@
           "name": "labels",
           "type": "array",
           "required": false
+        },
+        {
+          "name": "templateId",
+          "type": "string",
+          "required": false
         }
       ],
       "result": "value"
@@ -3530,6 +3535,149 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "workflowTemplate.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "workflowTemplate.get",
+      "params": [
+        {
+          "name": "templateId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workflowTemplate.create",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gates",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workflowTemplate.updateDraft",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gates",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workflowTemplate.activate",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workflowTemplate.deprecate",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workflow.getInstance",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workflow.migrationPreview",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "targetVersionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "workflow.migrate",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "targetVersionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [
@@ -3623,6 +3771,9 @@
     "tool.proposed",
     "tool.started",
     "trace.edge_created",
-    "workitem.created"
+    "workitem.created",
+    "workflow.template_activated",
+    "workflow.instance_created",
+    "workflow.instance_migrated"
   ]
 }

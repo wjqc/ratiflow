@@ -8,7 +8,7 @@ use sg_store::{objects, outbox, Error, Store};
 use crate::settings_dispatch::serr;
 use crate::state::AppState;
 
-type RpcResult = Result<Value, RpcError>;
+pub(crate) type RpcResult = Result<Value, RpcError>;
 
 fn err(kind: ErrorCode, msg: impl Into<String>) -> RpcError {
     RpcError::new(kind, msg)
@@ -183,6 +183,21 @@ fn trace_link_items(
 pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -> RpcResult {
     if let Some(result) = crate::settings_dispatch::dispatch(state, store, method, params) {
         return result;
+    }
+    // --- 数据化工作流模板（EvoFlow M1-07 / ADR-036）：方法字面量供契约对齐检查 ---
+    if matches!(
+        method,
+        "workflowTemplate.list"
+            | "workflowTemplate.get"
+            | "workflowTemplate.create"
+            | "workflowTemplate.updateDraft"
+            | "workflowTemplate.activate"
+            | "workflowTemplate.deprecate"
+            | "workflow.getInstance"
+            | "workflow.migrationPreview"
+            | "workflow.migrate"
+    ) {
+        return crate::workflow_dispatch::dispatch(state, store, method, params);
     }
     match method {
         // --- 系统 ---
@@ -486,13 +501,25 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         .collect()
                 })
                 .unwrap_or_default();
-            let wi = sg_workitem::create(
+            // M1-03：templateId（模板 key）可选；提供时受 Flag 门控（默认模板不受限）。
+            let template_id = opt_str_param(params, "templateId");
+            if template_id.is_some()
+                && template_id.as_deref() != Some(sg_workflow::template::DEFAULT_TEMPLATE_KEY)
+                && !sg_workflow::template::template_v2_enabled()
+            {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_WORKFLOW_TEMPLATE_V2 未开启",
+                ));
+            }
+            let wi = sg_workitem::create_with_template(
                 store,
                 &str_param(params, "projectId")?,
                 &str_param(params, "title")?,
                 &opt_str_param(params, "description").unwrap_or_default(),
                 opt_str_param(params, "gitlabIssueIid").as_deref(),
                 &labels,
+                template_id.as_deref(),
             )
             .map_err(store_err)?;
             // 需求文档落盘（工作目录 data/docs/）+ 需求修订/条目/谱系节点（M1）。
@@ -884,8 +911,10 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "artifact.freezeBaseline" => {
             let workitem_id = str_param(params, "workItemId")?;
             let gate_name = str_param(params, "gate")?;
-            let gate = sg_workitem::Gate::parse(&gate_name)
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
+            // M1-04：gate_id 按实例动态校验（取代六值枚举假设）。
+            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
+                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
+            }
             let revision_ids: Vec<String> = params
                 .get("revisionIds")
                 .and_then(|v| v.as_array())
@@ -896,7 +925,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 })
                 .ok_or_else(|| err(ErrorCode::InvalidParams, "revisionIds required"))?;
             // M2：基线绑定到当前关活跃 attempt（冻结即执行中工作）。
-            let mut attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, gate)
+            let mut attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, &gate_name)
                 .map_err(store_err)?;
             if attempt.state == "prepared" {
                 attempt = sg_workitem::attempt::transition(store, &attempt.id, "running")
@@ -920,7 +949,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             )
             .map_err(store_err)?;
             let inputs = base.inputs_sha256.clone();
-            let _ = sg_workitem::mark_stale_from(store, &workitem_id, gate, &inputs);
+            let _ = sg_workitem::mark_stale_from(store, &workitem_id, &gate_name, &inputs);
             // 交付物自动入知识库（git 管理）：逐修订落 <repo>/knowledge/，失败逐条记录不阻塞审批。
             let project_id = sg_workitem::get(store, &workitem_id)
                 .map_err(store_err)?
@@ -1188,8 +1217,10 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "gate.evaluate" => {
             let workitem_id = str_param(params, "workItemId")?;
             let gate_name = str_param(params, "gate")?;
-            let gate = sg_workitem::Gate::parse(&gate_name)
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
+            // M1-04：gate_id 按实例动态校验。
+            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
+                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
+            }
             // 评估输入单一事实源（与放行的新鲜度重查共用 build_inputs，P0-2）。
             let inputs = sg_workitem::gate::build_inputs(store, &workitem_id, &gate_name)
                 .map_err(store_err)?;
@@ -1197,7 +1228,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 sg_workitem::gate::evaluate_and_record(store, &inputs).map_err(store_err)?;
             if result.passed {
                 // attempt 投影推进（不碰 current_gate）。
-                sg_workitem::attempt::advance_to_review_ready(store, &workitem_id, gate)
+                sg_workitem::attempt::advance_to_review_ready(store, &workitem_id, &gate_name)
                     .map_err(store_err)?;
             }
             Ok(serde_json::to_value(result).unwrap_or_default())
@@ -1296,8 +1327,10 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             // M4 唯一关卡执行入口（SG-AGT-007）：attempt/快照/活动/选路/清单全部服务端装配。
             let workitem_id = str_param(params, "workItemId")?;
             let gate_name = str_param(params, "gate")?;
-            let gate = sg_workitem::Gate::parse(&gate_name)
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
+            // M1-04：gate_id 按实例动态校验。
+            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
+                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
+            }
             let goal = str_param(params, "goal")?;
             let required_caps = str_list_param(params, "requiredCapabilities");
             let task_override = opt_str_param(params, "profileVersionId");
@@ -1314,7 +1347,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     ),
                 ));
             }
-            let attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, gate)
+            let attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, &gate_name)
                 .map_err(store_err)?;
             let activities =
                 sg_workitem::attempt::activities(store, &attempt.id).map_err(store_err)?;
@@ -1353,7 +1386,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 store,
                 &sg_agent::router::ResolveContext {
                     project_id: &project_id,
-                    gate: gate.as_str(),
+                    gate: gate_name.as_str(),
                     activity_key: &activity_key,
                     stage_activity_id: &activity_id,
                     task_override_version_id: task_override.as_deref(),
@@ -1531,24 +1564,20 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "gate.deliverableStatus" => {
             let workitem_id = str_param(params, "workItemId")?;
             let gate_name = str_param(params, "gate")?;
-            let gate = sg_workitem::Gate::parse(&gate_name)
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
-            sg_workitem::deliverable::status(store, &workitem_id, gate).map_err(store_err)
+            sg_workitem::deliverable::status(store, &workitem_id, &gate_name).map_err(store_err)
         }
         "stage.package" => {
             let workitem_id = str_param(params, "workItemId")?;
             let gate_name = str_param(params, "gate")?;
-            let gate = sg_workitem::Gate::parse(&gate_name)
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
-            let latest = sg_workitem::attempt::latest_for_gate(store, &workitem_id, gate)
+            let latest = sg_workitem::attempt::latest_for_gate(store, &workitem_id, &gate_name)
                 .map_err(store_err)?;
             Ok(json!({
                 "workItemId": workitem_id,
                 "gate": gate_name,
                 "latestAttempt": latest,
-                "activeAttempt": sg_workitem::attempt::active_for_gate(store, &workitem_id, gate)
+                "activeAttempt": sg_workitem::attempt::active_for_gate(store, &workitem_id, &gate_name)
                     .map_err(store_err)?,
-                "releaseRequests": sg_workitem::release::list_for_gate(store, &workitem_id, gate.as_str())
+                "releaseRequests": sg_workitem::release::list_for_gate(store, &workitem_id, &gate_name)
                     .map_err(store_err)?,
             }))
         }
@@ -1713,15 +1742,16 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let workitem_id = str_param(params, "workItemId")?;
             let mut gates = Vec::new();
             let mut ok = true;
-            for gate in sg_workitem::Gate::ALL {
-                match sg_workitem::gate::latest(store, &workitem_id, gate.as_str())
+            // M1-04：护照按实例关卡序列签发（默认模板=六关，行为不变）。
+            for gref in sg_workitem::gate_refs(store, &workitem_id).map_err(store_err)? {
+                match sg_workitem::gate::latest(store, &workitem_id, &gref.gate_id)
                     .map_err(store_err)?
                 {
                     Some(result) if result.passed => {
-                        let evidences = sg_evidence::list(store, &workitem_id, Some(gate.as_str()))
+                        let evidences = sg_evidence::list(store, &workitem_id, Some(&gref.gate_id))
                             .map_err(store_err)?;
                         gates.push(sg_evidence::GateSummary {
-                            gate: gate.as_str().into(),
+                            gate: gref.gate_id.clone(),
                             passed: true,
                             evidence_ids: evidences.iter().map(|e| e.id.clone()).collect(),
                             failed_inputs: vec![],
@@ -1736,7 +1766,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             if !ok {
                 return Err(err(
                     ErrorCode::Conflict,
-                    "passport_incomplete_gates: 六关尚未全部通过",
+                    "passport_incomplete_gates: 实例关卡尚未全部通过",
                 ));
             }
             let passport = sg_evidence::issue_passport(

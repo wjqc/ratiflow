@@ -6,6 +6,8 @@ use sg_policy::Risk;
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
 pub mod delivery;
+pub mod instance;
+pub mod template;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

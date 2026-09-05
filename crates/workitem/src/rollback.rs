@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 
 use crate::attempt::{self, ACTIVE_STATES};
 use crate::snapshot::{self, Snapshot};
-use crate::Gate;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RollbackOperation {
@@ -97,10 +96,17 @@ fn op_by_approval(store: &Store, approval_id: &str) -> Result<Option<RollbackOpe
 }
 
 /// 回滚影响范围内的关（目标关及其后）。
-fn affected_gates(target: Gate) -> Vec<Gate> {
-    let all = Gate::ALL;
-    let start = all.iter().position(|g| *g == target).unwrap_or(0);
-    all[start..].to_vec()
+fn affected_gates(store: &Store, workitem_id: &str, target_gate_id: &str) -> Vec<String> {
+    match crate::gate_refs(store, workitem_id) {
+        Ok(refs) => {
+            let start = refs
+                .iter()
+                .position(|g| g.gate_id == target_gate_id)
+                .unwrap_or(0);
+            refs[start..].iter().map(|g| g.gate_id.clone()).collect()
+        }
+        Err(_) => vec![target_gate_id.to_string()],
+    }
 }
 
 /// 影响清单（preview 只读计算 + 冻结哈希）：
@@ -111,18 +117,17 @@ fn build_impact(
     target: &Snapshot,
 ) -> Result<serde_json::Value, Error> {
     let target_attempt = attempt::get(store, &target.stage_attempt_id)?;
-    let target_gate = Gate::parse(&target_attempt.gate)
-        .ok_or_else(|| Error::Message("rollback_drift: 目标快照关卡非法".into()))?;
+    let target_gate = target_attempt.gate.clone();
     let wi = crate::get(store, workitem_id)?;
-    let gates: Vec<serde_json::Value> = affected_gates(target_gate)
+    let gates: Vec<serde_json::Value> = affected_gates(store, workitem_id, &target_gate)
         .iter()
-        .map(|g| serde_json::json!({ "gate": g.as_str() }))
+        .map(|g| serde_json::json!({ "gate": g }))
         .collect();
     let mut supersede = Vec::new();
-    for g in affected_gates(target_gate) {
+    for g in affected_gates(store, workitem_id, &target_gate) {
         for a in attempt::list(store, workitem_id)?
             .into_iter()
-            .filter(|a| a.gate == g.as_str())
+            .filter(|a| a.gate == g)
         {
             if ACTIVE_STATES.contains(&a.state.as_str()) || a.state == "approved" {
                 supersede.push(serde_json::json!({
@@ -356,9 +361,8 @@ pub fn request(
         )));
     }
     let attempt = attempt::get(store, &op.source_attempt_id)?;
-    let gate = Gate::parse(&attempt.gate)
-        .ok_or_else(|| Error::Message("rollback_drift: 关卡非法".into()))?;
-    let safety = snapshot::create(store, workitem_id, gate, &attempt.id, "safety")?;
+    let gate = attempt.gate.clone();
+    let safety = snapshot::create(store, workitem_id, &gate, &attempt.id, "safety")?;
     let approval = sg_policy::request_approval(
         store,
         "rollback",
@@ -505,8 +509,7 @@ fn execute(
         .ok_or_else(|| Error::Message("snapshot_failed: 目标快照缺失".into()))?;
     snapshot::verify_objects(store, &target.id)?;
     let target_attempt = attempt::get(store, &target.stage_attempt_id)?;
-    let target_gate = Gate::parse(&target_attempt.gate)
-        .ok_or_else(|| Error::Message("rollback_drift: 关卡非法".into()))?;
+    let target_gate = target_attempt.gate.clone();
 
     store.with_conn(|conn| {
         conn.execute(
@@ -574,11 +577,11 @@ fn execute(
 
     // 控制面恢复（回滚应用服务特权写，ADR-030 决策 2）。
     let now = timefmt::now();
-    for g in affected_gates(target_gate) {
+    for g in affected_gates(store, &workitem_id, &target_gate) {
         store.with_conn(|conn| {
             conn.execute(
                 "UPDATE workitem_stages SET state='not_started', input_baseline_sha='', updated_at=?1 WHERE workitem_id=?2 AND gate=?3",
-                rusqlite::params![now, workitem_id, g.as_str()],
+                rusqlite::params![now, workitem_id, g],
             )?;
             Ok(())
         })?;
@@ -643,8 +646,8 @@ fn execute(
         }
     }
     // 目标关新建 attempt（含关前快照，SG-RBK-007：回滚后重算门禁输入）。
-    let predecessor = attempt::latest_for_gate(store, &workitem_id, target_gate)?.map(|a| a.id);
-    let fresh = attempt::create(store, &workitem_id, target_gate, predecessor.as_deref())?;
+    let predecessor = attempt::latest_for_gate(store, &workitem_id, &target_gate)?.map(|a| a.id);
+    let fresh = attempt::create(store, &workitem_id, &target_gate, predecessor.as_deref())?;
     store.with_conn(|conn| {
         conn.execute(
             "UPDATE rollback_operations SET state='completed', updated_at=?1 WHERE id=?2",
@@ -660,7 +663,7 @@ fn execute(
         serde_json::json!({
             "workitemId": workitem_id,
             "operationId": op.id,
-            "targetGate": target_gate.as_str(),
+            "targetGate": target_gate,
             "newAttemptId": fresh.id,
         }),
     )?;
@@ -792,7 +795,8 @@ mod tests {
         let art = sg_artifact::create_artifact(
             store,
             workitem_id,
-            crate::deliverable::required_kind(crate::Gate::parse(gate).unwrap()),
+            &crate::deliverable::required_kind_for(store, workitem_id, gate)
+                .unwrap_or_else(|_| "doc".into()),
             gate,
         )
         .unwrap();
@@ -860,8 +864,8 @@ mod tests {
         crate::release::request_release(store, workitem_id, gate, "pol", 3600).unwrap()
     }
 
-    fn entry_snapshot_id(store: &Store, workitem_id: &str, gate: Gate) -> Option<String> {
-        snapshot::latest_entry(store, workitem_id, gate)
+    fn entry_snapshot_id(store: &Store, workitem_id: &str, gate_id: &str) -> Option<String> {
+        snapshot::latest_entry(store, workitem_id, gate_id)
             .map(|s| s.map(|x| x.id))
             .ok()
             .flatten()
@@ -878,7 +882,7 @@ mod tests {
 
         // 目标：回到方案关前的快照（requirements attempt 的关前快照是回到需求关；
         // 这里选择 design attempt 的 entry snapshot → 回滚到方案关执行前）。
-        let target = entry_snapshot_id(&s, &wi.id, Gate::Design).unwrap();
+        let target = entry_snapshot_id(&s, &wi.id, "design").unwrap();
         let view = preview(&s, &wi.id, &target, "pol").unwrap();
         assert_eq!(view["impact"]["currentGate"], serde_json::json!("design"));
         assert!(
@@ -908,7 +912,7 @@ mod tests {
             "development 未开始无 attempt"
         );
         // 目标关新建 attempt（带新关前快照）。
-        let fresh = attempt::latest_for_gate(&s, &wi.id, Gate::Design)
+        let fresh = attempt::latest_for_gate(&s, &wi.id, "design")
             .unwrap()
             .unwrap();
         assert_eq!(fresh.state, "prepared");
@@ -948,7 +952,7 @@ mod tests {
         })
         .unwrap();
         release_gate(&s, &wi.id, "requirements");
-        let target = entry_snapshot_id(&s, &wi.id, Gate::Requirements).unwrap();
+        let target = entry_snapshot_id(&s, &wi.id, "requirements").unwrap();
         let req = request(&s, &wi.id, &target, "owner", "pol", 3600).unwrap();
         let approval_id = req["approvalId"].as_str().unwrap().to_string();
         let err = decide(&s, &approval_id, "approved", "owner", "", "pol").unwrap_err();
@@ -967,7 +971,7 @@ mod tests {
         let s = setup();
         let wi = crate::create(&s, "pj", "崩溃恢复", "", None, &[]).unwrap();
         release_gate(&s, &wi.id, "requirements");
-        let target = entry_snapshot_id(&s, &wi.id, Gate::Requirements).unwrap();
+        let target = entry_snapshot_id(&s, &wi.id, "requirements").unwrap();
         let req = request(&s, &wi.id, &target, "owner", "pol", 3600).unwrap();
         let approval_id = req["approvalId"].as_str().unwrap().to_string();
         // 模拟崩溃：审批已批准但操作仍 awaiting/executing。

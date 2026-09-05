@@ -176,7 +176,60 @@ pub struct Stage {
     pub updated_at: String,
 }
 
-/// 创建 WorkItem 并初始化六关阶段。
+/// 实例顺序解析（M1-04 / ADR-036）：WorkItem 的关卡序列来自其冻结的模板实例；
+/// 无实例（迁移前残留）回退 legacy 六关。默认模板实例与 Gate::ALL 逐字同序
+/// （parity 由 sg-workflow 单测断言），保证 Flag 关闭时行为等价。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GateRef {
+    pub gate_id: String,
+    pub ordinal: usize,
+    pub title: String,
+}
+
+pub fn gate_refs(store: &Store, workitem_id: &str) -> Result<Vec<GateRef>, Error> {
+    if let Some(gates) = sg_workflow::instance::gates_for_workitem(store, workitem_id)? {
+        return Ok(gates
+            .into_iter()
+            .map(|g| GateRef {
+                gate_id: g.gate_id,
+                ordinal: g.ordinal.max(1) as usize,
+                title: g.title,
+            })
+            .collect());
+    }
+    Ok(Gate::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, g)| GateRef {
+            gate_id: g.as_str().to_string(),
+            ordinal: i + 1,
+            title: g.as_str().to_string(),
+        })
+        .collect())
+}
+
+/// 实例顺序的下一关（passed 推进用）；最后一关返回 None（语义与旧 Gate::next 一致）。
+pub fn next_gate_id(
+    store: &Store,
+    workitem_id: &str,
+    gate_id: &str,
+) -> Result<Option<String>, Error> {
+    let refs = gate_refs(store, workitem_id)?;
+    Ok(refs
+        .iter()
+        .position(|g| g.gate_id == gate_id)
+        .and_then(|i| refs.get(i + 1))
+        .map(|g| g.gate_id.clone()))
+}
+
+/// gate_id 是否属于该 WorkItem 实例（RPC 入口动态校验，取代 Gate::parse 六值假设）。
+pub fn gate_known(store: &Store, workitem_id: &str, gate_id: &str) -> Result<bool, Error> {
+    Ok(gate_refs(store, workitem_id)?
+        .iter()
+        .any(|g| g.gate_id == gate_id))
+}
+
+/// 创建 WorkItem 并按模板实例初始化阶段（默认 six-gate-default）。
 pub fn create(
     store: &Store,
     project_id: &str,
@@ -185,6 +238,28 @@ pub fn create(
     issue_iid: Option<&str>,
     labels: &[String],
 ) -> Result<WorkItem, Error> {
+    create_with_template(
+        store,
+        project_id,
+        title,
+        description,
+        issue_iid,
+        labels,
+        None,
+    )
+}
+
+/// template_key：模板逻辑 key（空 = 默认模板）。WorkItem 创建时冻结 active 版本
+/// （ADR-036 决策 5）：workitem_stages 按版本关卡定义初始化，实例与投影同事务落库。
+pub fn create_with_template(
+    store: &Store,
+    project_id: &str,
+    title: &str,
+    description: &str,
+    issue_iid: Option<&str>,
+    labels: &[String],
+    template_key: Option<&str>,
+) -> Result<WorkItem, Error> {
     if project_id.is_empty() || title.is_empty() {
         return Err(Error::Message("project and title required".into()));
     }
@@ -192,17 +267,40 @@ pub fn create(
     let now = timefmt::now();
     let labels_json = serde_json::to_string(labels).unwrap_or_else(|_| "[]".into());
     store.with_conn(|conn| {
+        // 冻结 active 版本（单连接内解析，避免嵌套 with_conn）。
+        let version_id: String = conn
+            .query_row(
+                "SELECT v.id FROM workflow_template_versions v
+                 JOIN workflow_templates t ON t.id = v.template_id
+                 WHERE v.status='active' AND (?1 = '' OR t.key = ?1)",
+                [template_key.unwrap_or(sg_workflow::template::DEFAULT_TEMPLATE_KEY)],
+                |r| r.get(0),
+            )
+            .map_err(|_| {
+                Error::Message(format!(
+                    "workflow_version_not_active: {} 无激活版本",
+                    template_key.unwrap_or(sg_workflow::template::DEFAULT_TEMPLATE_KEY)
+                ))
+            })?;
+        let first_gate: String = conn
+            .query_row(
+                "SELECT gate_id FROM workflow_gate_definitions WHERE version_id=?1 ORDER BY ordinal LIMIT 1",
+                [&version_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| Error::Message("workflow_template_invalid: 版本缺少关卡定义".into()))?;
         conn.execute(
             "INSERT INTO workitems(id, project_id, gitlab_issue_iid, title, description, labels, current_gate, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,'requirements',?7,?7)",
-            rusqlite::params![id, project_id, issue_iid, title, description, labels_json, now],
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)",
+            rusqlite::params![id, project_id, issue_iid, title, description, labels_json, first_gate, now],
         )?;
-        for gate in Gate::ALL {
-            conn.execute(
-                "INSERT INTO workitem_stages(workitem_id, gate, state, updated_at) VALUES (?1,?2,'not_started',?3)",
-                rusqlite::params![id, gate.as_str(), now],
-            )?;
-        }
+        conn.execute(
+            "INSERT INTO workitem_stages(workitem_id, gate, state, updated_at)
+             SELECT ?1, gd.gate_id, 'not_started', ?2
+             FROM workflow_gate_definitions gd WHERE gd.version_id=?3 ORDER BY gd.ordinal",
+            rusqlite::params![id, now, version_id],
+        )?;
+        sg_workflow::instance::create_for_workitem(conn, &id, &version_id, &now)?;
         Ok(())
     })?;
     outbox::emit(
@@ -210,7 +308,20 @@ pub fn create(
         "workitem",
         &id,
         "workitem.created",
-        serde_json::json!({"projectId": project_id, "title": title, "issueIid": issue_iid}),
+        serde_json::json!({
+            "projectId": project_id,
+            "title": title,
+            "issueIid": issue_iid,
+            "templateKey": template_key.unwrap_or(sg_workflow::template::DEFAULT_TEMPLATE_KEY),
+        }),
+    )?;
+    // 实例冻结事实事件（shadow：事件面新增不影响既有消费者）。
+    outbox::emit(
+        store,
+        "workitem",
+        &id,
+        "workflow.instance_created",
+        serde_json::json!({"templateKey": template_key.unwrap_or(sg_workflow::template::DEFAULT_TEMPLATE_KEY)}),
     )?;
     get(store, &id)
 }
@@ -334,15 +445,16 @@ pub fn stages(store: &Store, workitem_id: &str) -> Result<Vec<Stage>, Error> {
     })
 }
 
-/// 阶段状态迁移（校验合法性）；passed 时推进 current_gate。
+/// 阶段状态迁移（校验合法性）；passed 时按实例顺序推进 current_gate。
+/// 兼容期入口：六关调用方传 `gate.as_str()`；新代码直接使用 gate_id。
 pub fn set_stage(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
     to: StageState,
     baseline_sha: &str,
 ) -> Result<(), Error> {
-    let current = stage_state(store, workitem_id, gate)?;
+    let current = stage_state(store, workitem_id, gate_id)?;
     let from = StageState::parse(&current).unwrap_or(StageState::NotStarted);
     if !StageState::can_transition(from, to) {
         return Err(Error::Message(format!(
@@ -350,40 +462,58 @@ pub fn set_stage(
             from.as_str(),
             to.as_str(),
             workitem_id,
-            gate.as_str()
+            gate_id
         )));
     }
+    let next = next_gate_id(store, workitem_id, gate_id)?;
     let now = timefmt::now();
     store.with_conn(|conn| {
         conn.execute(
             "UPDATE workitem_stages SET state=?1, input_baseline_sha=?2, updated_at=?3 WHERE workitem_id=?4 AND gate=?5",
-            rusqlite::params![to.as_str(), baseline_sha, now, workitem_id, gate.as_str()],
+            rusqlite::params![to.as_str(), baseline_sha, now, workitem_id, gate_id],
         )?;
         if to == StageState::Passed {
-            if let Some(next) = gate.next() {
+            if let Some(next) = &next {
                 conn.execute(
                     "UPDATE workitems SET current_gate=?1, updated_at=?2 WHERE id=?3",
-                    rusqlite::params![next.as_str(), now, workitem_id],
+                    rusqlite::params![next, now, workitem_id],
                 )?;
             }
         }
         Ok(())
     })?;
+    // 实例投影双写（shadow；失败不阻断 legacy 路径，留痕审计）。
+    if let Err(e) = sg_workflow::instance::project_state(
+        store,
+        workitem_id,
+        gate_id,
+        to.as_str(),
+        &get(store, workitem_id)?.current_gate,
+    ) {
+        let _ = sg_store::audit::append(
+            store,
+            "system",
+            "workflow.instance_projection_failed",
+            "workitem",
+            workitem_id,
+            serde_json::json!({"gate": gate_id, "state": to.as_str(), "error": e.to_string()}),
+        );
+    }
     outbox::emit(
         store,
         "workitem",
         workitem_id,
         &format!("stage.{}", to.as_str()),
-        serde_json::json!({"gate": gate.as_str(), "from": from.as_str(), "baselineSha": baseline_sha}),
+        serde_json::json!({"gate": gate_id, "from": from.as_str(), "baselineSha": baseline_sha}),
     )?;
     Ok(())
 }
 
-fn stage_state(store: &Store, workitem_id: &str, gate: Gate) -> Result<String, Error> {
+fn stage_state(store: &Store, workitem_id: &str, gate_id: &str) -> Result<String, Error> {
     store.with_conn(|conn| {
         conn.query_row(
             "SELECT state FROM workitem_stages WHERE workitem_id=?1 AND gate=?2",
-            [workitem_id, gate.as_str()],
+            [workitem_id, gate_id],
             |r| r.get(0),
         )
         .map_err(|_| Error::Message("stage not found".into()))
@@ -391,38 +521,44 @@ fn stage_state(store: &Store, workitem_id: &str, gate: Gate) -> Result<String, E
 }
 
 /// 门禁通过推进：not_started 先经 running，保持状态机合法；已 passed 幂等。
-pub fn pass_gate(store: &Store, workitem_id: &str, gate: Gate) -> Result<(), Error> {
-    let current = stage_state(store, workitem_id, gate)?;
+pub fn pass_gate(store: &Store, workitem_id: &str, gate_id: &str) -> Result<(), Error> {
+    let current = stage_state(store, workitem_id, gate_id)?;
     if current == "passed" {
         return Ok(());
     }
     if current == "not_started" {
-        set_stage(store, workitem_id, gate, StageState::Running, "")?;
+        set_stage(store, workitem_id, gate_id, StageState::Running, "")?;
     }
-    set_stage(store, workitem_id, gate, StageState::Passed, "")
+    set_stage(store, workitem_id, gate_id, StageState::Passed, "")
 }
 
-/// 新基线下游 stale 传播：从 from_gate 起所有可进入 stale 的关卡。
+/// 新基线下游 stale 传播：从 from_gate 起按实例顺序所有可进入 stale 的关卡。
 pub fn mark_stale_from(
     store: &Store,
     workitem_id: &str,
-    from_gate: Gate,
+    from_gate_id: &str,
     new_baseline: &str,
 ) -> Result<(), Error> {
-    let all = Gate::ALL;
-    let start = all
+    let refs = gate_refs(store, workitem_id)?;
+    let start = refs
         .iter()
-        .position(|g| *g == from_gate)
+        .position(|g| g.gate_id == from_gate_id)
         .ok_or_else(|| Error::Message("unknown gate".into()))?;
-    for gate in &all[start..] {
-        let current = stage_state(store, workitem_id, *gate)?;
+    for gate in &refs[start..] {
+        let current = stage_state(store, workitem_id, &gate.gate_id)?;
         let state = StageState::parse(&current).unwrap_or(StageState::NotStarted);
         if StageState::can_transition(state, StageState::Stale) {
-            set_stage(store, workitem_id, *gate, StageState::Stale, new_baseline)?;
+            set_stage(
+                store,
+                workitem_id,
+                &gate.gate_id,
+                StageState::Stale,
+                new_baseline,
+            )?;
         }
     }
     // M2：上游变化的已批准 attempt 标记 superseded（蓝图 §4.1 approved→superseded）。
-    attempt::supersede_from(store, workitem_id, from_gate)?;
+    attempt::supersede_from(store, workitem_id, from_gate_id)?;
     Ok(())
 }
 
@@ -455,11 +591,11 @@ mod tests {
         let s = setup();
         let wi = create(&s, "pj", "t", "", None, &[]).unwrap();
         assert!(
-            set_stage(&s, &wi.id, Gate::Requirements, StageState::Passed, "").is_err(),
+            set_stage(&s, &wi.id, "requirements", StageState::Passed, "").is_err(),
             "not_started -> passed 非法"
         );
-        set_stage(&s, &wi.id, Gate::Requirements, StageState::Running, "sha-1").unwrap();
-        pass_gate(&s, &wi.id, Gate::Requirements).unwrap();
+        set_stage(&s, &wi.id, "requirements", StageState::Running, "sha-1").unwrap();
+        pass_gate(&s, &wi.id, "requirements").unwrap();
         assert_eq!(get(&s, &wi.id).unwrap().current_gate, "design");
     }
 
@@ -467,14 +603,14 @@ mod tests {
     fn stale_propagation_and_rebind() {
         let s = setup();
         let wi = create(&s, "pj", "t", "", None, &[]).unwrap();
-        set_stage(&s, &wi.id, Gate::Requirements, StageState::Running, "sha-1").unwrap();
-        pass_gate(&s, &wi.id, Gate::Requirements).unwrap();
-        set_stage(&s, &wi.id, Gate::Design, StageState::Running, "sha-1").unwrap();
-        mark_stale_from(&s, &wi.id, Gate::Requirements, "sha-2").unwrap();
+        set_stage(&s, &wi.id, "requirements", StageState::Running, "sha-1").unwrap();
+        pass_gate(&s, &wi.id, "requirements").unwrap();
+        set_stage(&s, &wi.id, "design", StageState::Running, "sha-1").unwrap();
+        mark_stale_from(&s, &wi.id, "requirements", "sha-2").unwrap();
         let st = stages(&s, &wi.id).unwrap();
         assert_eq!(st[0].state, "stale");
         assert_eq!(st[1].state, "stale");
-        set_stage(&s, &wi.id, Gate::Requirements, StageState::Running, "sha-2").unwrap();
+        set_stage(&s, &wi.id, "requirements", StageState::Running, "sha-2").unwrap();
     }
 
     #[test]
@@ -493,5 +629,36 @@ mod tests {
         assert_eq!(Gate::parse("nope"), None);
         assert_eq!(Gate::Requirements.next(), Some(Gate::Design));
         assert_eq!(Gate::Verification.next(), None);
+    }
+
+    /// M1 退出标准根基：默认模板实例顺序与 legacy 枚举逐字同序，
+    /// gate_refs/next/gate_known 在 Flag 关闭下与旧行为等价（ADR-036 parity）。
+    #[test]
+    fn gate_refs_parity_with_legacy_enum() {
+        let s = setup();
+        let wi = create(&s, "pj", "t", "", None, &[]).unwrap();
+        let refs = gate_refs(&s, &wi.id).unwrap();
+        assert_eq!(refs.len(), Gate::ALL.len());
+        for (r, g) in refs.iter().zip(Gate::ALL) {
+            assert_eq!(r.gate_id, g.as_str());
+        }
+        assert_eq!(
+            next_gate_id(&s, &wi.id, "requirements").unwrap().as_deref(),
+            Some("design")
+        );
+        assert_eq!(next_gate_id(&s, &wi.id, "verification").unwrap(), None);
+        assert!(gate_known(&s, &wi.id, "testing").unwrap());
+        assert!(!gate_known(&s, &wi.id, "nonexistent").unwrap());
+        // 实例投影与 stages 双写一致。
+        set_stage(&s, &wi.id, "requirements", StageState::Running, "sha-1").unwrap();
+        pass_gate(&s, &wi.id, "requirements").unwrap();
+        let instance = sg_workflow::instance::for_workitem(&s, &wi.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(instance.current_gate_id, "design");
+        let projection = sg_workflow::instance::gates_for_workitem(&s, &wi.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection[0].state, "passed");
     }
 }

@@ -11,8 +11,6 @@ use sg_store::{ids, objects, outbox, timefmt, Error, Store};
 use sha2::{Digest, Sha256};
 
 use crate::attempt::{self, StageAttempt};
-use crate::gate;
-use crate::Gate;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseRequest {
@@ -116,10 +114,10 @@ fn release_digest(
 fn build_manifest(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
     attempt: &StageAttempt,
 ) -> Result<(serde_json::Value, String), Error> {
-    let baseline = sg_artifact::latest_baseline(store, workitem_id, gate.as_str())?;
+    let baseline = sg_artifact::latest_baseline(store, workitem_id, gate_id)?;
     let mut revisions = Vec::new();
     if let Some(base) = &baseline {
         let map: serde_json::Map<String, serde_json::Value> =
@@ -144,18 +142,17 @@ fn build_manifest(
         }
     }
     revisions.sort_by(|a, b| a["revisionId"].as_str().cmp(&b["revisionId"].as_str()));
-    let evidences: Vec<serde_json::Value> =
-        sg_evidence::list(store, workitem_id, Some(gate.as_str()))?
-            .into_iter()
-            .map(|e| {
-                serde_json::json!({
-                    "id": e.id,
-                    "kind": e.kind,
-                    "sha256": e.object_sha256,
-                    "verified": e.verified,
-                })
+    let evidences: Vec<serde_json::Value> = sg_evidence::list(store, workitem_id, Some(gate_id))?
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "kind": e.kind,
+                "sha256": e.object_sha256,
+                "verified": e.verified,
             })
-            .collect();
+        })
+        .collect();
     let coverage_value = match crate::requirements::latest_revision_id(store, workitem_id)? {
         Some(rev) => sg_provenance::coverage(store, workitem_id, &rev)?,
         None => {
@@ -164,7 +161,7 @@ fn build_manifest(
     };
     let manifest = serde_json::json!({
         "workItemId": workitem_id,
-        "gate": gate.as_str(),
+        "gate": gate_id,
         "attemptId": attempt.id,
         "attemptNo": attempt.attempt_no,
         "entrySnapshotId": attempt.entry_snapshot_id,
@@ -189,7 +186,7 @@ fn attach_output_items(
     store: &Store,
     workitem_id: &str,
     package_id: &str,
-    gate: Gate,
+    gate_id: &str,
     manifest: &serde_json::Value,
 ) -> Result<(), Error> {
     let mut ordinal = 0i64;
@@ -238,7 +235,7 @@ fn attach_output_items(
             "artifact_revision",
         )?;
     }
-    let evidences = sg_evidence::list(store, workitem_id, Some(gate.as_str()))?;
+    let evidences = sg_evidence::list(store, workitem_id, Some(gate_id))?;
     for ev in &evidences {
         attach(
             store,
@@ -268,7 +265,7 @@ fn attach_output_items(
             )?;
         }
     }
-    let _ = gate;
+    let _ = gate_id;
     Ok(())
 }
 
@@ -281,19 +278,23 @@ pub fn request_release(
     policy_version: &str,
     ttl_secs: i64,
 ) -> Result<serde_json::Value, Error> {
-    let gate = Gate::parse(gate_name)
-        .ok_or_else(|| Error::Message("gate_release_required: unknown gate".into()))?;
+    // M1-04：gate_id 按实例动态校验（自定义模板关卡同样可放行）。
+    if !crate::gate_known(store, workitem_id, gate_name)? {
+        return Err(Error::Message(format!(
+            "gate_release_required: unknown gate {gate_name}"
+        )));
+    }
+    let gate = gate_name;
     let wi = crate::get(store, workitem_id)?;
-    if wi.current_gate != gate.as_str() {
+    if wi.current_gate != gate {
         return Err(Error::Message(format!(
             "gate_release_required: 当前关为 {}，不能放行 {}",
-            wi.current_gate,
-            gate.as_str()
+            wi.current_gate, gate
         )));
     }
     // 1. 最新 GateEvaluation 必须全 Pass，且其评估输入与当前状态逐字节一致
     //    （P0-2：评估通过后输出/证据/审批变化 → 旧评估过期，必须重新评估）。
-    let (_, stored_inputs, evaluation) = gate::latest_full(store, workitem_id, gate.as_str())?
+    let (_, stored_inputs, evaluation) = crate::gate::latest_full(store, workitem_id, gate)?
         .ok_or_else(|| {
             Error::Message("gate_release_required: 需先通过技术门禁评估（gate.evaluate）".into())
         })?;
@@ -302,7 +303,7 @@ pub fn request_release(
             "gate_release_required: 需先通过技术门禁评估（gate.evaluate）".into(),
         ));
     }
-    let fresh_inputs = gate::build_inputs(store, workitem_id, gate.as_str())?;
+    let fresh_inputs = crate::gate::build_inputs(store, workitem_id, gate)?;
     let fresh_json = serde_json::to_string(&fresh_inputs).unwrap_or_else(|_| "{}".into());
     if fresh_json != stored_inputs {
         return Err(Error::Message(
@@ -356,7 +357,7 @@ pub fn request_release(
     let (manifest, manifest_sha) = build_manifest(store, workitem_id, gate, &attempt)?;
     let digest = release_digest(
         workitem_id,
-        gate.as_str(),
+        gate,
         &attempt.id,
         &attempt.entry_snapshot_id,
         &manifest_sha,
@@ -384,7 +385,7 @@ pub fn request_release(
                 .map_err(Error::from)
             })?;
             let pid = ids::new_id("pkg");
-            let evaluation_id = gate::latest_id(store, workitem_id, gate.as_str())?
+            let evaluation_id = crate::gate::latest_id(store, workitem_id, gate)?
                 .ok_or_else(|| Error::Message("gate_release_required: 门禁评估记录缺失".into()))?;
             // 评估行 id 即 latest_full 校验过的那行（新鲜度已确认）。
             store.with_conn(|conn| {
@@ -452,7 +453,7 @@ pub fn request_release(
         "gate.release_requested",
         serde_json::json!({
             "workitemId": workitem_id,
-            "gate": gate.as_str(),
+            "gate": gate,
             "attemptId": attempt.id,
             "releaseRequestId": rr_id,
             "approvalId": approval.id,
@@ -527,7 +528,7 @@ pub fn decide_release(
     let rr = rr_by_approval(store, approval_id)?
         .ok_or_else(|| Error::Message("approval_invalid: 审批不对应任何关卡放行请求".into()))?;
     let attempt = attempt::get(store, &rr.stage_attempt_id)?;
-    let gate = Gate::parse(&attempt.gate).ok_or_else(|| Error::Message("bad gate".into()))?;
+    let gate = attempt.gate.clone();
     let workitem_id = attempt.workitem_id.clone();
 
     // 幂等重放：请求已终态 → 校验决定一致性后原样返回。
@@ -560,7 +561,7 @@ pub fn decide_release(
         return Err(Error::Message("approval_expired: 放行审批已过期".into()));
     }
     if approval.status == "requested" {
-        let (_, current_manifest_sha) = build_manifest(store, &workitem_id, gate, &attempt)?;
+        let (_, current_manifest_sha) = build_manifest(store, &workitem_id, &gate, &attempt)?;
         let current_digest = release_digest(
             &workitem_id,
             gate.as_str(),
@@ -614,7 +615,7 @@ pub fn decide_release(
                 "workitem",
                 &workitem_id,
                 "gate.release_rejected",
-                serde_json::json!({"workitemId": workitem_id, "gate": gate.as_str(), "by": decided_by}),
+                serde_json::json!({"workitemId": workitem_id, "gate": gate, "by": decided_by}),
             )?;
         }
         _ => {
@@ -646,7 +647,7 @@ pub fn decide_release(
                 "workitem",
                 &workitem_id,
                 "gate.changes_requested",
-                serde_json::json!({"workitemId": workitem_id, "gate": gate.as_str(), "by": decided_by}),
+                serde_json::json!({"workitemId": workitem_id, "gate": gate, "by": decided_by}),
             )?;
         }
     }
@@ -662,7 +663,7 @@ fn complete_approve(
     store: &Store,
     rr: &ReleaseRequest,
     attempt: &StageAttempt,
-    gate: &Gate,
+    gate_id: &str,
     decided_by: &str,
 ) -> Result<(), Error> {
     let workitem_id = attempt.workitem_id.clone();
@@ -675,11 +676,12 @@ fn complete_approve(
         )));
     }
     // 投影推进（幂等：stage 已 passed 时 pass_gate 直接返回）。
-    crate::pass_gate(store, &workitem_id, *gate)?;
+    crate::pass_gate(store, &workitem_id, gate_id)?;
     // 下一关 attempt（AC：放行与创建下一关在同一事务语义内；幂等：已存在则跳过）。
-    if let Some(next) = gate.next() {
-        if attempt::latest_for_gate(store, &workitem_id, next)?.is_none() {
-            attempt::create(store, &workitem_id, next, Some(&attempt.id))?;
+    // M1-04：下一关按实例顺序解析。
+    if let Some(next) = crate::next_gate_id(store, &workitem_id, gate_id)? {
+        if attempt::latest_for_gate(store, &workitem_id, &next)?.is_none() {
+            attempt::create(store, &workitem_id, &next, Some(&attempt.id))?;
         }
     }
     // 谱系：approval 节点 approves → attempt 节点。
@@ -720,7 +722,7 @@ fn complete_approve(
         "workitem",
         &workitem_id,
         "gate.release_approved",
-        serde_json::json!({"workitemId": workitem_id, "gate": gate.as_str(), "attemptId": attempt.id}),
+        serde_json::json!({"workitemId": workitem_id, "gate": gate_id, "attemptId": attempt.id}),
     )?;
     Ok(())
 }
@@ -733,9 +735,7 @@ pub fn invalidate_pending_if_drift(
     gate_name: &str,
     policy_version: &str,
 ) -> Result<bool, Error> {
-    let Some(gate) = Gate::parse(gate_name) else {
-        return Ok(false);
-    };
+    let gate = gate_name;
     let Some(attempt) = attempt::active_for_gate(store, workitem_id, gate)? else {
         return Ok(false);
     };
@@ -748,7 +748,7 @@ pub fn invalidate_pending_if_drift(
     let (_, manifest_sha) = build_manifest(store, workitem_id, gate, &attempt)?;
     let digest = release_digest(
         workitem_id,
-        gate.as_str(),
+        gate,
         &attempt.id,
         &attempt.entry_snapshot_id,
         &manifest_sha,
@@ -768,7 +768,7 @@ pub fn invalidate_pending_if_drift(
         "workitem",
         workitem_id,
         "gate.changes_requested",
-        serde_json::json!({"workitemId": workitem_id, "gate": gate.as_str(), "reason": "output_digest_changed"}),
+        serde_json::json!({"workitemId": workitem_id, "gate": gate, "reason": "output_digest_changed"}),
     )?;
     Ok(true)
 }
@@ -815,12 +815,8 @@ pub fn resume_pending(store: &Store) -> Result<usize, Error> {
             Ok(a) => a,
             Err(_) => continue,
         };
-        let gate = match Gate::parse(&attempt.gate) {
-            Some(g) => g,
-            None => continue,
-        };
         let result = match status.as_str() {
-            "approved" => complete_approve(store, &rr, &attempt, &gate, &decided_by),
+            "approved" => complete_approve(store, &rr, &attempt, &attempt.gate, &decided_by),
             "rejected" => attempt::transition(store, &attempt.id, "rejected").map(|_| ()),
             _ => Ok(()),
         };
@@ -850,9 +846,6 @@ pub fn list_for_gate(
     workitem_id: &str,
     gate_name: &str,
 ) -> Result<Vec<ReleaseRequest>, Error> {
-    let Some(gate) = Gate::parse(gate_name) else {
-        return Ok(vec![]);
-    };
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT r.id, r.stage_attempt_id, r.output_package_id, r.approval_id, r.release_digest, r.state, r.created_at, r.decided_at
@@ -860,7 +853,7 @@ pub fn list_for_gate(
              JOIN stage_attempts a ON a.id = r.stage_attempt_id
              WHERE a.workitem_id=?1 AND a.gate=?2 ORDER BY r.created_at DESC",
         )?;
-        let rows = stmt.query_map(rusqlite::params![workitem_id, gate.as_str()], row_rr)?;
+        let rows = stmt.query_map(rusqlite::params![workitem_id, gate_name], row_rr)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -1064,7 +1057,7 @@ mod tests {
         assert_eq!(rr["state"], serde_json::json!("pending"));
         assert!(rr["approval_id"].is_string(), "审批已回填关联");
 
-        let attempt = attempt::active_for_gate(&s, &wi.id, Gate::Requirements)
+        let attempt = attempt::active_for_gate(&s, &wi.id, "requirements")
             .unwrap()
             .unwrap();
         assert_eq!(attempt.state, "awaiting_user_approval");
@@ -1082,7 +1075,7 @@ mod tests {
         let wi_now = crate::get(&s, &wi.id).unwrap();
         assert_eq!(wi_now.current_gate, "design", "批准后进入下一关");
         assert_eq!(view["attempt"]["state"], serde_json::json!("approved"));
-        let design = attempt::latest_for_gate(&s, &wi.id, Gate::Design)
+        let design = attempt::latest_for_gate(&s, &wi.id, "design")
             .unwrap()
             .expect("下一关 attempt 已创建");
         assert_eq!(design.state, "prepared");
@@ -1152,12 +1145,12 @@ mod tests {
         )
         .unwrap();
         // AC-SW-04：同一 attempt 保留并回 running；下一关未创建。
-        let attempt = attempt::latest_for_gate(&s, &wi.id, Gate::Requirements)
+        let attempt = attempt::latest_for_gate(&s, &wi.id, "requirements")
             .unwrap()
             .unwrap();
         assert_eq!(attempt.attempt_no, 1);
         assert_eq!(attempt.state, "running");
-        assert!(attempt::latest_for_gate(&s, &wi.id, Gate::Design)
+        assert!(attempt::latest_for_gate(&s, &wi.id, "design")
             .unwrap()
             .is_none());
         assert_eq!(crate::get(&s, &wi.id).unwrap().current_gate, "requirements");
@@ -1174,7 +1167,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(crate::get(&s, &wi.id).unwrap().current_gate, "design");
-        let attempt = attempt::latest_for_gate(&s, &wi.id, Gate::Requirements)
+        let attempt = attempt::latest_for_gate(&s, &wi.id, "requirements")
             .unwrap()
             .unwrap();
         assert_eq!(attempt.attempt_no, 1, "同一 attempt 继续，未新建");
@@ -1196,13 +1189,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(crate::get(&s, &wi.id).unwrap().current_gate, "requirements");
-        assert!(attempt::latest_for_gate(&s, &wi.id, Gate::Design)
+        assert!(attempt::latest_for_gate(&s, &wi.id, "design")
             .unwrap()
             .is_none());
         // 重试：拒绝后的关经 ensure_active 新建 attempt（attempt_no=2）。
         let _ = crate::gate::evaluate_and_record(&s, &pass_inputs(&wi.id, "requirements")).unwrap();
         let rr2 = request_release(&s, &wi.id, "requirements", "pol-1", 3600).unwrap();
-        let attempt = attempt::latest_for_gate(&s, &wi.id, Gate::Requirements)
+        let attempt = attempt::latest_for_gate(&s, &wi.id, "requirements")
             .unwrap()
             .unwrap();
         assert_eq!(attempt.attempt_no, 2);

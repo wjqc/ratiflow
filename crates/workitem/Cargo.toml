@@ -9,6 +9,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 sg-store = { workspace = true }
+sg-workflow = { workspace = true }
 sg-provenance = { workspace = true }
 sg-artifact = { workspace = true }
 sg-evidence = { workspace = true }

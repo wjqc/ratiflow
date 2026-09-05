@@ -17,17 +17,45 @@ pub fn required_kind(gate: Gate) -> &'static str {
     }
 }
 
+/// M1-06：交付物 kind 按实例定义解析（GateDefinition.deliverables 首项）；
+/// 无实例/未声明时回退内建六关映射。自定义模板关卡不再受六值假设限制。
+pub fn required_kind_for(
+    store: &sg_store::Store,
+    workitem_id: &str,
+    gate_id: &str,
+) -> Result<String, sg_store::Error> {
+    if let Some(gates) = sg_workflow::instance::gates_for_workitem(store, workitem_id)? {
+        if let Some(g) = gates.iter().find(|g| g.gate_id == gate_id) {
+            if let Some(kind) = g.deliverables.first() {
+                return Ok(kind.clone());
+            }
+        }
+        if !gates.iter().any(|g| g.gate_id == gate_id) {
+            return Err(sg_store::Error::Message(format!(
+                "workflow_template_invalid: 关卡 {gate_id} 不在实例定义中"
+            )));
+        }
+    }
+    Gate::parse(gate_id)
+        .map(|g| required_kind(g).to_string())
+        .ok_or_else(|| {
+            sg_store::Error::Message(format!(
+                "workflow_template_invalid: 关卡 {gate_id} 无交付物定义"
+            ))
+        })
+}
+
 /// 交付物满足状态（供 request_release 前置与 gate.deliverableStatus RPC 复用）。
 /// 满足 = 工件存在 + 最新有效修订已冻结进本关当前基线 + 正文非空（size>0）。
 pub fn status(
     store: &sg_store::Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
 ) -> Result<Value, sg_store::Error> {
-    let kind = required_kind(gate);
+    let kind = required_kind_for(store, workitem_id, gate_id)?;
     let mut out = json!({
         "workItemId": workitem_id,
-        "gate": gate.as_str(),
+        "gate": gate_id,
         "requiredKind": kind,
         "satisfied": false,
         "missing": "artifact_absent",
@@ -73,7 +101,7 @@ pub fn status(
         Ok(conn
             .query_row(
                 "SELECT id, revision_map FROM baselines WHERE workitem_id=?1 AND gate=?2 AND superseded_by IS NULL ORDER BY frozen_at DESC LIMIT 1",
-                rusqlite::params![workitem_id, gate.as_str()],
+                rusqlite::params![workitem_id, gate_id],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
             .ok())
@@ -110,16 +138,16 @@ pub fn status(
 pub fn require_for_release(
     store: &sg_store::Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
 ) -> Result<Value, sg_store::Error> {
-    let s = status(store, workitem_id, gate)?;
+    let s = status(store, workitem_id, gate_id)?;
     if s["satisfied"] == json!(true) {
         return Ok(s);
     }
-    let kind = required_kind(gate);
+    let kind = required_kind_for(store, workitem_id, gate_id)?;
     Err(sg_store::Error::Message(format!(
         "deliverable_missing: {} 关缺少交付物 {}（{}）",
-        gate.as_str(),
+        gate_id,
         kind,
         s["missing"].as_str().unwrap_or("unknown"),
     )))
@@ -159,14 +187,14 @@ mod tests {
         let gate = Gate::Requirements;
 
         // 1) 无工件：artifact_absent。
-        let s = status(&store, workitem_id, gate).unwrap();
+        let s = status(&store, workitem_id, gate.as_str()).unwrap();
         assert_eq!(s["satisfied"], json!(false));
         assert_eq!(s["missing"], json!("artifact_absent"));
 
         // 2) 有工件有草稿：revision_absent → not_frozen。
         let art = sg_artifact::create_artifact(&store, workitem_id, "prd", "PRD").unwrap();
         let draft = sg_artifact::create_draft(&store, &art.id, "# PRD\n").unwrap();
-        let s = status(&store, workitem_id, gate).unwrap();
+        let s = status(&store, workitem_id, gate.as_str()).unwrap();
         assert_eq!(s["missing"], json!("not_frozen"));
 
         // 3) 冻结该草稿 → 满足（正文非空）。
@@ -180,19 +208,19 @@ mod tests {
             "",
         )
         .unwrap();
-        let s = status(&store, workitem_id, gate).unwrap();
+        let s = status(&store, workitem_id, gate.as_str()).unwrap();
         assert_eq!(s["satisfied"], json!(true));
         assert_eq!(s["revisionId"], json!(draft.id));
         assert!(s["baselineId"].as_str().unwrap().starts_with("base"));
 
         // 4) 冻结后新增草稿（未冻结）→ 退回 not_frozen。
         sg_artifact::create_draft(&store, &art.id, "# PRD v2\n").unwrap();
-        let s = status(&store, workitem_id, gate).unwrap();
+        let s = status(&store, workitem_id, gate.as_str()).unwrap();
         assert_eq!(s["missing"], json!("not_frozen"));
         assert_eq!(s["satisfied"], json!(false));
 
         // 5) require_for_release：缺失关报 deliverable_missing。
-        let err = require_for_release(&store, workitem_id, Gate::Testing).unwrap_err();
+        let err = require_for_release(&store, workitem_id, "testing").unwrap_err();
         assert!(err.to_string().contains("deliverable_missing"), "{err}");
     }
 }

@@ -7,8 +7,6 @@ use serde::Serialize;
 use sg_provenance::{node_type, relation, EdgeInput, NodeInput};
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
-use crate::Gate;
-
 /// 活跃状态集合（与 0017 partial unique index 保持一致）。
 /// preparing 是事务内过渡态：快照失败即停留（不可执行、不占单活跃名额，SG-RBK-001）。
 pub const ACTIVE_STATES: [&str; 5] = [
@@ -46,24 +44,27 @@ pub struct StageActivity {
 }
 
 /// 阶段模板（蓝图 §8.2 示例的 activity_key；未绑定的活动在 M4 逐个回退通用 Agent）。
-pub fn template_activities(gate: Gate) -> Vec<(&'static str, &'static str)> {
-    match gate {
-        Gate::Requirements => vec![("requirement_analysis", "需求分析")],
-        Gate::Design => vec![
+/// M1-04：按 gate_id 匹配内建六关模板；自定义模板关卡回退通用单活动
+/// （模板级 activity 模板属 M4 Context 域扩展点）。
+pub fn template_activities(gate_id: &str) -> Vec<(&'static str, &'static str)> {
+    match gate_id {
+        "requirements" => vec![("requirement_analysis", "需求分析")],
+        "design" => vec![
             ("prototype_design", "原型设计"),
             ("technical_design", "技术设计"),
         ],
-        Gate::Development => vec![
+        "development" => vec![
             ("frontend", "前端开发"),
             ("backend", "后端开发"),
             ("code_analysis", "代码分析"),
         ],
-        Gate::Testing => vec![("e2e_testing", "E2E 测试")],
-        Gate::Deployment => vec![
+        "testing" => vec![("e2e_testing", "E2E 测试")],
+        "deployment" => vec![
             ("release_planning", "发布计划"),
             ("deployment_verification", "部署验证"),
         ],
-        Gate::Verification => vec![("acceptance_verification", "验收验证")],
+        "verification" => vec![("acceptance_verification", "验收验证")],
+        _ => vec![("execution", "执行")],
     }
 }
 
@@ -138,7 +139,7 @@ pub fn list(store: &Store, workitem_id: &str) -> Result<Vec<StageAttempt>, Error
 pub fn active_for_gate(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
 ) -> Result<Option<StageAttempt>, Error> {
     store.with_conn(|conn| {
         let attempt = conn
@@ -150,7 +151,7 @@ pub fn active_for_gate(
                 ),
                 rusqlite::params![
                     workitem_id,
-                    gate.as_str(),
+                    gate_id,
                     ACTIVE_STATES[0],
                     ACTIVE_STATES[1],
                     ACTIVE_STATES[2],
@@ -195,7 +196,7 @@ pub fn active(store: &Store, workitem_id: &str) -> Result<Option<StageAttempt>, 
 pub fn latest_for_gate(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
 ) -> Result<Option<StageAttempt>, Error> {
     store.with_conn(|conn| {
         let attempt = conn
@@ -204,7 +205,7 @@ pub fn latest_for_gate(
                     "SELECT {ATTEMPT_COLUMNS} FROM stage_attempts
                      WHERE workitem_id=?1 AND gate=?2 ORDER BY attempt_no DESC LIMIT 1"
                 ),
-                [workitem_id, gate.as_str()],
+                [workitem_id, gate_id],
                 row_attempt,
             )
             .ok();
@@ -241,14 +242,14 @@ pub fn activities(store: &Store, attempt_id: &str) -> Result<Vec<StageActivity>,
 pub fn create(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
     predecessor_attempt_id: Option<&str>,
 ) -> Result<StageAttempt, Error> {
     crate::get(store, workitem_id)?;
     let previous_no: i64 = store.with_conn(|conn| {
         conn.query_row(
             "SELECT COALESCE(MAX(attempt_no),0) FROM stage_attempts WHERE workitem_id=?1 AND gate=?2",
-            [workitem_id, gate.as_str()],
+            [workitem_id, gate_id],
             |r| r.get(0),
         )
         .map_err(Error::from)
@@ -272,7 +273,7 @@ pub fn create(
         conn.execute(
             "INSERT INTO stage_attempts(id, workitem_id, gate, attempt_no, branch_no, state, entry_snapshot_id, input_package_sha256, active_output_package_id, predecessor_attempt_id, created_at, updated_at)
              VALUES (?1,?2,?3,?4,?5,'preparing','','',NULL,?6,?7,?7)",
-            rusqlite::params![id, workitem_id, gate.as_str(), previous_no + 1, branch_no, predecessor_attempt_id, now],
+            rusqlite::params![id, workitem_id, gate_id, previous_no + 1, branch_no, predecessor_attempt_id, now],
         )?;
         Ok(conn.changes())
     })?;
@@ -283,7 +284,7 @@ pub fn create(
     // 快照失败 → 错误上抛，attempt 停留 preparing（不可执行、不占单活跃名额）。
     // 受管 worktree 先于快照创建（best-effort：不可用时快照诚实记录，执行回退 local_root）。
     let _ = crate::worktree::ensure(store, workitem_id);
-    let snapshot = crate::snapshot::create(store, workitem_id, gate, &id, "stage_entry")?;
+    let snapshot = crate::snapshot::create(store, workitem_id, gate_id, &id, "stage_entry")?;
     store.with_conn(|conn| {
         conn.execute(
             "UPDATE stage_attempts SET state='prepared', entry_snapshot_id=?1, updated_at=?2 WHERE id=?3",
@@ -291,7 +292,7 @@ pub fn create(
         )?;
         Ok(())
     })?;
-    for (ordinal, (key, title)) in template_activities(gate).into_iter().enumerate() {
+    for (ordinal, (key, title)) in template_activities(gate_id).into_iter().enumerate() {
         store.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO stage_activities(id, stage_attempt_id, activity_key, ordinal, title, created_at, updated_at)
@@ -328,23 +329,28 @@ pub fn create(
             },
         )?;
     }
-    if gate != Gate::Requirements {
-        if let Some(prev_gate) = gate.prev() {
-            if let Some(prev) = latest_for_gate(store, workitem_id, prev_gate)? {
-                if prev.state == "approved" {
-                    sg_provenance::add_edge(
-                        store,
-                        &EdgeInput {
-                            workitem_id,
-                            from_node_type: node_type::STAGE_ATTEMPT,
-                            from_entity_id: &id,
-                            relation: relation::DERIVED_FROM,
-                            to_node_type: node_type::STAGE_ATTEMPT,
-                            to_entity_id: &prev.id,
-                            stage_attempt_id: "",
-                            created_by_run_id: "",
-                        },
-                    )?;
+    // M1-04：上一关按实例顺序解析（自定义模板同样建立 attempt 谱系父边）。
+    {
+        let refs = crate::gate_refs(store, workitem_id)?;
+        let ordinal = refs.iter().position(|g| g.gate_id == gate_id);
+        if ordinal.is_some_and(|i| i > 0) {
+            if let Some(prev_gate) = ordinal.and_then(|i| refs.get(i - 1)) {
+                if let Some(prev) = latest_for_gate(store, workitem_id, &prev_gate.gate_id)? {
+                    if prev.state == "approved" {
+                        sg_provenance::add_edge(
+                            store,
+                            &EdgeInput {
+                                workitem_id,
+                                from_node_type: node_type::STAGE_ATTEMPT,
+                                from_entity_id: &id,
+                                relation: relation::DERIVED_FROM,
+                                to_node_type: node_type::STAGE_ATTEMPT,
+                                to_entity_id: &prev.id,
+                                stage_attempt_id: "",
+                                created_by_run_id: "",
+                            },
+                        )?;
+                    }
                 }
             }
         }
@@ -355,12 +361,16 @@ pub fn create(
 }
 
 /// 取指定关活跃 attempt；无活跃且最新 attempt 已终态/不存在时新建（legacy 懒补建）。
-pub fn ensure_active(store: &Store, workitem_id: &str, gate: Gate) -> Result<StageAttempt, Error> {
-    if let Some(attempt) = active_for_gate(store, workitem_id, gate)? {
+pub fn ensure_active(
+    store: &Store,
+    workitem_id: &str,
+    gate_id: &str,
+) -> Result<StageAttempt, Error> {
+    if let Some(attempt) = active_for_gate(store, workitem_id, gate_id)? {
         // M3 升级路径：此前（M2 时代）创建的活跃 attempt 无关前快照 → 懒补（SG-RBK-001）。
         return if attempt.entry_snapshot_id.is_empty() {
             let snapshot =
-                crate::snapshot::create(store, workitem_id, gate, &attempt.id, "stage_entry")?;
+                crate::snapshot::create(store, workitem_id, gate_id, &attempt.id, "stage_entry")?;
             store.with_conn(|conn| {
                 conn.execute(
                     "UPDATE stage_attempts SET entry_snapshot_id=?1, updated_at=?2 WHERE id=?3",
@@ -380,8 +390,8 @@ pub fn ensure_active(store: &Store, workitem_id: &str, gate: Gate) -> Result<Sta
             other.gate, other.id
         )));
     }
-    let predecessor = latest_for_gate(store, workitem_id, gate)?.map(|a| a.id);
-    create(store, workitem_id, gate, predecessor.as_deref())
+    let predecessor = latest_for_gate(store, workitem_id, gate_id)?.map(|a| a.id);
+    create(store, workitem_id, gate_id, predecessor.as_deref())
 }
 
 /// 评估通过后的 attempt 投影推进：prepared/changes_requested → running → review_ready；
@@ -389,9 +399,9 @@ pub fn ensure_active(store: &Store, workitem_id: &str, gate: Gate) -> Result<Sta
 pub fn advance_to_review_ready(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
 ) -> Result<StageAttempt, Error> {
-    let mut attempt = ensure_active(store, workitem_id, gate)?;
+    let mut attempt = ensure_active(store, workitem_id, gate_id)?;
     match attempt.state.as_str() {
         "prepared" => attempt = transition(store, &attempt.id, "running")?,
         "changes_requested" => attempt = transition(store, &attempt.id, "running")?,
@@ -467,15 +477,19 @@ fn emit_state_event(store: &Store, workitem_id: &str, attempt: &StageAttempt) {
 
 /// 上游输入变化：from_gate 起已批准的 attempt 标记 superseded（蓝图 §4.1 approved→superseded）。
 /// 活跃 attempt 不动：其继续有效性由 evaluate 的 inputs_current（基线新鲜度）把关。
-pub fn supersede_from(store: &Store, workitem_id: &str, from_gate: Gate) -> Result<usize, Error> {
-    let all = Gate::ALL;
-    let start = all
+pub fn supersede_from(
+    store: &Store,
+    workitem_id: &str,
+    from_gate_id: &str,
+) -> Result<usize, Error> {
+    let refs = crate::gate_refs(store, workitem_id)?;
+    let start = refs
         .iter()
-        .position(|g| *g == from_gate)
+        .position(|g| g.gate_id == from_gate_id)
         .ok_or_else(|| Error::Message("unknown gate".into()))?;
     let mut count = 0;
-    for gate in &all[start..] {
-        for attempt in list_for_gate(store, workitem_id, *gate)? {
+    for gate in &refs[start..] {
+        for attempt in list_for_gate(store, workitem_id, &gate.gate_id)? {
             if attempt.state != "approved" {
                 continue;
             }
@@ -487,13 +501,17 @@ pub fn supersede_from(store: &Store, workitem_id: &str, from_gate: Gate) -> Resu
 }
 
 /// 指定关全部 attempt（attempt_no 升序）。
-fn list_for_gate(store: &Store, workitem_id: &str, gate: Gate) -> Result<Vec<StageAttempt>, Error> {
+fn list_for_gate(
+    store: &Store,
+    workitem_id: &str,
+    gate_id: &str,
+) -> Result<Vec<StageAttempt>, Error> {
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(&format!(
             "SELECT {ATTEMPT_COLUMNS} FROM stage_attempts
              WHERE workitem_id=?1 AND gate=?2 ORDER BY attempt_no"
         ))?;
-        let rows = stmt.query_map(rusqlite::params![workitem_id, gate.as_str()], row_attempt)?;
+        let rows = stmt.query_map(rusqlite::params![workitem_id, gate_id], row_attempt)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -532,7 +550,7 @@ pub fn backfill_legacy(store: &Store) -> Result<usize, Error> {
             if stage.state != "passed" {
                 continue;
             }
-            let gate = Gate::parse(&stage.gate).ok_or_else(|| Error::Message("bad gate".into()))?;
+            let gate = stage.gate.clone();
             let id = ids::new_id("att");
             let created_at = stage.updated_at.clone();
             store.with_conn(|conn| {
@@ -591,14 +609,14 @@ mod tests {
     fn create_builds_activities_and_prepared_state() {
         let s = setup();
         let wi = crate::create(&s, "pj", "任务", "", None, &[]).unwrap();
-        let att = create(&s, &wi.id, Gate::Requirements, None).unwrap();
+        let att = create(&s, &wi.id, "requirements", None).unwrap();
         assert_eq!(att.state, "prepared");
         assert_eq!(att.attempt_no, 1);
         let acts = activities(&s, &att.id).unwrap();
         assert_eq!(acts.len(), 1);
         assert_eq!(acts[0].activity_key, "requirement_analysis");
         // 设计关模板有两个活动。
-        let design = create(&s, &wi.id, Gate::Design, None);
+        let design = create(&s, &wi.id, "design", None);
         assert!(
             design.is_err(),
             "同 WorkItem 双活跃 attempt 应被单活跃约束拒绝"
@@ -609,7 +627,7 @@ mod tests {
     fn transitions_are_guarded() {
         let s = setup();
         let wi = crate::create(&s, "pj", "任务", "", None, &[]).unwrap();
-        let att = create(&s, &wi.id, Gate::Requirements, None).unwrap();
+        let att = create(&s, &wi.id, "requirements", None).unwrap();
         assert!(transition(&s, &att.id, "awaiting_user_approval").is_err());
         let running = transition(&s, &att.id, "running").unwrap();
         assert_eq!(running.state, "running");
@@ -629,10 +647,10 @@ mod tests {
     fn attempt_no_increments_after_terminal() {
         let s = setup();
         let wi = crate::create(&s, "pj", "任务", "", None, &[]).unwrap();
-        let first = create(&s, &wi.id, Gate::Requirements, None).unwrap();
+        let first = create(&s, &wi.id, "requirements", None).unwrap();
         transition(&s, &first.id, "running").unwrap();
         transition(&s, &first.id, "failed").unwrap();
-        let second = ensure_active(&s, &wi.id, Gate::Requirements).unwrap();
+        let second = ensure_active(&s, &wi.id, "requirements").unwrap();
         assert_eq!(second.attempt_no, 2);
         assert_eq!(
             second.predecessor_attempt_id.as_deref(),
@@ -644,15 +662,8 @@ mod tests {
     fn legacy_backfill_creates_approved_attempts_only_for_passed() {
         let s = setup();
         let wi = crate::create(&s, "pj", "历史", "", None, &[]).unwrap();
-        crate::set_stage(
-            &s,
-            &wi.id,
-            Gate::Requirements,
-            crate::StageState::Running,
-            "",
-        )
-        .unwrap();
-        crate::pass_gate(&s, &wi.id, Gate::Requirements).unwrap();
+        crate::set_stage(&s, &wi.id, "requirements", crate::StageState::Running, "").unwrap();
+        crate::pass_gate(&s, &wi.id, "requirements").unwrap();
         assert_eq!(backfill_legacy(&s).unwrap(), 1);
         assert_eq!(backfill_legacy(&s).unwrap(), 0, "幂等");
         let attempts = list(&s, &wi.id).unwrap();

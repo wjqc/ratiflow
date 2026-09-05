@@ -114,7 +114,6 @@ pub fn evaluate_and_record(store: &Store, inputs: &EvaluateInputs) -> Result<Gat
 /// 评估输入构建（单一事实源）：dispatch 的 evaluate 与放行的"评估新鲜度重查"
 /// 必须用同一函数，否则存储的 inputs 与重算结果不可比。
 pub fn build_inputs(store: &Store, workitem_id: &str, gate: &str) -> Result<EvaluateInputs, Error> {
-    let g = crate::Gate::parse(gate).ok_or_else(|| Error::Message("unknown gate".into()))?;
     let mut inputs = EvaluateInputs {
         workitem_id: workitem_id.into(),
         gate: gate.into(),
@@ -125,8 +124,8 @@ pub fn build_inputs(store: &Store, workitem_id: &str, gate: &str) -> Result<Eval
         no_blocking_risk: InputState::Pass,
         inputs_current: InputState::Unknown,
     };
-    // M2 per-gate baseline：各关基线独立 active（蓝图 §5.3）。
-    if let Some(base) = sg_artifact::latest_baseline(store, workitem_id, g.as_str())? {
+    // M2 per-gate baseline：各关基线独立 active（蓝图 §5.3）；M1-04：gate_id 实例字符串直传。
+    if let Some(base) = sg_artifact::latest_baseline(store, workitem_id, gate)? {
         if sg_artifact::is_baseline_current(store, &base.id)? {
             inputs.required_artifacts_frozen = InputState::Pass;
             inputs.inputs_current = InputState::Pass;
@@ -135,7 +134,7 @@ pub fn build_inputs(store: &Store, workitem_id: &str, gate: &str) -> Result<Eval
             inputs.inputs_current = InputState::Fail;
         }
     }
-    let evidences = sg_evidence::list(store, workitem_id, Some(g.as_str()))?;
+    let evidences = sg_evidence::list(store, workitem_id, Some(gate))?;
     if !evidences.is_empty() {
         inputs.evidence_complete = if evidences.iter().all(|e| e.verified) {
             InputState::Pass

@@ -7,8 +7,6 @@ use serde::Serialize;
 use sg_store::{ids, objects, outbox, timefmt, Error, Store};
 use sha2::{Digest, Sha256};
 
-use crate::Gate;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
     pub id: String,
@@ -59,7 +57,7 @@ fn put_canonical(store: &Store, value: &serde_json::Value) -> Result<String, Err
 fn control_manifest(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
     attempt_id: &str,
 ) -> Result<serde_json::Value, Error> {
     let wi = crate::get(store, workitem_id)?;
@@ -76,10 +74,11 @@ fn control_manifest(
         }
     }
     let mut baselines = Vec::new();
-    for g in Gate::ALL {
-        if let Some(base) = sg_artifact::latest_baseline(store, workitem_id, g.as_str())? {
+    // M1-04：基线清单按实例顺序全关枚举（自定义模板同样完整快照）。
+    for g in crate::gate_refs(store, workitem_id)? {
+        if let Some(base) = sg_artifact::latest_baseline(store, workitem_id, &g.gate_id)? {
             baselines.push(serde_json::json!({
-                "gate": g.as_str(),
+                "gate": g.gate_id,
                 "baselineId": base.id,
                 "inputsSha256": base.inputs_sha256,
             }));
@@ -87,7 +86,7 @@ fn control_manifest(
     }
     Ok(serde_json::json!({
         "workItemId": workitem_id,
-        "snapshotGate": gate.as_str(),
+        "snapshotGate": gate_id,
         "attemptId": attempt_id,
         "currentGate": wi.current_gate,
         "schemaVersion": store.schema_version().unwrap_or(0),
@@ -334,11 +333,11 @@ fn insert_resources(
 pub fn create(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
     attempt_id: &str,
     kind: &str,
 ) -> Result<Snapshot, Error> {
-    let control = control_manifest(store, workitem_id, gate, attempt_id)?;
+    let control = control_manifest(store, workitem_id, gate_id, attempt_id)?;
     let (workspace, mut resources) = workspace_manifest(store, workitem_id)?;
     let (external, ext_resources) = external_manifest(store, workitem_id)?;
     resources.extend(ext_resources);
@@ -466,7 +465,7 @@ pub fn list(store: &Store, workitem_id: &str) -> Result<Vec<Snapshot>, Error> {
 pub fn latest_entry(
     store: &Store,
     workitem_id: &str,
-    gate: Gate,
+    gate_id: &str,
 ) -> Result<Option<Snapshot>, Error> {
     store.with_conn(|conn| {
         let snap = conn
@@ -477,7 +476,7 @@ pub fn latest_entry(
                        AND stage_attempt_id IN (SELECT id FROM stage_attempts WHERE workitem_id=?1 AND gate=?2)
                      ORDER BY created_at DESC LIMIT 1"
                 ),
-                [workitem_id, gate.as_str()],
+                [workitem_id, gate_id],
                 row_snapshot,
             )
             .ok();
@@ -590,9 +589,9 @@ mod tests {
             "verified",
         )
         .unwrap();
-        let attempt = crate::attempt::create(&s, &wi.id, Gate::Requirements, None).unwrap();
-        let snap1 = create(&s, &wi.id, Gate::Requirements, &attempt.id, "stage_entry").unwrap();
-        let snap2 = create(&s, &wi.id, Gate::Requirements, &attempt.id, "stage_entry").unwrap();
+        let attempt = crate::attempt::create(&s, &wi.id, "requirements", None).unwrap();
+        let snap1 = create(&s, &wi.id, "requirements", &attempt.id, "stage_entry").unwrap();
+        let snap2 = create(&s, &wi.id, "requirements", &attempt.id, "stage_entry").unwrap();
         assert_eq!(
             snap1.root_digest, snap2.root_digest,
             "同状态快照 root_digest 一致"
@@ -605,17 +604,15 @@ mod tests {
         assert!(resources
             .iter()
             .any(|r| r.resource_type == "requirement_revision"));
-        assert!(latest_entry(&s, &wi.id, Gate::Requirements)
-            .unwrap()
-            .is_some());
+        assert!(latest_entry(&s, &wi.id, "requirements").unwrap().is_some());
     }
 
     #[test]
     fn missing_object_detected() {
         let s = setup();
         let wi = crate::create(&s, "pj", "缺失对象", "", None, &[]).unwrap();
-        let attempt = crate::attempt::create(&s, &wi.id, Gate::Requirements, None).unwrap();
-        let snap = create(&s, &wi.id, Gate::Requirements, &attempt.id, "stage_entry").unwrap();
+        let attempt = crate::attempt::create(&s, &wi.id, "requirements", None).unwrap();
+        let snap = create(&s, &wi.id, "requirements", &attempt.id, "stage_entry").unwrap();
         // 故障注入：删除清单对象文件。
         let rel = &snap.control_manifest_sha256;
         let path = s.data_dir.join("objects").join(&rel[0..2]).join(rel);

@@ -596,6 +596,7 @@ function ExecutionProcessView({
 
   return (
     <div className="sg-process-grid">
+      <InstanceGatesCard workItemId={workItemId} />
       {/* 左：执行时间线 */}
       <div className="sg-card sg-process-left">
         <div className="sg-card-head">执行时间线</div>
@@ -1889,6 +1890,53 @@ function GateWorkspace({
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/// M1-09（ADR-036 只读骨架）：模板实例关卡条。
+/// Flag（SIXGATES_WORKFLOW_TEMPLATE_V2）关闭时 RPC 返回 feature_disabled → 静默不渲染，
+/// 默认六关界面行为不变；开启后按实例定义展示关卡标题与状态（自定义模板可见 3/2 关）。
+function InstanceGatesCard({ workItemId }: { workItemId: string }) {
+  const [data, setData] = useState<{
+    instance: { template_version_id: string; current_gate_id: string };
+    gates: { gate_id: string; title: string; state: string }[];
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    rpc<{ instance: { template_version_id: string; current_gate_id: string }; gates: { gate_id: string; title: string; state: string }[] }>(
+      'workflow.getInstance',
+      { workItemId },
+    )
+      .then((r) => {
+        if (!cancelled) setData(r);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [workItemId]);
+  if (!data || data.gates.length === 0) return null;
+  return (
+    <div className="sg-card" style={{ marginBottom: 12 }}>
+      <div className="sg-card-head">实例关卡</div>
+      <div className="sg-gate-stepper">
+        {data.gates.map((g) => (
+          <div
+            key={g.gate_id}
+            className={`sg-gate-step${
+              g.state === 'passed'
+                ? ' sg-gate-step--done'
+                : g.gate_id === data.instance.current_gate_id
+                  ? ' sg-gate-step--active'
+                  : ''
+            }`}
+          >
+            <span className="sg-gate-step-dot" />
+            {g.title || g.gate_id}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
