@@ -907,7 +907,44 @@ fn propose_and_execute(
     Ok(StepOutcome::Continue(text))
 }
 
-/// 执行提案并落 executed/exec_failed 标记，返回给模型的文本。
+/// M0-07（EvoFlow 方案 §3 不变量 7）：executor 以 Ok 返回但副作用未知的约定前缀
+/// （MCP 写超时等）。命中即落一等 unknown 终态，绝不标 executed、不透明重试。
+pub const TOOL_OUTCOME_UNKNOWN_PREFIX: &str = "tool_outcome_unknown:";
+
+/// 一等执行结果落库（0031 `tool_execution_outcomes`）：每提案至多一条（幂等重放安全）。
+/// unknown 的对账状态初始为 pending，查证后由 reconcile 推进。
+fn record_outcome(
+    store: &Store,
+    proposal_id: &str,
+    outcome: &str,
+    reason: &str,
+) -> Result<(), Error> {
+    let reconciliation = if outcome == "unknown" || outcome == "indeterminate" {
+        "pending"
+    } else {
+        "none"
+    };
+    store.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO tool_execution_outcomes(id, proposal_id, outcome, reason, reconciliation, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(proposal_id) DO NOTHING",
+            rusqlite::params![
+                ids::new_id("tout"),
+                proposal_id,
+                outcome,
+                reason,
+                reconciliation,
+                timefmt::now()
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// 执行提案并落 executed/exec_failed/unknown 标记，返回给模型的文本。
+/// M0-07：Ok(text) 不再一律视为 executed —— `tool_outcome_unknown:` 前缀
+/// （MCP 写超时等副作用未验证场景）落一等 unknown，Proposal 与 outcome 表均诚实。
 fn run_executor(
     store: &Store,
     executor: Option<&ToolExecutor>,
@@ -916,11 +953,18 @@ fn run_executor(
     match executor {
         Some(exec) => match exec(proposal) {
             Ok(result) => {
-                mark_proposal(store, proposal, "executed", &result)?;
+                if result.starts_with(TOOL_OUTCOME_UNKNOWN_PREFIX) {
+                    mark_proposal(store, proposal, "unknown", &result)?;
+                    record_outcome(store, &proposal.id, "unknown", "side_effect_unverified")?;
+                } else {
+                    mark_proposal(store, proposal, "executed", &result)?;
+                    record_outcome(store, &proposal.id, "ok", "")?;
+                }
                 Ok(result)
             }
             Err(e) => {
                 mark_proposal(store, proposal, "exec_failed", &e)?;
+                record_outcome(store, &proposal.id, "failed", &e)?;
                 Ok(format!("执行失败：{e}"))
             }
         },
@@ -1397,10 +1441,11 @@ pub fn get_proposal(store: &Store, id: &str) -> Result<Proposal, Error> {
 }
 
 /// 已执行工具数（恢复时从库重算，不依赖 checkpoint）。
+/// M0-07：unknown/indeterminate 消耗了一次执行尝试，计入诚实预算口径。
 pub fn count_tool_calls(store: &Store, run_id: &str) -> Result<i64, Error> {
     store.with_conn(|conn| {
         Ok(conn.query_row(
-            "SELECT COUNT(*) FROM tool_proposals WHERE agent_run_id=?1 AND decision IN ('executed','exec_failed')",
+            "SELECT COUNT(*) FROM tool_proposals WHERE agent_run_id=?1 AND decision IN ('executed','exec_failed','unknown','indeterminate')",
             [run_id],
             |r| r.get(0),
         )?)
@@ -1464,6 +1509,9 @@ pub fn fail_paused_run(store: &Store, run_id: &str, message: &str) -> Result<Age
 /// 启动对账（ADR-028 崩溃恢复）：进程每次启动都是全新执行循环，
 /// 上一进程遗留的 queued/running Run 已无人在推进，统一标 failed，
 /// 前端轮询立即见到终态而不是干等超时。paused 是合法的等待审批态，不动。
+/// M0-07：被打断 Run 遗留的 proposed/approved 提案落一等 unknown —— 崩溃可能
+/// 发生在 executor 调用中途，副作用是否已发生不可证明；已 failed/cancelled Run
+/// 的同态孤儿提案一并收敛（EV-009）。
 pub fn reconcile_interrupted(store: &Store) -> Result<usize, Error> {
     let stale: Vec<String> = store.with_conn(|conn| {
         let mut stmt =
@@ -1475,18 +1523,19 @@ pub fn reconcile_interrupted(store: &Store) -> Result<usize, Error> {
         }
         Ok(out)
     })?;
-    if stale.is_empty() {
-        return Ok(0);
-    }
-    let n = store.with_conn(|conn| {
-        Ok(conn.execute(
-            "UPDATE agent_runs SET status='failed',
-                    result='运行中断：应用重启时未完成（请重新发起）',
-                    updated_at=?1
-             WHERE status IN ('queued','running')",
-            rusqlite::params![timefmt::now()],
-        )? as usize)
-    })?;
+    let n = if stale.is_empty() {
+        0
+    } else {
+        store.with_conn(|conn| {
+            Ok(conn.execute(
+                "UPDATE agent_runs SET status='failed',
+                        result='运行中断：应用重启时未完成（请重新发起）',
+                        updated_at=?1
+                 WHERE status IN ('queued','running')",
+                rusqlite::params![timefmt::now()],
+            )? as usize)
+        })?
+    };
     for id in &stale {
         let _ = outbox::emit(
             store,
@@ -1496,7 +1545,46 @@ pub fn reconcile_interrupted(store: &Store) -> Result<usize, Error> {
             json!({"status": "failed", "reason": "interrupted"}),
         );
     }
-    Ok(n)
+    let orphaned = reconcile_orphan_proposals(store)?;
+    Ok(n + orphaned)
+}
+
+/// 启动对账第二段：终态 Run（failed/cancelled）上仍处 proposed/approved 的提案
+/// 不可能再被执行，也无法证明 executor 未被调用过 —— 诚实终态是 unknown +
+/// 对账 pending（M0-07）。
+fn reconcile_orphan_proposals(store: &Store) -> Result<usize, Error> {
+    let orphans: Vec<String> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT p.id FROM tool_proposals p
+             JOIN agent_runs r ON r.id = p.agent_run_id
+             WHERE p.decision IN ('proposed','approved')
+               AND r.status IN ('failed','cancelled')",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    })?;
+    for id in &orphans {
+        store.with_conn(|conn| {
+            conn.execute(
+                "UPDATE tool_proposals SET decision='unknown',
+                        result=COALESCE(NULLIF(result,''), '运行中断：执行结果未确认（待对账）')
+                 WHERE id=?1 AND decision IN ('proposed','approved')",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })?;
+        record_outcome(
+            store,
+            id,
+            "unknown",
+            "run_interrupted_side_effect_unverified",
+        )?;
+    }
+    Ok(orphans.len())
 }
 
 pub fn proposals(store: &Store, run_id: &str) -> Result<Vec<Proposal>, Error> {
@@ -3042,6 +3130,152 @@ mod tests {
         );
         // 幂等：再次对账为 no-op。
         assert_eq!(reconcile_interrupted(&store).unwrap(), 0);
+    }
+
+    /// 测试种子：一条 Run + 一条提案（FK 链复用 setup() 的 projects/workitems/manifest）。
+    fn seed_run_and_proposal(
+        store: &Store,
+        run_id: &str,
+        proposal_id: &str,
+        run_status: &str,
+        decision: &str,
+    ) {
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                        tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+                     VALUES (?1,'wi','','g','sha','ctx1','[]','{}','default',?2,?3,'t','t')",
+                    rusqlite::params![run_id, format!("ik_{run_id}"), run_status],
+                )?;
+                c.execute(
+                    "INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
+                        requires_approval, decision, result, created_at)
+                     VALUES (?1, ?2, 'mcp__srv__send', '{}', 'high', 'd', 0, ?3, '', 't')",
+                    rusqlite::params![proposal_id, run_id, decision],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn proposal_of(id: &str, run_id: &str) -> Proposal {
+        Proposal {
+            id: id.into(),
+            run_id: run_id.into(),
+            tool: "mcp__srv__send".into(),
+            arguments: "{}".into(),
+            risk: "high".into(),
+            action_digest: "d".into(),
+            decision: "proposed".into(),
+            result: String::new(),
+            created_at: String::new(),
+        }
+    }
+
+    fn proposal_decision(store: &Store, id: &str) -> String {
+        store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT decision FROM tool_proposals WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+
+    fn outcome_of(store: &Store, proposal_id: &str) -> (String, String) {
+        store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT outcome, reconciliation FROM tool_execution_outcomes WHERE proposal_id=?1",
+                    [proposal_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// M0-07（EV-009 超时路径）：executor Ok 但带 tool_outcome_unknown 前缀 →
+    /// 提案 decision=unknown（不落 executed），outcome 一等 unknown + 对账 pending，
+    /// 预算计数含 unknown（消耗了一次执行尝试）。
+    #[test]
+    fn unknown_outcome_is_first_class_not_executed() {
+        let store = setup();
+        seed_run_and_proposal(&store, "run_unk", "tp_unk", "running", "proposed");
+        let executor = |_p: &Proposal| -> Result<String, String> {
+            Ok(format!(
+                "{TOOL_OUTCOME_UNKNOWN_PREFIX} 工具 send 在 1s 内未返回，副作用可能已发生且无法确认。"
+            ))
+        };
+        let text =
+            run_executor(&store, Some(&executor), &proposal_of("tp_unk", "run_unk")).unwrap();
+        assert!(text.starts_with(TOOL_OUTCOME_UNKNOWN_PREFIX));
+        assert_eq!(
+            proposal_decision(&store, "tp_unk"),
+            "unknown",
+            "副作用未知的执行不得标 executed"
+        );
+        assert_eq!(
+            outcome_of(&store, "tp_unk"),
+            ("unknown".into(), "pending".into())
+        );
+        assert_eq!(count_tool_calls(&store, "run_unk").unwrap(), 1);
+    }
+
+    /// M0-07：正常 Ok → executed + outcome ok（无需对账）；Err → exec_failed + outcome failed。
+    #[test]
+    fn ok_and_failed_outcomes_recorded() {
+        let store = setup();
+        seed_run_and_proposal(&store, "run_ok", "tp_ok", "running", "proposed");
+        let executor = |_p: &Proposal| -> Result<String, String> { Ok("done".into()) };
+        run_executor(&store, Some(&executor), &proposal_of("tp_ok", "run_ok")).unwrap();
+        assert_eq!(proposal_decision(&store, "tp_ok"), "executed");
+        assert_eq!(outcome_of(&store, "tp_ok"), ("ok".into(), "none".into()));
+        seed_run_and_proposal(&store, "run_err", "tp_err", "running", "proposed");
+        let failing = |_p: &Proposal| -> Result<String, String> { Err("boom".into()) };
+        run_executor(&store, Some(&failing), &proposal_of("tp_err", "run_err")).unwrap();
+        assert_eq!(proposal_decision(&store, "tp_err"), "exec_failed");
+        assert_eq!(
+            outcome_of(&store, "tp_err"),
+            ("failed".into(), "none".into())
+        );
+    }
+
+    /// M0-07（EV-009 restart/reconcile 路径）：被打断 Run 的遗留提案启动对账 →
+    /// unknown + 对账 pending；paused Run（合法等待审批）的提案不触碰。
+    #[test]
+    fn reconcile_marks_interrupted_run_proposals_unknown() {
+        let store = setup();
+        seed_run_and_proposal(&store, "run_stale", "tp_stale", "running", "approved");
+        seed_run_and_proposal(&store, "run_paused", "tp_paused", "paused", "proposed");
+        reconcile_interrupted(&store).unwrap();
+        assert_eq!(get_run(&store, "run_stale").unwrap().status, "failed");
+        assert_eq!(proposal_decision(&store, "tp_stale"), "unknown");
+        assert_eq!(
+            outcome_of(&store, "tp_stale"),
+            ("unknown".into(), "pending".into())
+        );
+        assert_eq!(get_run(&store, "run_paused").unwrap().status, "paused");
+        assert_eq!(proposal_decision(&store, "tp_paused"), "proposed");
+        assert!(
+            outcome_of_inner(&store, "tp_paused").is_none(),
+            "paused 提案不产生 outcome"
+        );
+    }
+
+    fn outcome_of_inner(store: &Store, proposal_id: &str) -> Option<(String, String)> {
+        store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT outcome, reconciliation FROM tool_execution_outcomes WHERE proposal_id=?1",
+                    [proposal_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok())
+            })
+            .unwrap()
     }
 
     /// 共享 FakeModel：请求捕获（calls）对测试可见。

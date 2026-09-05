@@ -195,12 +195,12 @@ pub fn restore(store: &Store, id: &str) -> SettingsResult<RestoreOutcome> {
         })
         .map_err(store_err)?;
 
-    // 活动数据库为 sixgates-v2.db（v2 纪元，见 store::open）；勿用旧纪元 sixgates.db。
-    let db_path = store.data_dir.join("sixgates-v2.db");
+    // 活动数据库为 sixgates-v3.db（v3 纪元，见 store::open；EvoFlow M0-05）；勿用旧纪元 sixgates-v2.db / sixgates.db。
+    let db_path = store.data_dir.join("sixgates-v3.db");
     // 先 checkpoint 并截断 WAL，保证磁盘快照自洽。
     let _ = store.with_conn(|conn| Ok(conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?));
     // WAL 文件一并替换，避免旧 WAL 污染。
-    for wal in ["sixgates-v2.db-wal", "sixgates-v2.db-shm"] {
+    for wal in ["sixgates-v3.db-wal", "sixgates-v3.db-shm"] {
         let _ = std::fs::remove_file(store.data_dir.join(wal));
     }
     if let Err(e) = std::fs::copy(&rec.path, &db_path) {

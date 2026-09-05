@@ -238,9 +238,15 @@ mod tests {
             scan::scan(code.as_bytes())
         );
         // 带引号或秘密材料字符集的裸值仍命中。
-        assert!(scan::has_high_risk(&scan::scan(b"password = \"hunter2pass\"")));
-        assert!(scan::has_high_risk(&scan::scan(b"API_KEY=abcdef1234567890abcdef")));
-        assert!(scan::has_high_risk(&scan::scan(b"token: 'ghp_0123456789abcdefghijklmnopqrstuvwxyz'")));
+        assert!(scan::has_high_risk(&scan::scan(
+            b"password = \"hunter2pass\""
+        )));
+        assert!(scan::has_high_risk(&scan::scan(
+            b"API_KEY=abcdef1234567890abcdef"
+        )));
+        assert!(scan::has_high_risk(&scan::scan(
+            b"token: 'ghp_0123456789abcdefghijklmnopqrstuvwxyz'"
+        )));
     }
 
     #[test]
@@ -328,7 +334,10 @@ mod tests {
             ).unwrap();
         }
         let store = Store::open(dir.path(), "test").unwrap();
-        assert_eq!(store.schema_version().unwrap(), 30);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            migration::MIGRATIONS.last().unwrap().0
+        );
         store.with_conn(|c| {
             // 来源：origin/local/legacy_local/present。
             let (origin, legacy, present): (String, i64, i64) = c.query_row(
@@ -419,11 +428,203 @@ mod tests {
         let dir = tempdir::make("sg-future-schema");
         let store = Store::open(dir.path(), "test").unwrap();
         drop(store);
-        let conn = rusqlite::Connection::open(dir.path().join("sixgates-v2.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("sixgates-v3.db")).unwrap();
         conn.execute("INSERT INTO schema_migrations(version) VALUES (999)", [])
             .unwrap();
         drop(conn);
         let result = Store::open(dir.path(), "test");
         assert!(result.is_err(), "未来 schema 版本必须拒启");
+    }
+
+    /// M0-05（EvoFlow 方案 §7.1）：空目录全新安装只建 v3，不产生旧纪元文件；
+    /// v3 纪元元数据落 app_meta。
+    #[test]
+    fn fresh_dir_opens_v3_without_v2() {
+        let dir = tempdir::make("sg-v3-fresh");
+        let store = Store::open(dir.path(), "test").unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            migration::MIGRATIONS.last().unwrap().0
+        );
+        assert!(dir.path().join("sixgates-v3.db").exists());
+        assert!(!dir.path().join("sixgates-v2.db").exists());
+        assert!(!dir.path().join("sixgates.db").exists());
+        let epoch: String = store
+            .with_conn(|c| {
+                c.query_row("SELECT value FROM app_meta WHERE key='db_epoch'", [], |r| {
+                    r.get(0)
+                })
+                .map_err(crate::Error::from)
+            })
+            .unwrap();
+        assert_eq!(epoch, "v3");
+    }
+
+    /// 构造 v2 纪元存量库：迁移 ≤30 + 一条已执行提案事实（含 FK 链）。
+    fn build_v2_fixture(dir: &tempdir::TempDirGuard) {
+        let conn = rusqlite::Connection::open(dir.path().join("sixgates-v2.db")).unwrap();
+        conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
+            .unwrap();
+        for (v, body) in migration::MIGRATIONS.iter().filter(|(v, _)| *v <= 30) {
+            conn.execute_batch(body).unwrap();
+            conn.execute("INSERT INTO schema_migrations(version) VALUES (?1)", [v])
+                .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+             VALUES ('pj','u','n','p','main','2026-01-01T00:00:00.000Z');
+            INSERT INTO workitems(id, project_id, title, created_at, updated_at)
+             VALUES ('wi','pj','t','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');
+            INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+             VALUES ('ctx1','wi','{}','standard','2026-01-01T00:00:00.000Z');
+            INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+             VALUES ('run_seed','wi','','g','deadbeef','ctx1','[]','{}','default','ik_seed','failed',
+                '2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');
+            INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
+                requires_approval, decision, result, created_at)
+             VALUES ('tp_seed','run_seed','read_file','{}','low','d0',0,'executed','ok',
+                '2026-01-01T00:00:00.000Z');",
+        )
+        .unwrap();
+    }
+
+    /// M0-05（§7.1 第 1/2 条）：v2 存量库升级 —— v3 承接数据并推进 schema，
+    /// v2 原文件保留在 30（旧包回退点，不被新 schema 污染）。
+    #[test]
+    fn v2_epoch_imported_to_v3_and_v2_preserved() {
+        let dir = tempdir::make("sg-v3-import");
+        build_v2_fixture(&dir);
+        let store = Store::open(dir.path(), "test").unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            migration::MIGRATIONS.last().unwrap().0
+        );
+        let (decision, tool): (String, String) = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT decision, tool FROM tool_proposals WHERE id='tp_seed'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(crate::Error::from)
+            })
+            .unwrap();
+        assert_eq!(
+            (decision.as_str(), tool.as_str()),
+            ("executed", "read_file")
+        );
+        // 旧包回退点：v2 停在 30，存量事实同在。
+        let conn = rusqlite::Connection::open(dir.path().join("sixgates-v2.db")).unwrap();
+        let maxv: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(maxv, 30);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tool_proposals WHERE id='tp_seed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// M0-05（EV-023）：本次新建 v3 迁移失败 → 半成品删除、v2 保留、应用拒绝伪启动。
+    #[test]
+    fn v3_migration_failure_removes_half_baked_and_keeps_v2() {
+        let dir = tempdir::make("sg-v3-poison");
+        build_v2_fixture(&dir);
+        // 故障注入：预建同名表使 0031 的 CREATE TABLE 失败（毒化随导入进入 v3）。
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("sixgates-v2.db")).unwrap();
+            conn.execute_batch("CREATE TABLE tool_execution_outcomes (id TEXT PRIMARY KEY);")
+                .unwrap();
+        }
+        let result = Store::open(dir.path(), "test");
+        assert!(result.is_err(), "迁移失败必须拒绝启动");
+        assert!(
+            !dir.path().join("sixgates-v3.db").exists(),
+            "半成品 v3 必须删除"
+        );
+        assert!(dir.path().join("sixgates-v2.db").exists(), "v2 必须保留");
+    }
+
+    /// M0-06：decision 扩 unknown/indeterminate；outcome 事实表 CHECK / UNIQUE 生效。
+    #[test]
+    fn migration_0031_outcome_semantics() {
+        let (store, _guard) = open();
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main','t');
+                    INSERT INTO workitems(id, project_id, title, created_at, updated_at)
+                     VALUES ('wi','pj','t','t','t');
+                    INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('ctx1','wi','{}','standard','t');
+                    INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                        tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+                     VALUES ('run_t','wi','','g','sha','ctx1','[]','{}','default','ik_t','running','t','t');
+                    INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
+                        requires_approval, decision, result, created_at)
+                     VALUES ('tp_t','run_t','read_file','{}','low','d',0,'executed','ok','t');",
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        // 新终态 decision 可写。
+        store
+            .with_conn(|c| {
+                c.execute("UPDATE tool_proposals SET decision='unknown' WHERE id='tp_t'", [])
+                    .map_err(crate::Error::from)?;
+                c.execute(
+                    "INSERT INTO tool_execution_outcomes(id, proposal_id, outcome, reason, reconciliation, created_at)
+                     VALUES ('o1','tp_t','unknown','side_effect_unverified','pending','t')",
+                    [],
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        // 非法 outcome 拒绝（executed 不是一等 outcome 枚举值）。
+        let bad: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO tool_execution_outcomes(id, proposal_id, outcome, created_at)
+                 VALUES ('o2','tp_t','executed','t')",
+                [],
+            )?)
+        });
+        assert!(bad.is_err(), "outcome CHECK 应拒绝 executed");
+        // 幂等键：同提案第二条 outcome 拒绝。
+        let dup: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO tool_execution_outcomes(id, proposal_id, outcome, created_at)
+                 VALUES ('o3','tp_t','failed','t')",
+                [],
+            )?)
+        });
+        assert!(dup.is_err(), "proposal_id UNIQUE 应拒绝重复 outcome");
+        // indeterminate decision 合法。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE tool_proposals SET decision='indeterminate' WHERE id='tp_t'",
+                    [],
+                )
+                .map_err(crate::Error::from)
+            })
+            .unwrap();
+        // 存量事实保留（事实只追加，迁移不回写历史行）。
+        let n: i64 = store
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM tool_proposals", [], |r| r.get(0))
+                    .map_err(crate::Error::from)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }

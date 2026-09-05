@@ -25,10 +25,12 @@ pub struct Store {
 impl Store {
     /// 打开/创建数据目录并应用迁移。拒绝网络文件系统（WAL 不安全）。
     ///
-    /// Schema 纪元（RFC v1.0 §19.1）：manifest 域 schema（0024+）写入 `sixgates-v2.db`，
-    /// 旧版本应用只打开 `sixgates.db` —— 物理隔离，旧包读写不到新数据。
-    /// v2 不存在而 legacy 存在时，用 SQLite backup API 做一次性在线拷贝（含 WAL 一致性），
-    /// 旧文件保留只读（回滚 = 删除 v2 切回旧路径）。
+    /// Schema 纪元（EvoFlow 方案 §7.1 / M0-05）：本包只打开 `sixgates-v3.db`。
+    /// 纪元链：legacy `sixgates.db` → `sixgates-v2.db` → `sixgates-v3.db`，均为 SQLite
+    /// backup API 一次性在线拷贝（含 WAL 一致性）；源文件保留不动 —— 旧包只打开旧纪元
+    /// 文件（物理隔离），回滚 = 换回旧包。v3 导入或迁移失败时删除半成品 v3、保留 v2，
+    /// 应用拒绝伪启动；下次打开重新导入。存量 v3 迁移失败则保留现场（预迁移备份在 backups/）。
+    /// 不做 v3 → v2 反向覆盖（§7.1 第 6 条）。
     pub fn open(data_dir: &Path, version: &str) -> Result<Self, Error> {
         std::fs::create_dir_all(data_dir.join("objects"))?;
         std::fs::create_dir_all(data_dir.join("logs"))?;
@@ -37,9 +39,16 @@ impl Store {
         write_probe(data_dir)?;
 
         let legacy_path = data_dir.join("sixgates.db");
-        let db_path = data_dir.join("sixgates-v2.db");
-        if !db_path.exists() && legacy_path.exists() {
-            Self::import_legacy_epoch(&legacy_path, &db_path)?;
+        let v2_path = data_dir.join("sixgates-v2.db");
+        let db_path = data_dir.join("sixgates-v3.db");
+        // v1→v2：保留既有链路，让 v2 始终是旧包可用的完整回退点。
+        if !v2_path.exists() && legacy_path.exists() {
+            Self::import_epoch(&legacy_path, &v2_path)?;
+        }
+        // v2→v3：仅当 v3 不存在且 v2 存在时一次性拷贝（§7.1 第 1 条）。
+        let fresh_v3 = !db_path.exists();
+        if fresh_v3 && v2_path.exists() {
+            Self::import_epoch(&v2_path, &db_path)?;
         }
         let conn = Connection::open(&db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -51,22 +60,33 @@ impl Store {
             data_dir: data_dir.to_path_buf(),
             version: version.to_string(),
         };
-        store.migrate()?;
-        Ok(store)
+        match store.migrate() {
+            Ok(()) => Ok(store),
+            Err(e) => {
+                // 半成品 v3（本次新建）：删除连同 WAL/SHM，v2 保留，下次重新导入（EV-023）。
+                // 存量 v3 不删：带数据现场交给调用方与预迁移备份处置。
+                if fresh_v3 {
+                    let _ = std::fs::remove_file(&db_path);
+                    let _ = std::fs::remove_file(data_dir.join("sixgates-v3.db-wal"));
+                    let _ = std::fs::remove_file(data_dir.join("sixgates-v3.db-shm"));
+                }
+                Err(e)
+            }
+        }
     }
 
-    /// 一次性纪元导入：legacy `sixgates.db` → `sixgates-v2.db`（在线 backup API，含 WAL 一致性）。
-    /// 旧文件保留不动；导入失败删除半成品 v2，回滚即切回旧路径（§19.1）。
-    fn import_legacy_epoch(legacy: &Path, v2: &Path) -> Result<(), Error> {
-        let src = Connection::open_with_flags(legacy, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut dst = Connection::open(v2)?;
+    /// 一次性纪元导入（在线 backup API，含 WAL 一致性）。源文件保留不动；
+    /// 导入失败删除半成品目标文件（§19.1 / §7.1 第 4 条）。
+    fn import_epoch(src: &Path, dst: &Path) -> Result<(), Error> {
+        let source = Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut target = Connection::open(dst)?;
         let import = (|| -> Result<(), rusqlite::Error> {
-            let bc = rusqlite::backup::Backup::new(&src, &mut dst)?;
+            let bc = rusqlite::backup::Backup::new(&source, &mut target)?;
             bc.run_to_completion(64, std::time::Duration::from_millis(5), None)?;
             Ok(())
         })();
         if let Err(e) = import {
-            let _ = std::fs::remove_file(v2);
+            let _ = std::fs::remove_file(dst);
             return Err(e.into());
         }
         Ok(())

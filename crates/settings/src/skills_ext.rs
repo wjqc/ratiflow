@@ -2,7 +2,7 @@
 //! 启用的技能由 Run 装配（spawn_run_task）拼为「技能段」注入提示词——启用即注入，无全局门禁。
 //! 来源：manual（新建表单）/ import（Markdown 文件导入）；frontmatter 中的 description 由前端解析后传入。
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{store_err, SettingsError, SettingsResult};
 use sg_store::{ids, objects, timefmt, Error, Store};
@@ -326,7 +326,10 @@ pub fn remove(store: &Store, id: &str, expected_revision: i64) -> SettingsResult
 
 /// 已启用技能的注入文本（按名称排序，确定性前缀）：
 /// 技能段标题 + 不可信边界声明 + 每技能小节。总预算 32KB，超限按名称序保留前段并计数截断。
-pub fn enabled_bodies_text(store: &Store, agent_profile_id: Option<&str>) -> SettingsResult<String> {
+pub fn enabled_bodies_text(
+    store: &Store,
+    agent_profile_id: Option<&str>,
+) -> SettingsResult<String> {
     let mut sections: Vec<String> = Vec::new();
     for skill in list(store)? {
         if !skill.enabled {
@@ -394,7 +397,15 @@ mod tests {
     #[test]
     fn skill_lifecycle_with_cas_and_injection_text() {
         let store = setup();
-        let created = create(&store, "deploy-check", "部署检查清单", "部署前检查端点。", "manual", None).unwrap();
+        let created = create(
+            &store,
+            "deploy-check",
+            "部署检查清单",
+            "部署前检查端点。",
+            "manual",
+            None,
+        )
+        .unwrap();
         assert!(created.enabled);
         assert!(created.id.starts_with("skill"));
 
@@ -441,7 +452,10 @@ mod tests {
         assert!(create(&store, "ok-name", "", "   ", "manual", None).is_err());
         let leaky = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----";
         let err = create(&store, "leaky", "", leaky, "manual", None).unwrap_err();
-        assert!(err.to_string().contains("secret") || err.to_string().contains("INTERNAL"), "{err}");
+        assert!(
+            err.to_string().contains("secret") || err.to_string().contains("INTERNAL"),
+            "{err}"
+        );
     }
 
     /// 绑定：绑到 Agent 的技能只在该 Agent 的 Run 注入；不存在 Agent 拒绝绑定。
@@ -462,7 +476,15 @@ mod tests {
             .unwrap();
 
         let global = create(&store, "global-skill", "", "全局技能正文", "manual", None).unwrap();
-        let bound = create(&store, "agent-skill", "", "专属技能正文", "manual", Some(pid)).unwrap();
+        let bound = create(
+            &store,
+            "agent-skill",
+            "",
+            "专属技能正文",
+            "manual",
+            Some(pid),
+        )
+        .unwrap();
         assert_eq!(bound.agent_profile_id.as_deref(), Some(pid));
         assert_eq!(bound.agent_name.as_deref(), Some("部署 Agent"));
         // 不存在的 Agent 拒绝。

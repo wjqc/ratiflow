@@ -92,7 +92,6 @@ fn goal_terms(goal: &str) -> Vec<String> {
     mem::repository::sanitize_terms(goal, 8)
 }
 
-
 /// 记忆随仓库走（团队共享）：mutation 成功后把条目写回 <repo>/memory/<slug>.md。
 /// 落盘失败不报错（结果里如实标注 repoPersist），本地仍为可用状态；下次同步对账。
 fn persist_after(store: &Store, project_id: &str, result: Value) -> Value {

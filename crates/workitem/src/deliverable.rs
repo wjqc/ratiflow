@@ -19,7 +19,11 @@ pub fn required_kind(gate: Gate) -> &'static str {
 
 /// 交付物满足状态（供 request_release 前置与 gate.deliverableStatus RPC 复用）。
 /// 满足 = 工件存在 + 最新有效修订已冻结进本关当前基线 + 正文非空（size>0）。
-pub fn status(store: &sg_store::Store, workitem_id: &str, gate: Gate) -> Result<Value, sg_store::Error> {
+pub fn status(
+    store: &sg_store::Store,
+    workitem_id: &str,
+    gate: Gate,
+) -> Result<Value, sg_store::Error> {
     let kind = required_kind(gate);
     let mut out = json!({
         "workItemId": workitem_id,
@@ -80,7 +84,11 @@ pub fn status(store: &sg_store::Store, workitem_id: &str, gate: Gate) -> Result<
     };
     out["baselineId"] = json!(baseline_id);
     let map: Value = serde_json::from_str(&revision_map).unwrap_or(Value::Null);
-    let Some(frozen_rev) = map.get(&artifact_id).and_then(|v| v.as_str()).map(String::from) else {
+    let Some(frozen_rev) = map
+        .get(&artifact_id)
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    else {
         out["missing"] = json!("not_frozen");
         return Ok(out);
     };
@@ -99,7 +107,11 @@ pub fn status(store: &sg_store::Store, workitem_id: &str, gate: Gate) -> Result<
 }
 
 /// request_release 前置：不满足即 deliverable_missing（fail-closed）。
-pub fn require_for_release(store: &sg_store::Store, workitem_id: &str, gate: Gate) -> Result<Value, sg_store::Error> {
+pub fn require_for_release(
+    store: &sg_store::Store,
+    workitem_id: &str,
+    gate: Gate,
+) -> Result<Value, sg_store::Error> {
     let s = status(store, workitem_id, gate)?;
     if s["satisfied"] == json!(true) {
         return Ok(s);

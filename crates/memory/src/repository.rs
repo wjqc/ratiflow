@@ -8,7 +8,10 @@ use crate::model::{merr, MemorySettings};
 
 pub const ERR_TOKEN_NOT_FOUND: &str = "not_found";
 
-fn row_to_settings(project_id: &str, r: (bool, String, i64, i64, i64, i64, String, String)) -> MemorySettings {
+fn row_to_settings(
+    project_id: &str,
+    r: (bool, String, i64, i64, i64, i64, String, String),
+) -> MemorySettings {
     MemorySettings {
         project_id: project_id.to_string(),
         enabled: r.0,

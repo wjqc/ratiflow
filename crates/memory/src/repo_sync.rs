@@ -38,6 +38,8 @@ fn project_root(store: &Store, project_id: &str) -> Option<PathBuf> {
 }
 
 /// frontmatter 序列化（字段序固定——文件 diff 友好）。
+// 字段数由 memory 条目模型决定，字段序即文件布局；收进 struct 反而 obscures 字段序约定。
+#[allow(clippy::too_many_arguments)]
 fn frontmatter(
     slug: &str,
     kind: &str,
@@ -143,8 +145,10 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), sg_store::Error> {
         .map_err(|e| sg_store::Error::Message(format!("memory tmp: {e}")))?;
     f.write_all(content.as_bytes())
         .map_err(|e| sg_store::Error::Message(format!("memory write: {e}")))?;
-    f.sync_all().map_err(|e| sg_store::Error::Message(format!("fsync: {e}")))?;
-    std::fs::rename(&tmp, path).map_err(|e| sg_store::Error::Message(format!("memory rename: {e}")))?;
+    f.sync_all()
+        .map_err(|e| sg_store::Error::Message(format!("fsync: {e}")))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| sg_store::Error::Message(format!("memory rename: {e}")))?;
     Ok(())
 }
 
@@ -164,7 +168,11 @@ struct Snapshot {
     updated_at: String,
 }
 
-fn snapshot(store: &Store, project_id: &str, memory_id: &str) -> Result<Option<Snapshot>, sg_store::Error> {
+fn snapshot(
+    store: &Store,
+    project_id: &str,
+    memory_id: &str,
+) -> Result<Option<Snapshot>, sg_store::Error> {
     store
         .with_conn(|conn| {
             Ok(conn
@@ -208,7 +216,11 @@ pub fn persist_entry(store: &Store, project_id: &str, memory_id: &str) -> Value 
     if snap.origin != "repo" || matches!(snap.status.as_str(), "purged" | "rejected") {
         return json!({"persisted": false, "reason": format!("origin={}/status={}", snap.origin, snap.status)});
     }
-    let body = match snap.object_sha256.as_deref().map(|sha| repository::read_body(store, sha)) {
+    let body = match snap
+        .object_sha256
+        .as_deref()
+        .map(|sha| repository::read_body(store, sha))
+    {
         Some(Ok(body)) => body,
         _ => return json!({"persisted": false, "reason": "body_object_missing"}),
     };
@@ -253,7 +265,9 @@ pub fn remove_entry(store: &Store, project_id: &str, slug: &str) -> Value {
 /// local 行不受影响；统计如实返回。单文件解析失败跳过并计数（不阻断整体）。
 pub fn sync_from_repo(store: &Store, project_id: &str) -> Result<Value, sg_store::Error> {
     let Some(root) = project_root(store, project_id) else {
-        return Ok(json!({"synced": false, "reason": "project_root_missing", "created": 0, "updated": 0, "removed": 0, "skipped": 0}));
+        return Ok(
+            json!({"synced": false, "reason": "project_root_missing", "created": 0, "updated": 0, "removed": 0, "skipped": 0}),
+        );
     };
     let dir = root.join(MEMORY_DIR);
     let mut files: Vec<(String, MemoryFile)> = Vec::new();
@@ -523,7 +537,7 @@ fn add_revision_from_file(
 mod tests {
     use super::*;
     use crate::mutation;
-use crate::CreateInput;
+    use crate::CreateInput;
     use sg_store::ids;
 
     struct Tmp(PathBuf);
@@ -583,7 +597,8 @@ use crate::CreateInput;
 
         let out = persist_entry(&store, "pj", mid);
         assert_eq!(out["persisted"], json!(true), "{out}");
-        let raw = std::fs::read_to_string(repo.join(MEMORY_DIR).join(format!("{slug}.md"))).unwrap();
+        let raw =
+            std::fs::read_to_string(repo.join(MEMORY_DIR).join(format!("{slug}.md"))).unwrap();
         assert!(raw.contains("slug: "));
         assert!(raw.contains("status: active"));
         assert!(raw.contains("部署前检查端点。"));
@@ -611,7 +626,13 @@ use crate::CreateInput;
         assert_eq!(out["updated"], json!(1), "{out}");
         // 列表读回新正文。
         let hits = crate::repository::search(&store, "pj", "灰度", None, 10).unwrap();
-        assert!(hits["items"].as_array().map(|a| !a.is_empty()).unwrap_or(false), "同步后 FTS 命中新内容: {hits}");
+        assert!(
+            hits["items"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "同步后 FTS 命中新内容: {hits}"
+        );
 
         // 删文件 → 同步删除本地行。
         std::fs::remove_file(&path).unwrap();

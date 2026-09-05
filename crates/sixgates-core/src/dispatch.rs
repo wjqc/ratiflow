@@ -210,7 +210,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 return Ok(json!({"available": false, "reason": "project_root_missing"}));
             }
             match sg_workitem::worktree::repo_git_status(std::path::Path::new(&local_root)) {
-                Some((branch, dirty)) => Ok(json!({"available": true, "branch": branch, "dirty": dirty})),
+                Some((branch, dirty)) => {
+                    Ok(json!({"available": true, "branch": branch, "dirty": dirty}))
+                }
                 None => Ok(json!({"available": false, "reason": "not_a_git_repo"})),
             }
         }
@@ -1850,9 +1852,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         | "memory.captureGet"
         | "memory.candidateList"
         | "memory.candidateDecide"
-        | "memory.syncFromRepo" => {
-            crate::memory_dispatch::dispatch(state, store, method, params)
-        }
+        | "memory.syncFromRepo" => crate::memory_dispatch::dispatch(state, store, method, params),
 
         _ => Err(err(ErrorCode::MethodNotFound, format!("未知方法 {method}"))),
     }
@@ -2384,7 +2384,8 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
     };
     // M4：AgentProfile developer 层（persona/SOP/输出契约；无 selection 时为 None）。
     // 技能段（启用即注入；全局技能恒注入，绑定技能仅该 Agent 的 Run）：拼入 profile 层之后。
-    let (profile_text, active_profile_id): (Option<String>, Option<String>) = {
+    // _active_profile_id：已解析的 profile id，M4 Profile v2 冻结消费；当前仅用于技能注入过滤。
+    let (profile_text, _active_profile_id): (Option<String>, Option<String>) = {
         let sel_id: String = store
             .with_conn(|conn| {
                 conn.query_row(
@@ -2673,7 +2674,9 @@ fn publish_deliverables_to_knowledge(
             let title = match sg_artifact::get_artifact(store, artifact_id) {
                 Ok(a) => a.title,
                 Err(e) => {
-                    items.push(json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}));
+                    items.push(
+                        json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}),
+                    );
                     failed += 1;
                     continue;
                 }
@@ -2683,7 +2686,9 @@ fn publish_deliverables_to_knowledge(
             {
                 Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
                 Err(e) => {
-                    items.push(json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}));
+                    items.push(
+                        json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}),
+                    );
                     failed += 1;
                     continue;
                 }
@@ -2702,7 +2707,11 @@ fn publish_deliverables_to_knowledge(
                 Ok(v) => {
                     // 幂等：首次 projected，重复冻结 receipt_replay 原样返回。
                     let replayed = v["status"].as_str() != Some("projected");
-                    if replayed { skipped += 1 } else { created += 1 }
+                    if replayed {
+                        skipped += 1
+                    } else {
+                        created += 1
+                    }
                     items.push(json!({
                         "artifactId": artifact_id, "ok": true,
                         "sourceStableId": v["stableId"], "status": v["status"],
@@ -2710,7 +2719,9 @@ fn publish_deliverables_to_knowledge(
                 }
                 Err(e) => {
                     failed += 1;
-                    items.push(json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}));
+                    items.push(
+                        json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}),
+                    );
                 }
             }
         }
@@ -2735,7 +2746,10 @@ fn publish_deliverables_to_knowledge(
 }
 
 /// 近 30 天按 UTC 日零填充聚合：总 Token=in+out，命中率=cached/in（无输入日为 null）。供每日折线图。
-fn model_usage_daily(conn: &rusqlite::Connection, run_id: Option<&str>) -> Result<Vec<Value>, Error> {
+fn model_usage_daily(
+    conn: &rusqlite::Connection,
+    run_id: Option<&str>,
+) -> Result<Vec<Value>, Error> {
     let mut stmt = conn
         .prepare(
             "WITH RECURSIVE days(day) AS (
@@ -2876,7 +2890,8 @@ mod model_usage_daily_tests {
     /// 近 30 天窗口零填充 + 按 UTC 日分组 + run 过滤 + 命中率口径（cached/tokens_in）。
     #[test]
     fn daily_window_zero_filled_and_run_scoped() {
-        let dir = std::env::temp_dir().join(format!("sg-usage-daily-{}", sg_store::ids::new_id("t")));
+        let dir =
+            std::env::temp_dir().join(format!("sg-usage-daily-{}", sg_store::ids::new_id("t")));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir, "test").unwrap();
         let today = sg_store::timefmt::now();
@@ -2901,16 +2916,27 @@ mod model_usage_daily_tests {
 
         let all = daily_rows(&store, None);
         assert_eq!(all.len(), 30, "固定 30 天窗口");
-        assert_eq!(all[0]["day"], json!(&sg_store::timefmt::now_plus_minutes(-29 * 24 * 60)[..10]));
+        assert_eq!(
+            all[0]["day"],
+            json!(&sg_store::timefmt::now_plus_minutes(-29 * 24 * 60)[..10])
+        );
         assert_eq!(all[29]["day"], json!(&today[..10]));
         assert_eq!(all[0]["totalTokens"], json!(0), "窗口外的旧行不参与");
-        assert_eq!(all[0]["cacheHitRatio"], Value::Null, "无输入日命中率为 null");
+        assert_eq!(
+            all[0]["cacheHitRatio"],
+            Value::Null,
+            "无输入日命中率为 null"
+        );
         assert_eq!(all[29]["totalTokens"], json!(165));
         assert_eq!(all[29]["cachedTokens"], json!(60));
         assert_eq!(all[29]["cacheHitRatio"], json!(0.462));
 
         let run1 = daily_rows(&store, Some("run1"));
-        assert_eq!(run1.last().unwrap()["totalTokens"], json!(150), "run 过滤生效");
+        assert_eq!(
+            run1.last().unwrap()["totalTokens"],
+            json!(150),
+            "run 过滤生效"
+        );
         assert_eq!(run1.last().unwrap()["cacheHitRatio"], json!(0.5));
         let _ = std::fs::remove_dir_all(&dir);
     }
