@@ -55,6 +55,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         32,
         include_str!("../migrations/0032_workflow_templates.sql"),
     ),
+    (33, include_str!("../migrations/0033_plan_dag.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

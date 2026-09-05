@@ -627,4 +627,109 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
     }
+    /// M2-01（0033 / EV-005 前置）：Plan DAG 表语义——
+    /// CHECK 拒绝非法枚举；attempt 幂等（task_id+attempt_no 唯一）；
+    /// 单活跃 partial index；FK 链完整。
+    #[test]
+    fn migration_0033_plan_dag_semantics() {
+        let (store, _guard) = open();
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main','t');
+                    INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi','pj','t','','[]','requirements','t','t');
+                    INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('ctx1','wi','{}','standard','t');
+                    INSERT INTO stage_attempts(id, workitem_id, gate, attempt_no, branch_no, state, entry_snapshot_id,
+                        input_package_sha256, active_output_package_id, predecessor_attempt_id, created_at, updated_at)
+                     VALUES ('att1','wi','requirements',1,1,'prepared','','',NULL,NULL,'t','t');
+                    INSERT INTO plan_revisions(id, workitem_id, stage_attempt_id, revision_no, status, digest, created_at, updated_at)
+                     VALUES ('pr1','wi','att1',1,'draft','d','t','t');
+                    INSERT INTO plan_tasks(id, plan_revision_id, task_key, kind, title, effect_class, created_at)
+                     VALUES ('pt1','pr1','t1','local_write','写任务','local_write','t');
+                    INSERT INTO plan_tasks(id, plan_revision_id, task_key, kind, title, effect_class, created_at)
+                     VALUES ('pt2','pr1','t2','verification','验证任务','read','t');
+                    INSERT INTO plan_task_edges(id, plan_revision_id, from_task_id, to_task_id, created_at)
+                     VALUES ('pe1','pr1','pt1','pt2','t');",
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        // attempt 幂等：同 task 同 attempt_no 拒绝。
+        let dup: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+                 VALUES ('pa1','pt1',1,'running','t','t')",
+                [],
+            )?)
+        });
+        assert!(dup.is_ok());
+        let dup2: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+                 VALUES ('pa2','pt1',1,'pending','t','t')",
+                [],
+            )?)
+        });
+        assert!(dup2.is_err(), "UNIQUE(task_id, attempt_no) 应拒绝重复");
+        // 单活跃：同 task 第二个进行中 attempt 拒绝；终态后可再开。
+        let second_active: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+                 VALUES ('pa3','pt1',2,'ready','t','t')",
+                [],
+            )?)
+        });
+        assert!(
+            second_active.is_err(),
+            "单活跃 partial index 应拒绝并行 attempt"
+        );
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE plan_task_attempts SET state='succeeded' WHERE id='pa1'",
+                    [],
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        let next_attempt: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+                 VALUES ('pa4','pt1',2,'ready','t','t')",
+                [],
+            )?)
+        });
+        assert!(next_attempt.is_ok(), "终态后允许新 attempt");
+        // 非法枚举拒绝。
+        let bad_kind: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO plan_tasks(id, plan_revision_id, task_key, kind, effect_class, created_at)
+                 VALUES ('pt3','pr1','t3','deploy','read','t')",
+                [],
+            )?)
+        });
+        assert!(bad_kind.is_err(), "kind CHECK 应拒绝 deploy");
+        let bad_effect: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO plan_tasks(id, plan_revision_id, task_key, kind, effect_class, created_at)
+                 VALUES ('pt4','pr1','t4','read','write','t')",
+                [],
+            )?)
+        });
+        assert!(bad_effect.is_err(), "effect_class CHECK 应拒绝 write");
+        // 非法状态拒绝。
+        let bad_state: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+                 VALUES ('pa5','pt2',1,'done','t','t')",
+                [],
+            )?)
+        });
+        assert!(bad_state.is_err(), "attempt state CHECK 应拒绝 done");
+    }
 }
