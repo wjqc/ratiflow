@@ -195,7 +195,9 @@ export type RpcMethodName =
   | 'skill.create'
   | 'skill.update'
   | 'skill.setEnabled'
-  | 'skill.remove';
+  | 'skill.remove'
+  | 'memory.syncFromRepo'
+  | 'project.gitStatus';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -391,6 +393,8 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'skill.update',
   'skill.setEnabled',
   'skill.remove',
+  'memory.syncFromRepo',
+  'project.gitStatus',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -1520,4 +1524,12 @@ export interface SkillSetEnabledParams {
 export interface SkillRemoveParams {
   skillId: string;
   expectedRevision: unknown;
+}
+
+export interface MemorySyncFromRepoParams {
+  projectId: string;
+}
+
+export interface ProjectGitStatusParams {
+  projectId: string;
 }

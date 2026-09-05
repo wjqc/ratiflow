@@ -146,6 +146,14 @@ export default function AppShell() {
     if (activeProjectId) void loadProjectData(activeProjectId);
   }, [activeProjectId, loadProjectData]);
 
+  // 团队共享（知识库/记忆随仓库走）：项目切换后 fire-and-forget 对账一次，
+  // git pull 回到应用即可见团队内容；失败静默（页面另有手动同步兜底）。
+  useEffect(() => {
+    if (!activeProjectId) return;
+    void rpc('knowledge.syncFromRepo', { projectId: activeProjectId }).catch(() => {});
+    void rpc('memory.syncFromRepo', { projectId: activeProjectId }).catch(() => {});
+  }, [activeProjectId]);
+
   // 外观主题（M5：dark/light 落地）：app.appearance.theme → <html data-theme>。
   useEffect(() => {
     let disposed = false;

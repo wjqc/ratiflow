@@ -193,6 +193,27 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "diagnostics.check" => diagnostics(state, store),
 
         // --- 项目 ---
+        "project.gitStatus" => {
+            let project_id = str_param(params, "projectId")?;
+            let local_root: String = store
+                .with_conn(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT COALESCE(local_root,'') FROM projects WHERE id=?1",
+                            [&project_id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or_default())
+                })
+                .map_err(store_err)?;
+            if local_root.is_empty() {
+                return Ok(json!({"available": false, "reason": "project_root_missing"}));
+            }
+            match sg_workitem::worktree::repo_git_status(std::path::Path::new(&local_root)) {
+                Some((branch, dirty)) => Ok(json!({"available": true, "branch": branch, "dirty": dirty})),
+                None => Ok(json!({"available": false, "reason": "not_a_git_repo"})),
+            }
+        }
         "project.list" => {
             let include_archived = params
                 .get("includeArchived")
@@ -1828,7 +1849,8 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         | "memory.captureStart"
         | "memory.captureGet"
         | "memory.candidateList"
-        | "memory.candidateDecide" => {
+        | "memory.candidateDecide"
+        | "memory.syncFromRepo" => {
             crate::memory_dispatch::dispatch(state, store, method, params)
         }
 

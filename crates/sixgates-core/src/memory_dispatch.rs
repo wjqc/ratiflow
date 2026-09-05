@@ -92,6 +92,43 @@ fn goal_terms(goal: &str) -> Vec<String> {
     mem::repository::sanitize_terms(goal, 8)
 }
 
+
+/// 记忆随仓库走（团队共享）：mutation 成功后把条目写回 <repo>/memory/<slug>.md。
+/// 落盘失败不报错（结果里如实标注 repoPersist），本地仍为可用状态；下次同步对账。
+fn persist_after(store: &Store, project_id: &str, result: Value) -> Value {
+    let ids: Vec<String> = collect_memory_ids(&result);
+    if ids.is_empty() {
+        return result;
+    }
+    let persists: Vec<Value> = ids
+        .iter()
+        .map(|id| mem::repo_sync::persist_entry(store, project_id, id))
+        .collect();
+    let mut out = result;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("repoPersist".into(), serde_json::json!(persists));
+    }
+    out
+}
+
+/// 从各 mutation 返回形状提取 memoryId（单对象 / created 数组）。
+fn collect_memory_ids(result: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(id) = result["memoryId"].as_str() {
+        if !id.is_empty() && result.get("skippedDuplicateOf").is_none() {
+            out.push(id.to_string());
+        }
+    }
+    if let Some(created) = result["created"].as_array() {
+        for c in created {
+            if let Some(id) = c["memoryId"].as_str() {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
+}
+
 pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -> RpcResult {
     match method {
         "memory.settingsGet" => {
@@ -156,7 +193,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 idempotency_key: idem(params)?,
                 on_duplicate: mem::DuplicateMode::Reject,
             };
-            mem::mutation::create(store, &input).map_err(mem_err)
+            let project_id = input.project_id.clone();
+            let result = mem::mutation::create(store, &input).map_err(mem_err)?;
+            Ok(persist_after(store, &project_id, result))
         }
         "memory.update" => {
             let input = mem::UpdateInput {
@@ -170,7 +209,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 actor: "local".to_string(),
                 idempotency_key: idem(params)?,
             };
-            mem::mutation::update(store, &input).map_err(mem_err)
+            let project_id = input.project_id.clone();
+            let result = mem::mutation::update(store, &input).map_err(mem_err)?;
+            Ok(persist_after(store, &project_id, result))
         }
         "memory.pin" => {
             let project_id = s(params, "projectId")?;
@@ -192,39 +233,77 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             )
             .map_err(mem_err)?)
         }
-        "memory.archive" => Ok(mem::mutation::archive(
-            store,
-            s(params, "projectId")?,
-            s(params, "memoryId")?,
-            n(params, "expectedRevision")?,
-            "local",
-            &idem(params)?,
-        )
-        .map_err(mem_err)?),
-        "memory.restore" => Ok(mem::mutation::restore(
-            store,
-            s(params, "projectId")?,
-            s(params, "memoryId")?,
-            n(params, "expectedRevision")?,
-            "local",
-            &idem(params)?,
-        )
-        .map_err(mem_err)?),
+        "memory.archive" => {
+            let project_id = s(params, "projectId")?;
+            let result = mem::mutation::archive(
+                store,
+                project_id,
+                s(params, "memoryId")?,
+                n(params, "expectedRevision")?,
+                "local",
+                &idem(params)?,
+            )
+            .map_err(mem_err)?;
+            Ok(persist_after(store, project_id, result))
+        }
+        "memory.restore" => {
+            let project_id = s(params, "projectId")?;
+            let result = mem::mutation::restore(
+                store,
+                project_id,
+                s(params, "memoryId")?,
+                n(params, "expectedRevision")?,
+                "local",
+                &idem(params)?,
+            )
+            .map_err(mem_err)?;
+            Ok(persist_after(store, project_id, result))
+        }
         "memory.purgePreview" => {
             Ok(
                 mem::purge::preview(store, s(params, "projectId")?, s(params, "memoryId")?)
                     .map_err(mem_err)?,
             )
         }
-        "memory.purge" => Ok(mem::purge::purge(
-            store,
-            s(params, "projectId")?,
-            s(params, "memoryId")?,
-            n(params, "expectedRevision")?,
-            s(params, "confirmationToken")?,
-            &idem(params)?,
-        )
-        .map_err(mem_err)?),
+        "memory.purge" => {
+            let project_id = s(params, "projectId")?;
+            let memory_id = s(params, "memoryId")?;
+            let slug: String = store
+                .with_conn(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT slug FROM memory_entries WHERE project_id=?1 AND id=?2",
+                            rusqlite::params![project_id, memory_id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or_default())
+                })
+                .unwrap_or_default();
+            let result = mem::purge::purge(
+                store,
+                project_id,
+                memory_id,
+                n(params, "expectedRevision")?,
+                s(params, "confirmationToken")?,
+                &idem(params)?,
+            )
+            .map_err(mem_err)?;
+            let removed = if slug.is_empty() {
+                serde_json::json!({"removed": false, "reason": "slug_missing"})
+            } else {
+                mem::repo_sync::remove_entry(store, project_id, &slug)
+            };
+            let mut out = result;
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("repoRemove".into(), removed);
+            }
+            Ok(out)
+        }
+        // 记忆随仓库走：以 <repo>/memory/*.md 为 desired 做对账（团队 pull 后调用；项目切换自动触发）。
+        "memory.syncFromRepo" => {
+            let project_id = s(params, "projectId")?;
+            mem::repo_sync::sync_from_repo(store, project_id).map_err(mem_err)
+        }
         "memory.search" => {
             let project_id = s(params, "projectId")?;
             let query = s(params, "query")?;
@@ -264,15 +343,19 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 "policy": {"maxEntries": settings.max_entries, "maxBytes": settings.max_bytes},
             }))
         }
-        "memory.import" => Ok(mem::export::import(
-            store,
-            s(params, "projectId")?,
-            s(params, "filename")?,
-            s(params, "contentBase64")?,
-            s(params, "mode")?,
-            &idem(params)?,
-        )
-        .map_err(mem_err)?),
+        "memory.import" => {
+            let project_id = s(params, "projectId")?;
+            let result = mem::export::import(
+                store,
+                project_id,
+                s(params, "filename")?,
+                s(params, "contentBase64")?,
+                s(params, "mode")?,
+                &idem(params)?,
+            )
+            .map_err(mem_err)?;
+            Ok(persist_after(store, project_id, result))
+        }
         "memory.export" => {
             let project_id = s(params, "projectId")?;
             let include_archived = params
@@ -323,16 +406,29 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             )
             .map_err(mem_err)?)
         }
-        "memory.candidateDecide" => Ok(mem::candidate::decide(
-            store,
-            s(params, "projectId")?,
-            s(params, "candidateId")?,
-            s(params, "decision")?,
-            opt_s(params, "editedContent"),
-            opt_s(params, "editedTitle"),
-            idem(params)?.as_str(),
-        )
-        .map_err(mem_err)?),
+        "memory.candidateDecide" => {
+            let project_id = s(params, "projectId")?;
+            let result = mem::candidate::decide(
+                store,
+                project_id,
+                s(params, "candidateId")?,
+                s(params, "decision")?,
+                opt_s(params, "editedContent"),
+                opt_s(params, "editedTitle"),
+                idem(params)?.as_str(),
+            )
+            .map_err(mem_err)?;
+            // accept 产物落仓库（acceptedMemoryId → memoryId 归一）。
+            let mut normalized = result.clone();
+            if normalized.get("memoryId").is_none() {
+                if let Some(id) = result["acceptedMemoryId"].as_str() {
+                    if let Some(obj) = normalized.as_object_mut() {
+                        obj.insert("memoryId".into(), serde_json::json!(id));
+                    }
+                }
+            }
+            Ok(persist_after(store, project_id, normalized))
+        }
         _ => Err(RpcError::new(
             ErrorCode::MethodNotFound,
             format!("method_not_found: 未知方法 {method}"),

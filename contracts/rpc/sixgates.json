@@ -3498,6 +3498,28 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "memory.syncFromRepo",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "project.gitStatus",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [

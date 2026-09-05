@@ -202,6 +202,20 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
     });
   };
 
+  // 团队共享：git pull 后把仓库 knowledge/ 清单对账进本地索引（manifest 平面）。
+  const [syncingRepo, setSyncingRepo] = useState(false);
+  const syncFromRepo = async () => {
+    setSyncingRepo(true);
+    try {
+      await rpc('knowledge.syncFromRepo', { projectId });
+      await reloadSources();
+    } catch {
+      /* 同步失败静默：来源列表仍是本地索引 */
+    } finally {
+      setSyncingRepo(false);
+    }
+  };
+
   const rescanAll = () => {
     setBusy(true);
     void Promise.all(sources.map((s) => rpc('knowledge.scan', { sourceId: s.id })))
@@ -254,6 +268,9 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
         </span>
         <span className="sg-kbv2-head-note">本地运行 · 产物默认跟随项目归档</span>
         <div className="sg-kbv2-head-actions">
+          <button className="sg-btn sg-btn--sm" disabled={syncingRepo} onClick={() => void syncFromRepo()}>
+            {syncingRepo ? '同步中…' : '从仓库同步'}
+          </button>
           <button className="sg-btn sg-btn--sm" disabled={busy || sources.length === 0} onClick={rescanAll}>
             重建索引
           </button>

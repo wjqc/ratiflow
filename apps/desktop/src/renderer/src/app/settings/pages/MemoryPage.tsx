@@ -30,6 +30,8 @@ export function MemoryPage() {
   const [query, setQuery] = useState('');
   const [toggling, setToggling] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
   const [revealExportId, setRevealExportId] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<{ id: string | null; create: boolean } | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -96,6 +98,26 @@ export function MemoryPage() {
     if (!projectId) return;
     void loadList(projectId, query);
   }, [projectId, query, refreshKey, loadList]);
+
+  // 团队共享：以 <repo>/memory/*.md 为权威对账（git pull 后手动兜底；项目切换已自动触发）。
+  const syncFromRepo = useCallback(async (pid: string) => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const r = await rpc<{ synced?: boolean; created?: number; updated?: number; removed?: number; reason?: string }>(
+        'memory.syncFromRepo', { projectId: pid });
+      setSyncResult(
+        r.synced === false
+          ? `未同步：${r.reason === 'project_root_missing' ? '项目未登记本地目录' : (r.reason ?? '未知原因')}`
+          : `已同步：新增 ${r.created ?? 0} · 更新 ${r.updated ?? 0} · 移除 ${r.removed ?? 0}`,
+      );
+      void loadList(pid, query);
+    } catch (e) {
+      setSyncResult(rpcErrText(e) || '同步失败');
+    } finally {
+      setSyncing(false);
+    }
+  }, [loadList, query]);
 
   // 搜索 250ms debounce。
   const onQueryChange = (v: string) => {
@@ -245,6 +267,19 @@ export function MemoryPage() {
           <StatusPill kind="readonly" label="项目已归档：只读浏览" />
         </div>
       ) : null}
+      <div className="sg-memory-state-row">
+        <span className="sg-hint">记忆随仓库同步（<code className="sg-code">memory/</code> 目录，git 提交后共享给团队）</span>
+        <button
+          type="button"
+          className="sg-btn sg-btn--sm"
+          disabled={!projectId || syncing}
+          onClick={() => projectId && void syncFromRepo(projectId)}
+        >
+          <IconRefresh size={12} />
+          {syncing ? '同步中…' : '从仓库同步'}
+        </button>
+        {syncResult ? <span className="sg-hint">{syncResult}</span> : null}
+      </div>
       {settingsError ? (
         <div role="alert" className="sg-memory-banner sg-memory-banner--error">
           {settingsError}

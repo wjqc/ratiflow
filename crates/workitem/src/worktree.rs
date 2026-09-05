@@ -22,6 +22,15 @@ fn worktree_root(store: &Store, workitem_id: &str) -> PathBuf {
     store.data_dir.join("worktrees").join(workitem_id)
 }
 
+/// 主仓库轻量状态（团队共享展示用）：分支 + 脏文件数。非 git 仓库返回 None。
+pub fn repo_git_status(root: &std::path::Path) -> Option<(String, usize)> {
+    // branch --show-current 在未出生分支（无提交的新仓库）也可用；rev-parse 会失败。
+    let branch = git_out(root, &["branch", "--show-current"])?;
+    let status = git_out(root, &["status", "--porcelain"])?;
+    let dirty = status.lines().filter(|l| !l.trim().is_empty()).count();
+    Some((branch, dirty))
+}
+
 fn git_out(root: &std::path::Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")

@@ -509,6 +509,7 @@ export function Workbench({
           progress={progress}
           evidences={gateEvidences}
           workItemId={workItemId}
+          projectId={projectId}
           events={events}
           runs={runs}
           docs={docs}
@@ -1696,12 +1697,31 @@ function DeliverableChip({
   );
 }
 
+/** 代码团队共享状态：主仓库分支 + 未提交数（pull/commit/push 仍由开发者 git 工作流完成）。 */
+function GitStatusChip({ projectId }: { projectId: string }) {
+  const [info, setInfo] = useState<{ available: boolean; branch?: string; dirty?: number } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void rpc<{ available: boolean; branch?: string; dirty?: number }>('project.gitStatus', { projectId })
+      .then((r) => { if (alive) setInfo(r); })
+      .catch(() => { if (alive) setInfo(null); });
+    return () => { alive = false; };
+  }, [projectId]);
+  if (!info?.available || !info.branch) return null;
+  return (
+    <span className="sg-chip" title="代码仓库分支与未提交变更（团队共享经 git push/pull）">
+      分支 {info.branch} · {info.dirty ?? 0} 处未提交
+    </span>
+  );
+}
+
 function GateWorkspace({
   gate,
   stage,
   progress,
   evidences,
   workItemId,
+  projectId,
   events,
   runs,
   docs,
@@ -1716,6 +1736,7 @@ function GateWorkspace({
   progress: ProgressInfo | null;
   evidences: EvidenceInfo[];
   workItemId: string;
+  projectId: string;
   events: TimelineEvent[];
   runs: AgentRunInfo[];
   docs: string[];
@@ -1737,6 +1758,7 @@ function GateWorkspace({
           <span>
             当前关：{gateLabel(gate)} · {GATE_SUBS[gate]}
           </span>
+          <GitStatusChip projectId={projectId} />
         </div>
       </div>
 

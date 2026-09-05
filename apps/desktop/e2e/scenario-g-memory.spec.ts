@@ -37,12 +37,59 @@ test.afterEach(async () => {
   }
 });
 
-async function createProject(): Promise<string> {
+async function createProject(localRoot?: string): Promise<string> {
   const proj = await e2e.rpc<{ id: string }>('project.create', {
     gitlabInstance: 'x', namespace: 'n', project: 'g', name: '记忆 G 场景',
+    ...(localRoot ? { localRoot } : {}),
   });
   return proj.id;
 }
+
+/** G10：记忆随仓库走（团队共享）。 */
+test('G10 记忆随仓库走：落盘 → 手改文件同步 → 删除传播', async () => {
+  await launchWithConsoleGuard();
+  const repoDir = join(tmpdir(), `sg-g10-${Date.now()}`);
+  const { execSync } = await import('node:child_process');
+  execSync(`git init -q "${repoDir}"`);
+  const projectId = await createProject(repoDir);
+
+  // 1) 建记忆 → 自动落 <repo>/memory/<slug>.md。
+  await e2e.rpc('memory.settingsUpdate', {
+    projectId, settings: { enabled: true }, expectedRevision: 1, idempotencyKey: 'g10-enable',
+  });
+  const created = await e2e.rpc<{ memoryId: string; slug: string }>('memory.create', {
+    projectId, title: '发布流程', kind: 'decision', body: '先跑流水线再灰度。', idempotencyKey: 'g10-create',
+  });
+  const memPath = join(repoDir, 'memory', `${created.slug}.md`);
+  await expect.poll(() => execSync(`test -f "${memPath}" && echo ok || echo missing`).toString().trim()).toBe('ok');
+  const raw = execSync(`cat "${memPath}"`).toString();
+  expect(raw).toContain('status: active');
+  expect(raw).toContain('先跑流水线再灰度。');
+
+  // git 状态 RPC：未提交的记忆文件计入 dirty（代码团队共享展示）。
+  const gitStatus = await e2e.rpc<{ available: boolean; branch: string; dirty: number }>(
+    'project.gitStatus', { projectId });
+  expect(gitStatus.available).toBe(true);
+  expect(gitStatus.dirty).toBeGreaterThanOrEqual(1);
+
+  // 2) 模拟队友 pull 后内容变化 → syncFromRepo → 搜索命中新内容。
+  writeFileSync(memPath, raw.replace('先跑流水线再灰度。', '先跑流水线，全量验证后再灰度。'));
+  const synced = await e2e.rpc<{ created: number; updated: number; removed: number }>(
+    'memory.syncFromRepo', { projectId });
+  expect(synced.updated).toBe(1);
+  const hits = await e2e.rpc<{ items: unknown[] }>('memory.search', { projectId, query: '全量验证' });
+  expect(hits.items.length).toBeGreaterThan(0);
+
+  // 3) 删文件（队友清理）→ 同步删除本地条目。
+  execSync(`rm "${memPath}"`);
+  const removed = await e2e.rpc<{ removed: number }>('memory.syncFromRepo', { projectId });
+  expect(removed.removed).toBe(1);
+  const after = await e2e.rpc<{ items: unknown[] }>('memory.search', { projectId, query: '灰度' });
+  expect(after.items).toHaveLength(0);
+
+  expectNoConsoleErrors();
+  execSync(`rm -rf "${repoDir}"`);
+});
 
 test('G1 开启→新建→搜索→打开→编辑', async () => {
   await launchWithConsoleGuard();

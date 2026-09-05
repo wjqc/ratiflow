@@ -256,7 +256,7 @@ fn insert_revision_and_refs(
     Ok(())
 }
 
-fn sync_fts(
+pub(crate) fn sync_fts(
     tx: &Connection,
     memory_id: &str,
     project_id: &str,
@@ -416,8 +416,8 @@ pub fn create(store: &Store, input: &CreateInput) -> Result<Value, sg_store::Err
         };
         tx.execute(
             "INSERT INTO memory_entries(
-                id, project_id, slug, kind, subject_key, status, pinned, confirmed_at, confirmed_by, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?9)",
+                id, project_id, slug, kind, subject_key, status, pinned, confirmed_at, confirmed_by, created_at, updated_at, origin
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?9, ?10)",
             rusqlite::params![
                 memory_id,
                 input.project_id,
@@ -427,7 +427,8 @@ pub fn create(store: &Store, input: &CreateInput) -> Result<Value, sg_store::Err
                 final_status,
                 confirmed_at,
                 confirmed_by,
-                now
+                now,
+                if final_status == "proposed" { "local" } else { "repo" }
             ],
         )?;
         insert_revision_and_refs(

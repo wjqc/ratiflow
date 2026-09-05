@@ -9,6 +9,7 @@ pub mod export;
 pub mod model;
 pub mod mutation;
 pub mod purge;
+pub mod repo_sync;
 pub mod repository;
 pub mod retrieval;
 
