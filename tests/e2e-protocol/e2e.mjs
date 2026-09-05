@@ -147,7 +147,8 @@ async function main() {
     // 4. 其余五关（部署关走完整部署审批流）。
     for (const gate of ['design', 'development', 'testing']) {
       await passGate(gate, gate === 'testing' ? 'deployment' : gate === 'development' ? 'testing' : 'development', async () => {
-        const kind = gate === 'design' ? 'tech_design' : gate === 'testing' ? 'test_plan' : 'dev_notes';
+        // kind 与 deliverable.rs 门禁映射对齐：design↔tech_design、testing↔test、development↔code。
+        const kind = gate === 'design' ? 'tech_design' : gate === 'testing' ? 'test' : 'code';
         const keys = await activeKeys(client, wi.id);
         const art = await client.call('artifact.create', { workItemId: wi.id, kind, title: gate });
         const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${gate}\n验收映射…`, requirementKeys: keys });
@@ -187,7 +188,7 @@ async function main() {
     await passGate('deployment', 'verification', async () => {
       // per-gate 基线（蓝图 §5.3）：每关独立产出并冻结自己的基线。
       const keys = await activeKeys(client, wi.id);
-      const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'release_notes', title: '发布说明' });
+      const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'deployment', title: '发布说明' });
       const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 发布说明\n镜像 sha256:e2eabc123 → deploy.test', requirementKeys: keys });
       await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'ops', verdict: 'approved' });
       await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'deployment', revisionIds: [rev.id] });
@@ -198,7 +199,7 @@ async function main() {
     // 验证关。
     await passGate('verification', 'verification', async () => {
       const keys = await activeKeys(client, wi.id);
-      const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'acceptance_notes', title: '验收说明' });
+      const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'verification', title: '验收说明' });
       const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 验收说明\n冒烟与验收全部通过。', requirementKeys: keys });
       await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'qa', verdict: 'approved' });
       await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'verification', revisionIds: [rev.id] });

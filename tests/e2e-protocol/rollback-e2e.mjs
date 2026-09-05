@@ -58,13 +58,16 @@ function assert(condition, label) {
   console.log(`  ✓ ${label}`);
 }
 
+const GATE_KINDS = { requirements: 'prd', design: 'tech_design', development: 'code', testing: 'test', deployment: 'deployment', verification: 'verification' };
+
 async function activeKeys(client, workItemId) {
   const cov = await client.call('trace.coverage', { workItemId });
   return (cov.items ?? []).filter((i) => i.status === 'active').map((i) => i.requirementKey);
 }
 
 async function releaseGate(client, workItemId, gate) {
-  const art = await client.call('artifact.create', { workItemId, kind: 'doc', title: gate });
+  // kind 与 deliverable.rs 门禁映射对齐（requirements↔prd 等），否则 request_release 报 deliverable_missing。
+  const art = await client.call('artifact.create', { workItemId, kind: GATE_KINDS[gate] ?? 'doc', title: gate });
   const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${gate} 产物`, requirementKeys: await activeKeys(client, workItemId) });
   await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 'tech', verdict: 'approved' });
   await client.call('artifact.freezeBaseline', { workItemId, gate, revisionIds: [rev.id] });

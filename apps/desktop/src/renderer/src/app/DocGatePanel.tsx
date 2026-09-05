@@ -10,14 +10,16 @@ interface Props {
   onDone: () => void;
 }
 
+// kind 与后端交付物门禁映射对齐（workitem/deliverable.rs required_kind），
+// 不对齐会导致 request_release 前置 deliverable_missing 永不满足。
 const DOC_GATES: Record<string, { kind: string; label: string }> = {
   requirements: { kind: 'prd', label: 'PRD' },
   design: { kind: 'tech_design', label: '技术方案' },
-  development: { kind: 'dev_notes', label: '开发说明' },
-  testing: { kind: 'test_plan', label: '测试计划' },
+  development: { kind: 'code', label: '代码交付' },
+  testing: { kind: 'test', label: '测试计划' },
   // M2 per-gate 基线：部署/验证关也各自产出并冻结基线。
-  deployment: { kind: 'release_notes', label: '发布说明' },
-  verification: { kind: 'acceptance_notes', label: '验收说明' },
+  deployment: { kind: 'deployment', label: '发布说明' },
+  verification: { kind: 'verification', label: '验收说明' },
 };
 
 interface ArtifactInfo { id: string; kind: string; title: string }

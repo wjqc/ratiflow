@@ -47,7 +47,8 @@ describe('设置页接线', () => {
             ],
           });
         case 'agentProfile.list':
-          return ok({ items: [{ id: 'agent_1', name: '文档 Agent', enabled: true }] });
+          // 契约形状与后端 dispatch 一致：versions 恒为数组（缺失即契约漂移）。
+          return ok({ items: [{ id: 'agent_1', name: '文档 Agent', adapter_kind: 'local_harness', enabled: true, versions: [] }] });
         case 'model.usage':
           return ok({
             tokensIn: 12000,

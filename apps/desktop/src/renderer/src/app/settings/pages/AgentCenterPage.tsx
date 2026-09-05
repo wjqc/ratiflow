@@ -97,7 +97,7 @@ export function AgentCenterPage() {
   }, [bindings, projectId]);
 
   const versions = useMemo(
-    () => profiles.flatMap((profile) => profile.versions.map((version) => ({ profile, version }))),
+    () => profiles.flatMap((profile) => (profile.versions ?? []).map((version) => ({ profile, version }))),
     [profiles],
   );
 

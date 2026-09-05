@@ -82,9 +82,9 @@ async function main() {
     const pjB = await c.call('project.create', { gitlabInstance: 'x', namespace: 'n', project: 'b', name: 'B' });
     assert(pjA.id && pjB.id, '项目登记');
 
-    // 2. 默认关闭：feature flag 与项目开关均 false。
+    // 2. 默认关闭：项目开关 false（全局 feature flag 已随门禁移除，7647acb）。
     const s0 = await c.call('memory.settingsGet', { projectId: pjA.id });
-    assert(s0.featureEnabled === false && s0.enabled === false, '默认关闭（MEM-001）');
+    assert(s0.enabled === false && s0.featureEnabled === undefined, '默认关闭（MEM-001，全局 flag 不再存在）');
     assert(s0.maxEntries === 8 && s0.maxBytes === 12288, '默认预算 8 条 / 12 KiB');
 
     // 3. 开启项目 A（CAS）。
@@ -154,10 +154,23 @@ async function main() {
       'B 项目读取 A 记忆 → not_found',
     );
 
-    // 8. 上下文预览：flag 关闭 → disabled；打开全局 flag → included。
+    // 8. 上下文预览：项目开关关闭 → disabled；重开 → included（全局门禁已移除，开关即项目设置）。
+    const sOff = await c.call('memory.settingsGet', { projectId: pjA.id });
+    await c.call('memory.settingsUpdate', {
+      projectId: pjA.id,
+      settings: { enabled: false },
+      expectedRevision: sOff.revision,
+      idempotencyKey: 'e2e-set-off',
+    });
     const previewOff = await c.call('memory.contextPreview', { projectId: pjA.id, goal: '部署回滚' });
-    assert(previewOff.included?.length === 0 && previewOff.excluded?.some((e) => e.reason === 'disabled'), 'flag 关闭 → excluded/disabled（不报假成功）');
-    await c.call('settings.update', { patches: [{ key: 'memory.featureEnabled', value: true }] });
+    assert(previewOff.included?.length === 0 && previewOff.excluded?.some((e) => e.reason === 'disabled'), '项目开关关闭 → excluded/disabled（不报假成功）');
+    const sOn = await c.call('memory.settingsGet', { projectId: pjA.id });
+    await c.call('memory.settingsUpdate', {
+      projectId: pjA.id,
+      settings: { enabled: true },
+      expectedRevision: sOn.revision,
+      idempotencyKey: 'e2e-set-on',
+    });
     // goal 按 §7.1 规范化为词项（空格分隔）后参与确定性匹配。
     const previewOn = await c.call('memory.contextPreview', { projectId: pjA.id, goal: '部署 回滚 快照' });
     assert(previewOn.included?.length === 1 && previewOn.manifestFrozen === false, '开启后 included 且预览不冻结（§7.3）');

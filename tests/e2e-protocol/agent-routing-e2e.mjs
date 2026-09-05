@@ -89,13 +89,16 @@ async function main() {
     });
 
     // 释放 requirements 进入 development。
+    const GATE_KINDS = { requirements: 'prd', design: 'tech_design', development: 'code', testing: 'test', deployment: 'deployment', verification: 'verification' };
+
     async function activeKeys(workItemId) {
       const cov = await client.call('trace.coverage', { workItemId });
       return (cov.items ?? []).filter((i) => i.status === 'active').map((i) => i.requirementKey);
     }
     async function releaseGate(gate) {
       const keys = await activeKeys(wi.id);
-      const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'doc', title: gate });
+      // kind 与 deliverable.rs 门禁映射对齐，否则 request_release 报 deliverable_missing。
+      const art = await client.call('artifact.create', { workItemId: wi.id, kind: GATE_KINDS[gate] ?? 'doc', title: gate });
       const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: `# ${gate}`, requirementKeys: keys });
       await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 't', verdict: 'approved' });
       await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate, revisionIds: [rev.id] });
@@ -180,7 +183,7 @@ async function main() {
     });
     // 先释放 development（三次活动后放行）。
     const keys = await activeKeys(wi.id);
-    const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'dev_notes', title: '开发说明' });
+    const art = await client.call('artifact.create', { workItemId: wi.id, kind: 'code', title: '开发说明' });
     const rev = await client.call('artifact.createDraft', { artifactId: art.id, content: '# 开发完成', requirementKeys: keys });
     await client.call('artifact.addReview', { revisionId: rev.id, reviewer: 't', verdict: 'approved' });
     await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'development', revisionIds: [rev.id] });
@@ -230,7 +233,7 @@ async function main() {
 
     // AC-SW-10 收尾：testing 放行 → 输出包汇总（同一 gate 输出包包含全部产出与证据）。
     const tKeys = await activeKeys(wi.id);
-    const tArt = await client.call('artifact.create', { workItemId: wi.id, kind: 'test_plan', title: '测试计划' });
+    const tArt = await client.call('artifact.create', { workItemId: wi.id, kind: 'test', title: '测试计划' });
     const tRev = await client.call('artifact.createDraft', { artifactId: tArt.id, content: '# 测试计划', requirementKeys: tKeys });
     await client.call('artifact.addReview', { revisionId: tRev.id, reviewer: 't', verdict: 'approved' });
     await client.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'testing', revisionIds: [tRev.id] });
