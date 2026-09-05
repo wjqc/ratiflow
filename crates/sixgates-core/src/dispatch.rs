@@ -39,6 +39,7 @@ fn store_err(e: Error) -> RpcError {
         ("capability_mismatch", ErrorCode::AgentCapabilityMismatch),
         ("approval_expired", ErrorCode::ApprovalExpired),
         ("attempt_active_exists", ErrorCode::Conflict),
+        ("deliverable_missing", ErrorCode::Conflict),
         ("digest_drift", ErrorCode::Conflict),
         ("deployment", ErrorCode::Conflict),
         ("object_contains_secrets", ErrorCode::ObjectSecrets),
@@ -291,9 +292,6 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(serde_json::to_value(src).unwrap_or_default())
         }
         "knowledge.syncFromRepo" => {
-            if !sg_knowledge::flags::manifest_enabled(store).map_err(store_err)? {
-                return Ok(json!({"status": "feature_disabled"}));
-            }
             let project_id = str_param(params, "projectId")?;
             let root =
                 sg_knowledge::reconcile::project_root(store, &project_id).map_err(store_err)?;
@@ -900,7 +898,17 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             .map_err(store_err)?;
             let inputs = base.inputs_sha256.clone();
             let _ = sg_workitem::mark_stale_from(store, &workitem_id, gate, &inputs);
-            Ok(serde_json::to_value(base).unwrap_or_default())
+            // 交付物自动入知识库（git 管理）：逐修订落 <repo>/knowledge/，失败逐条记录不阻塞审批。
+            let project_id = sg_workitem::get(store, &workitem_id)
+                .map_err(store_err)?
+                .project_id;
+            let knowledge_publish =
+                publish_deliverables_to_knowledge(store, &project_id, &workitem_id, &base);
+            let mut out = serde_json::to_value(base).unwrap_or_default();
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("knowledgePublish".into(), knowledge_publish);
+            }
+            Ok(out)
         }
 
         // --- Agent ---
@@ -1496,6 +1504,13 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             )
             .map_err(store_err)?;
             Ok(preview)
+        }
+        "gate.deliverableStatus" => {
+            let workitem_id = str_param(params, "workItemId")?;
+            let gate_name = str_param(params, "gate")?;
+            let gate = sg_workitem::Gate::parse(&gate_name)
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
+            sg_workitem::deliverable::status(store, &workitem_id, gate).map_err(store_err)
         }
         "stage.package" => {
             let workitem_id = str_param(params, "workItemId")?;
@@ -2346,6 +2361,8 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
             .collect(),
     };
     // M4：AgentProfile developer 层（persona/SOP/输出契约；无 selection 时为 None）。
+    // 技能段（启用即注入，用户级）：拼入 profile developer 层之后、知识层之前由 assemble 定序。
+    let skills_text = sg_settings::skills_ext::enabled_bodies_text(store).unwrap_or_default();
     let profile_text: Option<String> = {
         let sel_id: String = store
             .with_conn(|conn| {
@@ -2357,7 +2374,7 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
                 .map_err(Error::from)
             })
             .unwrap_or_default();
-        if sel_id.is_empty() {
+        let profile = if sel_id.is_empty() {
             None
         } else {
             sg_agent::router::get(store, &sel_id).ok().and_then(|sel| {
@@ -2377,6 +2394,13 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
                             })
                     })
             })
+        };
+        // 技能段追加到 profile 层文本（Run 内冻结、确定性拼接，保持前缀稳定）。
+        match (profile, skills_text.is_empty()) {
+            (None, true) => None,
+            (None, false) => Some(skills_text),
+            (Some(text), false) => Some(format!("{text}\n\n{skills_text}")),
+            (Some(text), true) => Some(text),
         }
     };
     let initial = sg_agent::prompt::assemble_with_profile(
@@ -2593,6 +2617,94 @@ fn model_usage(_state: &AppState, store: &Store, run_id: Option<&str>) -> RpcRes
         "costMicros": 0,
         "costNote": "未接价格表；成本恒 0（诚实口径）",
     }))
+}
+
+/// 交付物冻结基线 → 自动放入知识库（git 管理，RFC v1.0 manifest 平面）。
+/// 逐修订以 opId 幂等（baseline-{基线id}-{工件id}）；失败逐条记录，不阻塞审批（诚实降级）。
+fn publish_deliverables_to_knowledge(
+    store: &Store,
+    project_id: &str,
+    workitem_id: &str,
+    baseline: &sg_artifact::Baseline,
+) -> Value {
+    let root = match sg_knowledge::reconcile::project_root(store, project_id) {
+        Ok(root) => root,
+        Err(_) => {
+            return json!({"published": false, "reason": "project_root_missing"});
+        }
+    };
+    let mut items: Vec<Value> = Vec::new();
+    let mut created = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    if let Some(map) = baseline.revision_map.as_object() {
+        for (artifact_id, rev_id) in map {
+            let rev_id = match rev_id.as_str() {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            let title = match sg_artifact::get_artifact(store, artifact_id) {
+                Ok(a) => a.title,
+                Err(e) => {
+                    items.push(json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}));
+                    failed += 1;
+                    continue;
+                }
+            };
+            let body = match sg_artifact::get_revision(store, &rev_id)
+                .and_then(|rev| sg_store::objects::open(store, &rev.content_sha256))
+            {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Err(e) => {
+                    items.push(json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}));
+                    failed += 1;
+                    continue;
+                }
+            };
+            // 幂等键：同基线同工件重复冻结 → 同 opId 同指纹 → 原终态复用。
+            let op_id = format!("baseline-{}-{artifact_id}", baseline.id);
+            let params = json!({
+                "projectId": project_id,
+                "opId": op_id,
+                "kind": "document",
+                "name": title,
+                "body": body,
+                "expectedAbsent": true,
+            });
+            match sg_knowledge::manifest::manifest_create(store, &params) {
+                Ok(v) => {
+                    // 幂等：首次 projected，重复冻结 receipt_replay 原样返回。
+                    let replayed = v["status"].as_str() != Some("projected");
+                    if replayed { skipped += 1 } else { created += 1 }
+                    items.push(json!({
+                        "artifactId": artifact_id, "ok": true,
+                        "sourceStableId": v["stableId"], "status": v["status"],
+                    }));
+                }
+                Err(e) => {
+                    failed += 1;
+                    items.push(json!({"artifactId": artifact_id, "ok": false, "error": e.to_string()}));
+                }
+            }
+        }
+    }
+    // 有新增才需要 reconcile + 重建 generation（幂等）。
+    let mut synced = false;
+    if created > 0 {
+        let sync = sg_knowledge::reconcile::sync_from_repo(store, project_id, &root);
+        let gen = sg_knowledge::reconcile::build_and_activate_generation(store, project_id, &root);
+        synced = sync.is_ok() && gen.is_ok();
+    }
+    json!({
+        "published": failed == 0 && (created > 0 || skipped > 0),
+        "workitemId": workitem_id,
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+        "synced": synced,
+        "note": if failed == 0 { "已写入 <repo>/knowledge/（git 提交由用户显式操作）" } else { "部分失败，详见 items" },
+        "items": items,
+    })
 }
 
 /// 近 30 天按 UTC 日零填充聚合：总 Token=in+out，命中率=cached/in（无输入日为 null）。供每日折线图。

@@ -188,7 +188,14 @@ export type RpcMethodName =
   | 'mcp.serverList'
   | 'mcp.serverRemove'
   | 'mcp.serverRefresh'
-  | 'mcp.toolsList';
+  | 'mcp.toolsList'
+  | 'gate.deliverableStatus'
+  | 'skill.list'
+  | 'skill.get'
+  | 'skill.create'
+  | 'skill.update'
+  | 'skill.setEnabled'
+  | 'skill.remove';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -377,6 +384,13 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'mcp.serverRemove',
   'mcp.serverRefresh',
   'mcp.toolsList',
+  'gate.deliverableStatus',
+  'skill.list',
+  'skill.get',
+  'skill.create',
+  'skill.update',
+  'skill.setEnabled',
+  'skill.remove',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -1470,4 +1484,40 @@ export interface McpServerRefreshParams {
 
 export interface McpToolsListParams {
   serverId?: string;
+}
+
+export interface GateDeliverableStatusParams {
+  workItemId: string;
+  gate: string;
+}
+
+export type SkillListParams = Record<string, never>;
+
+export interface SkillGetParams {
+  skillId: string;
+}
+
+export interface SkillCreateParams {
+  name: string;
+  body: string;
+  description?: string;
+  source?: string;
+}
+
+export interface SkillUpdateParams {
+  skillId: string;
+  expectedRevision: unknown;
+  description?: string;
+  body?: string;
+}
+
+export interface SkillSetEnabledParams {
+  skillId: string;
+  enabled: boolean;
+  expectedRevision: unknown;
+}
+
+export interface SkillRemoveParams {
+  skillId: string;
+  expectedRevision: unknown;
 }

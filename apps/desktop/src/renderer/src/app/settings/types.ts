@@ -234,7 +234,6 @@ export const MEMORY_STATUS_LABEL: Record<MemoryStatus, string> = {
 
 export interface MemorySettingsInfo {
   projectId: string;
-  featureEnabled: boolean;
   enabled: boolean;
   captureMode: 'off' | 'suggest';
   maxEntries: number;

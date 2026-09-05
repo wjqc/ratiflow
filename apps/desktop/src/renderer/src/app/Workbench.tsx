@@ -1594,6 +1594,108 @@ function gateIconContent(v: StageVisual): ReactNode {
 
 /* ---------------- 当前关工作区 ---------------- */
 
+/** 交付物门禁状态：本关要求类型的工件存在且已冻结基线才放行（与 core request_release 前置一致）。 */
+function DeliverableChip({
+  gate,
+  workItemId,
+  onChanged,
+}: {
+  gate: Gate;
+  workItemId: string;
+  onChanged: () => void;
+}) {
+  const [status, setStatus] = useState<{
+    requiredKind: string;
+    satisfied: boolean;
+    missing: string | null;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const reload = useCallback(async () => {
+    try {
+      const s = await rpc<{
+        requiredKind: string;
+        satisfied: boolean;
+        missing: string | null;
+      }>('gate.deliverableStatus', { workItemId, gate });
+      setStatus(s);
+    } catch {
+      setStatus(null);
+    }
+  }, [gate, workItemId]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload, onChanged]);
+
+  const importFile = async () => {
+    const picked = await window.sixgates.selectFile();
+    if (!picked) return;
+    setBusy(true);
+    setError('');
+    try {
+      const content = new TextDecoder().decode(Uint8Array.from(atob(picked.contentBase64), (c) => c.charCodeAt(0)));
+      const requiredKind = status?.requiredKind ?? '';
+      const existing = await rpc<{ items: Array<{ id: string; kind: string; title: string }> }>(
+        'artifact.list',
+        { workItemId },
+      );
+      const found = existing.items?.find((a) => a.kind === requiredKind) ?? null;
+      const artifactId = found?.id
+        ? found.id
+        : (
+            await rpc<{ id: string }>('artifact.create', {
+              workItemId,
+              kind: requiredKind,
+              title: picked.filename.replace(/\.[^.]+$/, ''),
+            })
+          ).id;
+      const draft = await rpc<{ id: string }>('artifact.createDraft', {
+        artifactId,
+        content,
+      });
+      await rpc('artifact.addReview', {
+        revisionId: draft.id,
+        reviewer: 'local-import',
+        verdict: 'approved',
+        comment: '外部导入',
+      });
+      await reload();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '导入失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!status) return null;
+  return (
+    <>
+      <div
+        className={`sg-gate-req${status.satisfied ? '' : ' sg-gate-req--missing'}`}
+        title={
+          status.satisfied
+            ? '交付物已冻结基线，可进入审批'
+            : '无冻结交付物不可进入审批'
+        }
+      >
+        {status.satisfied ? <IconCheck size={12} /> : '✗'} 交付物（{status.requiredKind}）
+        {status.satisfied ? '已冻结' : '未就绪'}
+      </div>
+      {!status.satisfied ? (
+        <div>
+          <button className="sg-button" disabled={busy} onClick={() => void importFile()}>
+            {busy ? '导入中…' : '导入交付物文件'}
+          </button>
+          {error ? <div className="sg-banner sg-banner--error" role="alert">{error}</div> : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function GateWorkspace({
   gate,
   stage,
@@ -1655,6 +1757,7 @@ function GateWorkspace({
               {req}
             </div>
           ))}
+          <DeliverableChip gate={gate} workItemId={workItemId} onChanged={onChanged} />
         </div>
         <div className="sg-gate-summary-status">
           <div className="sg-gate-summary-label">本关状态</div>

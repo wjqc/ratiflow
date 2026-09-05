@@ -94,7 +94,6 @@ mod tests {
         assert_eq!(rows, 1);
 
         // 开启后再次构建：included=1，且冻结 revision 与 entry 一致。
-        sg_memory::set_feature_enabled(&store, true, "tester").unwrap();
         sg_memory::settings_update(
             &store,
             "pj",

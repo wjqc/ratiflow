@@ -8,14 +8,9 @@ use crate::model::{merr, MemorySettings};
 
 pub const ERR_TOKEN_NOT_FOUND: &str = "not_found";
 
-fn row_to_settings(
-    project_id: &str,
-    feature_enabled: bool,
-    r: (bool, String, i64, i64, i64, i64, String, String),
-) -> MemorySettings {
+fn row_to_settings(project_id: &str, r: (bool, String, i64, i64, i64, i64, String, String)) -> MemorySettings {
     MemorySettings {
         project_id: project_id.to_string(),
-        feature_enabled,
         enabled: r.0,
         capture_mode: r.1,
         max_entries: r.2,
@@ -32,7 +27,6 @@ const SETTINGS_SELECT: &str = "SELECT enabled, capture_mode, max_entries, max_by
 pub fn query_settings_row(
     conn: &Connection,
     project_id: &str,
-    feature_enabled: bool,
 ) -> Result<MemorySettings, sg_store::Error> {
     let row = conn
         .query_row(SETTINGS_SELECT, [project_id], |r| {
@@ -48,7 +42,7 @@ pub fn query_settings_row(
             ))
         })
         .map_err(sg_store::Error::from)?;
-    Ok(row_to_settings(project_id, feature_enabled, row))
+    Ok(row_to_settings(project_id, row))
 }
 
 /// 项目是否存在（not_found 语义，MEM-010 项目隔离第一道门）。
@@ -79,28 +73,8 @@ pub fn project_archived(conn: &Connection, project_id: &str) -> Result<bool, sg_
     .map_err(sg_store::Error::from)
 }
 
-/// 全局 rollout flag（方案 §6.1/§16.1）：默认 false；
-/// 开发/测试/E2E 构建可用环境变量 SIXGATES_MEMORY_FEATURE 显式打开（生产不设置），
-/// 未设置时读 app_settings（memory.featureEnabled，默认 false）。
-pub fn feature_enabled(store: &Store) -> Result<bool, sg_store::Error> {
-    if let Ok(v) = std::env::var("SIXGATES_MEMORY_FEATURE") {
-        return Ok(v == "1" || v.eq_ignore_ascii_case("true"));
-    }
-    store.with_conn(|conn| {
-        let v: Option<String> = conn
-            .query_row(
-                "SELECT value_json FROM app_settings WHERE scope='global' AND project_id='' AND key='memory.featureEnabled'",
-                [],
-                |r| r.get(0),
-            )
-            .ok();
-        Ok(v.map(|s| s.contains("true")).unwrap_or(false))
-    })
-}
-
 /// 项目策略：惰性建行（一项目一行，方案 §6.1），不存在项目报 not_found。
 pub fn settings_get(store: &Store, project_id: &str) -> Result<MemorySettings, sg_store::Error> {
-    let feature = feature_enabled(store)?;
     store.with_conn(|conn| {
         require_project(conn, project_id)?;
         conn.execute(
@@ -108,7 +82,7 @@ pub fn settings_get(store: &Store, project_id: &str) -> Result<MemorySettings, s
              VALUES (?1, ?2, 'local')",
             rusqlite::params![project_id, sg_store::timefmt::now()],
         )?;
-        query_settings_row(conn, project_id, feature)
+        query_settings_row(conn, project_id)
     })
 }
 

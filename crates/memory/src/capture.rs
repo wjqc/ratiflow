@@ -134,12 +134,6 @@ pub fn start_job(
             format!("仅 completed_execution 的 Run 可排队（当前 {run_status}）"),
         ));
     }
-    if !repository::feature_enabled(store)? {
-        return Err(crate::model::merr(
-            crate::model::err_tokens::DISABLED,
-            "项目记忆功能未开启",
-        ));
-    }
     let settings = repository::settings_get(store, project_id)?;
     if settings.capture_mode != "suggest" {
         return Err(crate::model::merr(

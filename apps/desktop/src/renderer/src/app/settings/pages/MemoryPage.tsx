@@ -37,8 +37,7 @@ export function MemoryPage() {
   const requestSeq = useRef(0);
   const debounceRef = useRef<number | null>(null);
 
-  const featureOff = settings ? !settings.featureEnabled : false;
-  // 全局 flag 只锁注入开关与捕获；浏览/编辑/导入导出/归档/清除是数据控制路径，不受限（§3.3/§16.2/MEM-029）。
+  // 项目已归档只影响写入路径；浏览/编辑/导入导出/归档/清除是数据控制路径，不受限（§3.3/§16.2/MEM-029）。
   const archivedProject = projects.find((p) => p.id === projectId)?.archivedAt != null;
 
   // 项目列表（首个未归档项目默认选中）。
@@ -106,7 +105,7 @@ export function MemoryPage() {
   };
 
   const toggleEnabled = async () => {
-    if (!projectId || !settings || toggling || featureOff) return;
+    if (!projectId || !settings || toggling) return;
     setToggling(true);
     setNotice(null);
     try {
@@ -117,7 +116,6 @@ export function MemoryPage() {
         idempotencyKey: crypto.randomUUID(),
       });
       setSettings(updated);
-      setNotice(updated.enabled ? '已开启：新 Run 将在预算内复用已确认记忆' : '已关闭：保留全部条目，仅停止注入');
     } catch (e) {
       setNotice(rpcErrText(e) || '开关失败');
       void loadSettings(projectId);
@@ -219,10 +217,9 @@ export function MemoryPage() {
         </>
       );
     }
-    if (featureOff) return '项目记忆功能未开启：可浏览与编辑，注入由管理员/版本开关控制。';
     if (settings?.enabled === false) return '当前项目未开启记忆。开启后新 Run 才会复用已确认记忆；也可以先新建或导入。';
     return '还没有记忆。新建一条，或从 Markdown 导入。';
-  }, [queryInput, featureOff, settings?.enabled]);
+  }, [queryInput, settings?.enabled]);
 
   return (
     <div className="sg-set-page sg-reference-page sg-memory-page">
@@ -238,15 +235,14 @@ export function MemoryPage() {
         <SettingsToggle
           label="启用记忆注入"
           checked={settings?.enabled ?? false}
-          disabled={!projectId || !settings || toggling || featureOff}
+          disabled={!projectId || !settings || toggling}
           onChange={() => void toggleEnabled()}
         />
       </section>
 
-      {(featureOff || archivedProject) ? (
+      {archivedProject ? (
         <div className="sg-memory-state-row">
-          {featureOff ? <StatusPill kind="readonly" label="功能由当前版本/管理员关闭" /> : null}
-          {archivedProject ? <StatusPill kind="readonly" label="项目已归档：只读浏览" /> : null}
+          <StatusPill kind="readonly" label="项目已归档：只读浏览" />
         </div>
       ) : null}
       {settingsError ? (

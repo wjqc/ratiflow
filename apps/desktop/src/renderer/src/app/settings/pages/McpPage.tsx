@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { rpc } from '../../../rpc/client';
 import { SettingsRow, SettingsToggle } from '../components/SettingsRow';
-import { StatusPill } from '../components/StatusPill';
 import { useTwoStepConfirm } from '../components/useTwoStepConfirm';
 import {
   IconArrowLeft,
@@ -37,13 +36,6 @@ function normalizeServer(raw: McpServer): McpServer {
     toolCounts: raw.toolCounts ?? { active: 0, candidate: 0 },
   };
 }
-
-const STATUS_PILL: Record<McpStatus, { kind: 'ready' | 'pending' | 'error'; label: string }> = {
-  active: { kind: 'ready', label: '活跃' },
-  candidate: { kind: 'pending', label: '待批准' },
-  probe_failed: { kind: 'error', label: '探针失败' },
-  revoked: { kind: 'error', label: '已撤销' },
-};
 
 const GROUPS: Array<{ key: McpStatus; title: string; description: string }> = [
   {
@@ -89,7 +81,6 @@ export function McpPage() {
   const [items, setItems] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: '', command: '', args: '' });
@@ -132,13 +123,11 @@ export function McpPage() {
     })).filter((g) => g.servers.length > 0);
   }, [filtered]);
 
-  const act = async (id: string, run: () => Promise<unknown>, okNotice: string) => {
+  const act = async (id: string, run: () => Promise<unknown>) => {
     setError(null);
-    setNotice(null);
     setBusy(id);
     try {
       await run();
-      setNotice(okNotice);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : '操作失败');
@@ -151,21 +140,21 @@ export function McpPage() {
     act(
       `${s.serverId}:toggle`,
       () => rpc('mcp.serverToggle', { serverId: s.serverId, enabled }),
-      `「${s.name}」已${enabled ? '启用' : '停用'}`,
+
     );
 
   const approve = (s: McpServer) =>
     act(
       `${s.serverId}:approve`,
       () => rpc('mcp.serverApprove', { serverId: s.serverId, decidedBy: 'local' }),
-      `「${s.name}」已批准，${s.toolCounts.candidate} 个工具进入活跃集`,
+
     );
 
   const reprobe = (s: McpServer) =>
     act(
       `${s.serverId}:refresh`,
       () => rpc('mcp.serverRefresh', { serverId: s.serverId }),
-      `「${s.name}」已重新探针`,
+
     );
 
   const remove = (s: McpServer) =>
@@ -177,7 +166,7 @@ export function McpPage() {
           decidedBy: 'local',
           reason: 'settings-ui',
         }),
-      `「${s.name}」已撤销`,
+
     );
 
   const submitAdd = async () => {
@@ -204,7 +193,6 @@ export function McpPage() {
     const command = next.command.trim();
     const args = next.args.trim().split(/\s+/).filter(Boolean);
     setError(null);
-    setNotice(null);
     if (!NAME_RE.test(name)) {
       setError('名称仅允许字母、数字、下划线与连字符');
       return;
@@ -224,8 +212,6 @@ export function McpPage() {
       await load();
       if (probeFailed) {
         setError(`「${name}」注册成功但探针失败：${probeError || '未知原因'}`);
-      } else {
-        setNotice(`「${name}」已注册并完成探针（候选待批准）`);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '注册失败');
@@ -259,18 +245,18 @@ export function McpPage() {
   };
 
   const renderRow = (s: McpServer) => {
-    const pill = STATUS_PILL[s.status];
     const removing = pendingRemove === s.serverId;
     return (
-      <div className="sg-mcp-row" key={s.serverId}>
-        <span className="sg-mcp-server-icon"><IconServer size={16} /></span>
+      <div className="sg-mcp-row" key={s.serverId} title={`${s.transport} · ${[s.command, ...s.args].join(' ')}`}>
+        <span className="sg-mcp-server-icon">
+          <IconServer size={16} />
+          <i className={`sg-mcp-status-dot sg-mcp-status-dot--${s.status}`} />
+        </span>
         <div className="sg-mcp-row-copy">
           <strong>{s.name}</strong>
           <span>{stateLine(s)}</span>
-          <code>{`${s.transport} · ${[s.command, ...s.args].join(' ')}`}</code>
         </div>
         <div className="sg-mcp-row-actions">
-          <StatusPill kind={pill.kind} label={pill.label} />
           {s.status === 'active' ? (
             <SettingsToggle
               label={`启用 ${s.name}`}
@@ -342,6 +328,12 @@ export function McpPage() {
               <SettingsRow title="类型" description="当前版本支持本地 stdio 服务器">
                 <select className="sg-select" aria-label="MCP 类型" value="stdio" disabled><option value="stdio">stdio（本地命令）</option></select>
               </SettingsRow>
+              <SettingsRow title="超时时间" description="由系统按操作类型设置安全上限">
+                <input className="sg-input" aria-label="MCP 超时时间" value="系统默认" readOnly />
+              </SettingsRow>
+              <SettingsRow title="协议版本" description="连接时与服务器自动协商">
+                <select className="sg-select" aria-label="MCP 协议版本" value="auto" disabled><option value="auto">自动（推荐）</option></select>
+              </SettingsRow>
               <SettingsRow title="启动命令" htmlFor="sg-mcp-command" description="用于拉起 MCP 服务器进程">
                 <input id="sg-mcp-command" className="sg-input" value={form.command} onChange={(event) => setForm((current) => ({ ...current, command: event.target.value }))} placeholder="npx" />
               </SettingsRow>
@@ -389,7 +381,6 @@ export function McpPage() {
       </div>
 
       {error ? <div className="sg-banner sg-banner--error" role="alert">操作失败：{error}</div> : null}
-      {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
 
       {loading && items.length === 0 ? (
         <div className="sg-mcp-list" aria-busy="true">

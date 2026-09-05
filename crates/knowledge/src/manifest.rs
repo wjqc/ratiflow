@@ -625,6 +625,10 @@ pub fn manifest_create(store: &Store, params: &Value) -> Result<Value, Error> {
         "document" => {
             let raw = str_field(params, "body")?;
             let body = normalize_body(&raw);
+            // 秘密扫描前置（§16 附件命中拒绝落盘）：明文先进 git 工作区，必须在写盘前拦截。
+            if sg_store::scan::has_high_risk(&sg_store::scan::scan(body.as_bytes())) {
+                return Err(Error::Message("object_contains_secrets".into()));
+            }
             let (digest, stable) = document_identity(&body);
             (
                 format!("knowledge/attachments/{}/source.md", stable),

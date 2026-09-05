@@ -49,22 +49,16 @@ test('G1 开启→新建→搜索→打开→编辑', async () => {
   await createProject();
   await e2e.gotoSettings('memory');
 
-  // 全局 feature flag 默认关闭：开关只读并给出说明（§3.3/§3.6 disabled 态）。
+  // 工作区记忆开关（项目级偏好，无全局门禁）。
   const sw = e2e.window.getByRole('switch', { name: /启用记忆注入/ });
   await expect(sw).toBeVisible({ timeout: 15000 });
-  await expect(sw).toBeDisabled();
-  await expect(e2e.window.getByText('功能由当前版本/管理员关闭')).toBeVisible();
-
-  // 打开全局 flag（内部构建语义）后开关可用。
-  await e2e.rpc('settings.update', { patches: [{ key: 'memory.featureEnabled', value: true }] });
-  await e2e.gotoSettings('app-general');
-  await e2e.gotoSettings('memory');
-  await expect(sw).toBeEnabled({ timeout: 10000 });
+  await expect(sw).toBeEnabled();
   await sw.click();
   await expect(sw).toBeChecked();
 
   // 新建记忆。
-  await e2e.window.getByRole('button', { name: '新建记忆' }).click();
+  await e2e.window.getByRole('button', { name: '更多记忆操作' }).click();
+  await e2e.window.getByRole('menuitem', { name: '新建记忆' }).click();
   const form = e2e.window.getByRole('form', { name: '新建记忆' });
   await form.getByLabel('标题').fill('部署健康检查');
   await form.getByLabel('正文（Markdown）').fill('部署前必须检查健康端点与日志。');
@@ -104,13 +98,11 @@ test('G2/G3 Run 上下文记忆证据 + 归档后不再采用', async () => {
   await e2e.rpc('memory.settingsUpdate', {
     projectId, settings: { enabled: true }, expectedRevision: 1, idempotencyKey: 'g2-enable',
   });
-  await e2e.rpc('settings.update', { patches: [{ key: 'memory.featureEnabled', value: true }] });
   const created = await e2e.rpc<{ memoryId: string }>('memory.create', {
     projectId, title: 'G2 记忆', kind: 'fact', body: '部署前检查快照。',
     idempotencyKey: 'g2-create',
   });
   const wi = await e2e.rpc<{ id: string }>('workitem.create', { projectId, title: 'G2 工作项', description: '' });
-  await e2e.rpc('settings.update', { patches: [{ key: 'memory.featureEnabled', value: true }] });
 
   const run1 = await e2e.rpc<{ runId: string }>('agent.start', {
     workItemId: wi.id, goal: '部署 检查', toolAllowlist: ['read_file'],
@@ -268,7 +260,7 @@ test('G9 1180×760/1440×900 × light/dark 无裁切 + 键盘路径 + AX 名称'
       );
       expect(overflow, `${theme} ${viewport.width}×${viewport.height} 不应出现横向滚动`).toBeLessThanOrEqual(0);
       await expect(e2e.window.getByRole('searchbox', { name: '搜索记忆' })).toBeVisible();
-      await expect(e2e.window.getByRole('button', { name: '新建记忆' })).toBeVisible();
+      await expect(e2e.window.getByRole('button', { name: '更多记忆操作' })).toBeVisible();
       const row = e2e.window.locator('#sg-memory-list-zone button', { hasText: 'G9 布局条目' });
       await expect(row).toBeVisible({ timeout: 10000 });
       await e2e.window.screenshot({
@@ -326,7 +318,6 @@ test('G7 候选沉淀：capture → 待确认区 → 接受（可编辑）激活
   e2e.window.on('pageerror', (err) => consoleErrors.push(String(err)));
 
   const projectId = await createProject();
-  await e2e.rpc('settings.update', { patches: [{ key: 'memory.featureEnabled', value: true }] });
   await e2e.rpc('memory.settingsUpdate', {
     projectId,
     settings: { enabled: true, captureMode: 'suggest' },

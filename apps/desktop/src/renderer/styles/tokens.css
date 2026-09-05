@@ -1363,6 +1363,7 @@ button.sg-step { cursor: pointer; }
 .sg-gate-summary-label { font-size: 11.5px; color: var(--sg-text-secondary); margin-bottom: 5px; }
 .sg-gate-req { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--sg-text-primary); padding: 2px 0; }
 .sg-gate-req svg { color: #1a9c6b; flex-shrink: 0; }
+.sg-gate-req--missing { color: var(--sg-status-error); }
 .sg-gate-summary-elapsed { font-size: 12px; color: var(--sg-text-secondary); }
 
 /* Agent 执行详情横条 */
@@ -2610,12 +2611,14 @@ button.sg-step { cursor: pointer; }
   --sg-setting-surface: #ffffff;
   --sg-setting-hover: #f6f8fb;
   --sg-setting-shadow: 0 1px 2px rgba(24, 32, 48, 0.04);
+  --sg-reference-row: #f0f1f3;
 }
 
 [data-theme='dark'] {
   --sg-setting-surface: #1d1f23;
   --sg-setting-hover: #25272c;
   --sg-setting-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  --sg-reference-row: #232529;
 }
 
 .sg-settings-body {
@@ -2947,6 +2950,7 @@ button.sg-step { cursor: pointer; }
   border-radius: 999px;
   background: var(--sg-border-strong);
   transition: background 150ms ease;
+  pointer-events: none;
 }
 
 .sg-setting-toggle > span::after {
@@ -3124,6 +3128,7 @@ button.sg-step { cursor: pointer; }
   width: min(100%, 860px);
   max-width: 860px;
   gap: 24px;
+  margin-top: 20px;
 }
 
 .sg-reference-page-head {
@@ -3281,13 +3286,14 @@ button.sg-step { cursor: pointer; }
 
 .sg-memory-files {
   min-height: 180px;
+  margin-top: 32px;
 }
 
 .sg-reference-page .sg-memory-list {
   gap: 0;
   overflow: hidden;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--sg-setting-surface) 58%, var(--sg-bg-subtle));
+  background: var(--sg-reference-row);
 }
 
 .sg-reference-page .sg-memory-row {
@@ -3329,7 +3335,7 @@ button.sg-step { cursor: pointer; }
   padding: 28px;
   border: 0;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--sg-setting-surface) 58%, var(--sg-bg-subtle));
+  background: var(--sg-reference-row);
   color: var(--sg-text-secondary);
   text-align: center;
 }
@@ -3371,14 +3377,18 @@ button.sg-step { cursor: pointer; }
   min-height: 68px;
   padding: 11px 14px;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--sg-setting-surface) 58%, var(--sg-bg-subtle));
+  background: var(--sg-reference-row);
 }
 
 .sg-mcp-row-copy { display: grid; gap: 3px; min-width: 0; }
 .sg-mcp-row-copy strong { font-size: 13px; font-weight: 600; }
 .sg-mcp-row-copy span { color: var(--sg-text-secondary); font-size: 11.5px; }
-.sg-mcp-row-copy code { overflow: hidden; color: var(--sg-text-secondary); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .sg-mcp-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.sg-mcp-server-icon { position: relative; }
+.sg-mcp-status-dot { position: absolute; right: -1px; bottom: -1px; width: 7px; height: 7px; border: 1px solid var(--sg-reference-row); border-radius: 50%; background: var(--sg-text-secondary); }
+.sg-mcp-status-dot--active { background: var(--sg-status-passed); }
+.sg-mcp-status-dot--candidate { background: var(--sg-status-running); }
+.sg-mcp-status-dot--probe_failed, .sg-mcp-status-dot--revoked { background: var(--sg-status-error); }
 
 .sg-reference-breadcrumb {
   justify-self: start;
@@ -3463,6 +3473,16 @@ button.sg-step { cursor: pointer; }
 }
 
 .sg-mcp-create-form { margin: 0 -16px; }
+.sg-mcp-create-form .sg-set-item {
+  grid-template-columns: 1fr;
+  gap: 7px;
+  min-height: 0;
+  padding: 11px 18px;
+}
+.sg-mcp-create-form .sg-set-item-control { justify-content: flex-start; }
+.sg-mcp-create-form .sg-set-item-control .sg-input,
+.sg-mcp-create-form .sg-set-item-control .sg-select { width: min(100%, 240px); }
+.sg-mcp-create-form .sg-set-item:nth-child(n + 5) .sg-set-item-control .sg-input { width: 100%; }
 .sg-mcp-json-editor { display: grid; gap: 8px; padding: 0 2px 18px; }
 .sg-mcp-json-editor label { font-size: 12px; font-weight: 600; }
 .sg-mcp-json-editor textarea {

@@ -342,6 +342,9 @@ pub fn request_release(
             ));
         }
     }
+    // 1.5 交付物门禁（§交付物）：本关要求的工件类型须存在且已冻结进当前基线，
+    // 否则不可进入审批（fail-closed）。
+    let deliverable = crate::deliverable::require_for_release(store, workitem_id, gate)?;
     let attempt = attempt::advance_to_review_ready(store, workitem_id, gate)?;
     if attempt.state == "awaiting_user_approval" {
         if let Some(existing) = pending_rr_for_attempt(store, &attempt.id)? {
@@ -456,7 +459,7 @@ pub fn request_release(
             "digest": digest,
         }),
     )?;
-    Ok(
+    let mut result =
         serde_json::to_value(rr_by_id(store, &rr_id)?.unwrap_or_else(|| ReleaseRequest {
             id: rr_id.clone(),
             stage_attempt_id: String::new(),
@@ -467,8 +470,11 @@ pub fn request_release(
             created_at: String::new(),
             decided_at: None,
         }))
-        .unwrap_or_default(),
-    )
+        .unwrap_or_default();
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("deliverable".into(), deliverable);
+    }
+    Ok(result)
 }
 
 fn package_by_digest(

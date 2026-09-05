@@ -1080,7 +1080,6 @@ mod tests {
 #[cfg(test)]
 mod g5g6_tests {
     use super::*;
-    use crate::flags;
     use serde_json::json;
     use std::path::PathBuf;
     use std::process::Command;
@@ -1253,15 +1252,10 @@ mod g5g6_tests {
         assert_eq!(state2, "no_indexable_files", "A21 纯二进制终态");
     }
 
-    /// G6/A39-A40：flag 门 + GC 暂停 + 回退演练。
+    /// G6/A39-A40：GC 暂停 + 回退演练（manifest flag 已随「无版本开关」决策移除，路径常开）。
     #[test]
     fn flags_gc_pause_and_rollback_drill() {
         let (store, _t, root) = setup();
-        // 默认关闭。
-        assert!(!flags::manifest_enabled(&store).unwrap());
-
-        set_flag(&store, "knowledge.manifestEnabled", true);
-        assert!(flags::manifest_enabled(&store).unwrap());
 
         // gen1 激活。
         write_manifest(&store, &root);

@@ -328,7 +328,7 @@ mod tests {
             ).unwrap();
         }
         let store = Store::open(dir.path(), "test").unwrap();
-        assert_eq!(store.schema_version().unwrap(), 27);
+        assert_eq!(store.schema_version().unwrap(), 28);
         store.with_conn(|c| {
             // 来源：origin/local/legacy_local/present。
             let (origin, legacy, present): (String, i64, i64) = c.query_row(

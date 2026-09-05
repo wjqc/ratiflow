@@ -3377,6 +3377,127 @@
       ],
       "result": "value",
       "desc": "M6:列出工具候选/活跃/撤销状态与 schema digest"
+    },
+    {
+      "name": "gate.deliverableStatus",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "skill.get",
+      "params": [
+        {
+          "name": "skillId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.create",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "source",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.update",
+      "params": [
+        {
+          "name": "skillId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "expectedRevision",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.setEnabled",
+      "params": [
+        {
+          "name": "skillId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.remove",
+      "params": [
+        {
+          "name": "skillId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [

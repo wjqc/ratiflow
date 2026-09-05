@@ -101,7 +101,6 @@ pub fn fingerprint(parts: &serde_json::Value) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct MemorySettings {
     pub project_id: String,
-    pub feature_enabled: bool,
     pub enabled: bool,
     pub capture_mode: String,
     pub max_entries: i64,

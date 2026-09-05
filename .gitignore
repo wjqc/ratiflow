@@ -27,3 +27,6 @@ __pycache__/
 /findings.md
 /progress.md
 /task_plan.md
+
+# 会话工具本地状态
+/.zcode/

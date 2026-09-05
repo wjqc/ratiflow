@@ -9,6 +9,7 @@ import { ModelsPage } from './ModelsPage';
 import { ToolsPage } from './ToolsPage';
 import { ExecutionPage } from './ExecutionPage';
 import { IntegrationsPage } from './IntegrationsPage';
+import { SkillsPage } from './SkillsPage';
 import { MemoryPage } from './MemoryPage';
 import { DiagnosticsPage } from '../DiagnosticsPage';
 
@@ -30,12 +31,19 @@ describe('设置页接线', () => {
         case 'project.list': return ok({ items: [{ id: 'prj_1', name: '示例项目', archivedAt: null }] });
         case 'memory.settingsGet':
           return ok({
-            projectId: 'prj_1', featureEnabled: true, enabled: false, captureMode: 'off',
+            projectId: 'prj_1', enabled: false, captureMode: 'off',
             maxEntries: 8, maxBytes: 12288, staleAfterDays: 180, revision: 1,
             updatedAt: '2026-09-04T09:30:00.000Z', updatedBy: 'local',
           });
         case 'memory.list':
           return ok({ projectId: 'prj_1', items: [], counts: { active: 0 }, cursor: null });
+        case 'skill.list':
+          return ok({
+            items: [
+              { id: 'skill_1', name: 'deploy-check', description: '部署检查清单', bodyBytes: 120, enabled: true, source: 'manual', revision: 1, createdAt: '', updatedAt: '' },
+              { id: 'skill_2', name: 'prd-writer', description: '', bodyBytes: 80, enabled: false, source: 'import', revision: 2, createdAt: '', updatedAt: '' },
+            ],
+          });
         case 'model.usage':
           return ok({
             tokensIn: 12000,
@@ -128,7 +136,7 @@ describe('设置页接线', () => {
     window.removeEventListener('sg:appearance-changed', onAppearance);
   });
 
-  it('S12 记忆页：开关/计数/空状态与禁用态', async () => {
+  it('S12 记忆页：开关/计数/空状态', async () => {
     render(<MemoryPage />);
     await waitFor(() => expect(screen.getByRole('switch', { name: /启用记忆注入/ })).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText(/0 条记忆/)).toBeInTheDocument());
@@ -136,24 +144,22 @@ describe('设置页接线', () => {
     const sw = screen.getByRole('switch', { name: /启用记忆注入/ }) as HTMLInputElement;
     expect(sw.checked).toBe(false);
     await waitFor(() => expect(screen.getByText(/当前项目未开启记忆/)).toBeInTheDocument());
+    // 无全局门禁：设置加载完成后开关可操作。
+    expect(sw.disabled).toBe(false);
   });
 
-  it('S12 记忆页：全局关闭时开关只读并给出说明', async () => {
-    rpcMock.mockImplementation((method: string) => {
-      if (method === 'project.list') return ok({ items: [{ id: 'prj_1', name: '示例项目', archivedAt: null }] });
-      if (method === 'memory.settingsGet')
-        return ok({
-          projectId: 'prj_1', featureEnabled: false, enabled: false, captureMode: 'off',
-          maxEntries: 8, maxBytes: 12288, staleAfterDays: 180, revision: 1,
-          updatedAt: '2026-09-04T09:30:00.000Z', updatedBy: 'local',
-        });
-      if (method === 'memory.list') return ok({ projectId: 'prj_1', items: [], counts: {}, cursor: null });
-      return ok({});
-    });
-    render(<MemoryPage />);
-    await waitFor(() => expect(screen.getByText('功能由当前版本/管理员关闭')).toBeInTheDocument());
-    const sw = screen.getByRole('switch', { name: /启用记忆注入/ }) as HTMLInputElement;
-    expect(sw.disabled).toBe(true);
+  it('S25 技能页：列表/搜索/启停开关', async () => {
+    render(<SkillsPage />);
+    await waitFor(() => expect(screen.getByText('deploy-check')).toBeInTheDocument());
+    expect(screen.getByText('2 个技能')).toBeInTheDocument();
+    // 未启用技能也在列表中（开关未勾选）。
+    expect(screen.getByText('prd-writer')).toBeInTheDocument();
+    const toggles = screen.getAllByRole('switch');
+    expect(toggles.length).toBe(2);
+    fireEvent.click(toggles[0]);
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith('skill.setEnabled', expect.objectContaining({ skillId: 'skill_1', enabled: false })),
+    );
   });
 
   it('工具页策略行来自 tool.list', async () => {

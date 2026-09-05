@@ -69,7 +69,6 @@ pub fn select_for_context(
     query_terms: &[String],
 ) -> Result<(Vec<Value>, Vec<Value>), sg_store::Error> {
     let settings = repository::settings_get(store, project_id)?;
-    let feature = repository::feature_enabled(store)?;
     let now = sg_store::timefmt::now();
 
     // 收集候选与排除原因（单连接只读；正文读取在连接外逐条进行）。
@@ -119,8 +118,8 @@ pub fn select_for_context(
         Ok((raws, conflicted))
     })?;
 
-    // feature/项目开关关闭：全部候选以 disabled 排除（§16.2：不报假成功）。
-    if !feature || !settings.enabled {
+    // 项目开关关闭：全部候选以 disabled 排除（§16.2：不报假成功）。
+    if !settings.enabled {
         for r in &raws {
             excluded.push(item(
                 &r.id,

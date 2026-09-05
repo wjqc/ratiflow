@@ -789,7 +789,13 @@ mod tests {
             )
             .unwrap();
         }
-        let art = sg_artifact::create_artifact(store, workitem_id, "doc", gate).unwrap();
+        let art = sg_artifact::create_artifact(
+            store,
+            workitem_id,
+            crate::deliverable::required_kind(crate::Gate::parse(gate).unwrap()),
+            gate,
+        )
+        .unwrap();
         let rev = sg_artifact::create_draft(store, &art.id, "内容").unwrap();
         sg_artifact::add_review(store, &rev.id, "r", "approved", "", None).unwrap();
         sg_artifact::freeze(

@@ -18,27 +18,6 @@ pub use model::{
 
 use sg_store::Store;
 
-/// 全局 rollout flag 写入（app_settings；默认 false；测试/E2E 显式开启）。
-pub fn set_feature_enabled(
-    store: &Store,
-    enabled: bool,
-    updated_by: &str,
-) -> Result<(), sg_store::Error> {
-    store.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO app_settings(scope, project_id, key, value_json, revision, updated_at, updated_by)
-             VALUES ('global', '', 'memory.featureEnabled', ?1, 1, ?2, ?3)
-             ON CONFLICT(scope, project_id, key) DO UPDATE SET
-                value_json = excluded.value_json,
-                revision = revision + 1,
-                updated_at = excluded.updated_at,
-                updated_by = excluded.updated_by",
-            rusqlite::params![serde_json::json!(enabled).to_string(), sg_store::timefmt::now(), updated_by],
-        )?;
-        Ok(())
-    })
-}
-
 /// 设置更新（CAS；MEM-001）：校验策略范围 → 同事务 audit/outbox/receipt。
 pub fn settings_update(
     store: &Store,
@@ -85,7 +64,6 @@ pub fn settings_update(
         "patch": patch,
         "projectId": project_id,
     }));
-    let feature = repository::feature_enabled(store)?;
     let updated = store.with_tx_immediate(|tx| {
         repository::require_project(tx, project_id)?;
         // 惰性建行后按 CAS 更新（expectedRevision=0 表示尚未初始化）。
@@ -150,7 +128,7 @@ pub fn settings_update(
             "memory.settings_changed",
             serde_json::json!({"projectId": project_id, "revision": expected_revision + 1}),
         )?;
-        let result = repository::query_settings_row(tx, project_id, feature)?;
+        let result = repository::query_settings_row(tx, project_id)?;
         mutation::receipt_put(
             tx,
             idempotency_key,

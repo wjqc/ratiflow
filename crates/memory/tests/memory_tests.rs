@@ -76,7 +76,7 @@ fn assert_err_token<T>(result: Result<T, sg_store::Error>, token: &str) {
 #[test]
 fn migration_empty_db_reaches_v23() {
     let (store, _t) = open_store("sg-mem-mig");
-    assert_eq!(store.schema_version().unwrap(), 27);
+    assert_eq!(store.schema_version().unwrap(), 28);
     // v23 表存在。
     let n: i64 = store
         .with_conn(|c| {
@@ -128,7 +128,7 @@ fn migration_populated_v22_to_v23() {
         add_project_raw(&conn, "pj");
     }
     let store = Store::open(&t.path, "test").unwrap();
-    assert_eq!(store.schema_version().unwrap(), 27);
+    assert_eq!(store.schema_version().unwrap(), 28);
     store.quick_check().unwrap();
 }
 
@@ -789,14 +789,11 @@ fn backup_manifest_counts_memory() {
     assert_eq!((entries, objects), (1, 1));
 }
 
-/// 设置 CAS、范围校验与 feature flag 默认值（MEM-001/§6.1）。
+/// 设置 CAS 与范围校验（MEM-001/§6.1）。
 #[test]
 fn settings_cas_validation_and_default_flag() {
     let (store, _t) = open_store("sg-mem-settings");
     add_project(&store, "pj");
-    // feature flag 默认 false。
-    assert!(!mem::repository::feature_enabled(&store).unwrap());
-
     let s0 = mem::repository::settings_get(&store, "pj").unwrap();
     assert!(!s0.enabled);
     assert_eq!(s0.max_entries, 8);
@@ -864,7 +861,6 @@ fn context_selection_reasons_and_budget() {
     assert!(excluded.iter().all(|e| e["reason"] == "disabled"));
 
     // 开启 flag 与项目。
-    mem::set_feature_enabled(&store, true, "tester").unwrap();
     mem::settings_update(
         &store,
         "pj",
@@ -896,7 +892,6 @@ fn context_selection_reasons_and_budget() {
 fn context_selection_excludes_stale() {
     let (store, _t) = open_store("sg-mem-stale");
     add_project(&store, "pj");
-    mem::set_feature_enabled(&store, true, "tester").unwrap();
     mem::settings_update(
         &store,
         "pj",

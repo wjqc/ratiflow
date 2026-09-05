@@ -41,10 +41,10 @@ describe('MCP 服务器页', () => {
   it('按状态分组渲染并显示计数', async () => {
     mockList([ACTIVE, CANDIDATE]);
     render(<McpPage />);
-    await waitFor(() => expect(screen.getByRole('heading', { name: /已安装\s+1/ })).toBeInTheDocument());
-    expect(screen.getByRole('heading', { name: /待批准\s+1/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', { name: /已安装/ })).toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: /待批准/ })).toBeInTheDocument();
     expect(screen.getByText('codegraph')).toBeInTheDocument();
-    expect(screen.getByText(/stdio · \/usr\/local\/bin\/codegraph serve --mcp/)).toBeInTheDocument();
+    expect(screen.getByText(/已连接并可用/)).toBeInTheDocument();
     expect(screen.getByText('MCP 2')).toBeInTheDocument();
   });
 
@@ -61,8 +61,8 @@ describe('MCP 服务器页', () => {
       status: 'candidate', probeError: '',
     }]);
     render(<McpPage />);
-    await waitFor(() => expect(screen.getByRole('heading', { name: /待批准\s+1/ })).toBeInTheDocument());
-    expect(screen.getByText(/stdio · codegraph serve --mcp/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', { name: /待批准/ })).toBeInTheDocument());
+    expect(screen.getByText(/候选工具待批准/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '批准' })).toBeInTheDocument();
   });
 

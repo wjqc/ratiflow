@@ -105,7 +105,8 @@ fn bind_inline_secret(
     Ok(())
 }
 
-const PREFIXES: [&str; 28] = [
+const PREFIXES: [&str; 29] = [
+    "skill.",
     "settings.",
     "modelProvider.",
     "modelProfile.",
@@ -596,6 +597,64 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
         "backup.list" => {
             let v = settings::backup_ext::list(store).map_err(serr)?;
             Ok(json!({"items": v}))
+        }
+        "skill.list" => {
+            let v = settings::skills_ext::list(store).map_err(serr)?;
+            Ok(json!({"items": v}))
+        }
+        "skill.get" => {
+            let v = settings::skills_ext::get(store, s(p, "skillId")?).map_err(serr)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.body" => {
+            let body = settings::skills_ext::body(store, s(p, "skillId")?).map_err(serr)?;
+            Ok(json!({"body": body}))
+        }
+        "skill.create" => {
+            let name = s(p, "name")?;
+            let description = opt_s(p, "description").unwrap_or_default();
+            let body = s(p, "body")?;
+            let source = opt_s(p, "source").unwrap_or("manual");
+            let v = settings::skills_ext::create(store, name, description, body, source)
+                .map_err(serr)?;
+            changed(store, "skill", &v.id);
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.update" => {
+            let skill_id = s(p, "skillId")?;
+            let description = opt_s(p, "description");
+            let body = opt_s(p, "body");
+            let v = settings::skills_ext::update(
+                store,
+                skill_id,
+                description,
+                body,
+                n(p, "expectedRevision")?,
+            )
+            .map_err(serr)?;
+            changed(store, "skill", &v.id);
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.setEnabled" => {
+            let skill_id = s(p, "skillId")?;
+            let enabled = p
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| RpcError::new(ErrorCode::InvalidParams, "enabled required"))?;
+            let v = settings::skills_ext::set_enabled(
+                store,
+                skill_id,
+                enabled,
+                n(p, "expectedRevision")?,
+            )
+            .map_err(serr)?;
+            changed(store, "skill", &v.id);
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.remove" => {
+            settings::skills_ext::remove(store, s(p, "skillId")?, n(p, "expectedRevision")?)
+                .map_err(serr)?;
+            Ok(json!({"status": "removed"}))
         }
         "backup.create" => {
             let op = settings::operations::begin(store, "backup.create", false).map_err(serr)?;

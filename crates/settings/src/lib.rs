@@ -15,6 +15,7 @@ pub mod operations;
 pub mod policy_ext;
 pub mod profiles;
 pub mod settings;
+pub mod skills_ext;
 #[cfg(test)]
 mod tests;
 

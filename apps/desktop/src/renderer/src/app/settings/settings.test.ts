@@ -11,10 +11,10 @@ import {
 import { redactSecrets, REDACTED } from '../../lib/redact';
 
 describe('settings-routes', () => {
-  it('14 页路由全部注册且 id 唯一', () => {
+  it('15 页路由全部注册且 id 唯一', () => {
     const ids = SETTINGS_NAV.flatMap((g) => g.items.map((i) => i.id));
-    expect(ids.length).toBe(14);
-    expect(new Set(ids).size).toBe(14);
+    expect(ids.length).toBe(15);
+    expect(new Set(ids).size).toBe(15);
   });
 
   it('S24 MCP 服务器路由真实接入且位于 Agent 分组', () => {

@@ -63,7 +63,6 @@ fn add_project(store: &Store, id: &str) {
 }
 
 fn enable_suggest(store: &Store, project: &str) {
-    sg_memory::set_feature_enabled(store, true, "tester").unwrap();
     sg_memory::settings_update(
         store,
         project,
@@ -85,7 +84,6 @@ fn start_job_gate_conditions() {
     add_project(&store, "pj");
 
     // capture_mode=off → memory_disabled。
-    sg_memory::set_feature_enabled(&store, true, "tester").unwrap();
     assert_err_token(
         mem::capture::start_job(&store, "pj", "run-pj", "k1", "", 0),
         "memory_disabled",

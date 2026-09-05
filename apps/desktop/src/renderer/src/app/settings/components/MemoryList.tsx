@@ -3,6 +3,7 @@
 // （详情/状态在抽屉内查看）。loading 出 5 行 skeleton；语义化 list/button。
 import type { MemoryListItem } from '../types';
 import { SettingsToggle } from './SettingsRow';
+import { IconDoc } from '../../../components/Icons';
 
 const STATUS_TONE: Record<string, string> = {
   proposed: 'sg-status--pending',
@@ -54,14 +55,7 @@ export function MemoryList({
             aria-current={item.id === activeId ? 'true' : undefined}
           >
             <span className="sg-memory-fileicon" aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M4 1.5h5.2L13 5.3V14a.9.9 0 0 1-.9.9H4a.9.9 0 0 1-.9-.9V2.4c0-.5.4-.9.9-.9Z"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                />
-                <path d="M9 1.8V5h3.2" stroke="currentColor" strokeWidth="1.2" />
-              </svg>
+              <IconDoc size={16} />
             </span>
             <button
               type="button"
