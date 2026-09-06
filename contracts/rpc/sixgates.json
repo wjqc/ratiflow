@@ -4002,6 +4002,273 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "agentTeam.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "agentTeam.create",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentTeam.createVersion",
+      "params": [
+        {
+          "name": "teamId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "leadRoleKey",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "members",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "maxConcurrency",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "reviewPolicy",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "fallbackMode",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentTeam.activate",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "agentTeam.resolvePreview",
+      "params": [
+        {
+          "name": "teamVersionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roleKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "contextPolicy.createVersion",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gateId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "allowedTools",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "sources",
+          "type": "array",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "contextPolicy.activate",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "contextPolicy.activeList",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "clientRequest",
+          "type": "array",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "middlewareProfile.createVersion",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "steps",
+          "type": "array",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "middlewareProfile.activate",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "middlewareProfile.validate",
+      "params": [
+        {
+          "name": "steps",
+          "type": "array",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.versionList",
+      "params": [
+        {
+          "name": "skillId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.createVersion",
+      "params": [
+        {
+          "name": "skillId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.activateVersion",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.deprecateVersion",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.revokeVersion",
+      "params": [
+        {
+          "name": "versionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.bindVersion",
+      "params": [
+        {
+          "name": "skillVersionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "profileVersionId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.activeList",
+      "params": [
+        {
+          "name": "profileVersionId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [

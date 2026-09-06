@@ -695,6 +695,58 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                 .map_err(serr)?;
             Ok(json!({"status": "removed"}))
         }
+        // --- M4-04：Skill 不可变版本生命周期（ADR-038 §6.9）---
+        "skill.versionList" => {
+            let items =
+                settings::skills_ext::version_list(store, s(p, "skillId")?).map_err(serr)?;
+            Ok(json!({ "items": items }))
+        }
+        "skill.createVersion" => {
+            let v = settings::skills_ext::create_version(
+                store,
+                s(p, "skillId")?,
+                s(p, "body")?,
+                p.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+            .map_err(serr)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.activateVersion" => {
+            let v =
+                settings::skills_ext::activate_version(store, s(p, "versionId")?).map_err(serr)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.deprecateVersion" => {
+            let v =
+                settings::skills_ext::deprecate_version(store, s(p, "versionId")?).map_err(serr)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.revokeVersion" => {
+            let v =
+                settings::skills_ext::revoke_version(store, s(p, "versionId")?).map_err(serr)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.bindVersion" => {
+            let id = settings::skills_ext::bind_version(
+                store,
+                s(p, "skillVersionId")?,
+                p.get("profileVersionId").and_then(|v| v.as_str()),
+            )
+            .map_err(serr)?;
+            Ok(json!({ "bindingId": id }))
+        }
+        "skill.activeList" => {
+            let items = settings::skills_ext::active_version_bodies(
+                store,
+                p.get("profileVersionId").and_then(|v| v.as_str()),
+            )
+            .map_err(serr)?;
+            let items: Vec<serde_json::Value> = items
+                .into_iter()
+                .map(|(name, body)| json!({"name": name, "bodyBytes": body.len(), "body": body}))
+                .collect();
+            Ok(json!({ "items": items }))
+        }
         "backup.create" => {
             let op = settings::operations::begin(store, "backup.create", false).map_err(serr)?;
             let _ = settings::operations::progress(

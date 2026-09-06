@@ -1124,6 +1124,7 @@ dependencies = [
  "sg-knowledge",
  "sg-memory",
  "sg-store",
+ "sha2",
 ]
 
 [[package]]

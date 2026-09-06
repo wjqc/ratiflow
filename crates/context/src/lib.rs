@@ -9,6 +9,7 @@ pub mod builder;
 pub mod freeze;
 pub mod legacy_migrate;
 pub mod manifest;
+pub mod policy;
 
 pub use builder::{build_manifest, BuildInput};
 

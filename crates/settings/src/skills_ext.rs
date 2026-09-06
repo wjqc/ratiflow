@@ -506,3 +506,354 @@ mod tests {
         let _ = global;
     }
 }
+
+// ---------------- M4-04（EvoFlow 方案 §6.9 / ADR-038）：Skill 不可变版本生命周期 ----------------
+// identity（skills 行）+ immutable version（skill_versions）：draft → active → deprecated → revoked。
+// 更新正文创建新 version 不覆盖；revoked 立即阻止未来注入；绑定指向具体 version。
+// 注入优先走 active version 正文；无版本的 legacy 技能回退 skills 行（兼容期）。
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillVersion {
+    pub id: String,
+    pub skill_id: String,
+    pub version_no: i64,
+    pub status: String,
+    pub body_object_sha256: String,
+    pub body_bytes: i64,
+    pub description: String,
+    pub content_digest: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn version_row(conn: &rusqlite::Connection, id: &str) -> SettingsResult<SkillVersion> {
+    conn.query_row(
+        "SELECT id, skill_id, version_no, status, body_object_sha256, body_bytes, description,
+                content_digest, created_at, updated_at
+         FROM skill_versions WHERE id=?1",
+        [id],
+        |r| {
+            Ok(SkillVersion {
+                id: r.get(0)?,
+                skill_id: r.get(1)?,
+                version_no: r.get(2)?,
+                status: r.get(3)?,
+                body_object_sha256: r.get(4)?,
+                body_bytes: r.get(5)?,
+                description: r.get(6)?,
+                content_digest: r.get(7)?,
+                created_at: r.get(8)?,
+                updated_at: r.get(9)?,
+            })
+        },
+    )
+    .map_err(|_| SettingsError::new("NOT_FOUND", format!("技能版本 {id} 不存在")))
+}
+
+fn compute_version_digest(body_sha: &str, description: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("skv1|{body_sha}|{}", description.trim()).as_bytes());
+    sg_store::ids::hex(&hasher.finalize())
+}
+
+/// 创建 draft 版本（body 经秘密扫描入 objects）。同内容幂等返回既有版本。
+pub fn create_version(
+    store: &Store,
+    skill_id: &str,
+    body: &str,
+    description: &str,
+) -> SettingsResult<SkillVersion> {
+    let _ = get(store, skill_id)?; // identity 必须存在
+    let (body_sha, body_bytes) = put_body(store, body)?;
+    let digest = compute_version_digest(&body_sha, description);
+    let existing: Option<String> = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id FROM skill_versions WHERE skill_id=?1 AND content_digest=?2",
+                    rusqlite::params![skill_id, digest],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok())
+        })
+        .unwrap_or(None);
+    if let Some(id) = existing {
+        return store
+            .with_conn(|conn| version_row(conn, &id).map_err(|e| Error::Message(e.to_string())))
+            .map_err(store_err);
+    }
+    let id = ids::new_id("skv");
+    let now = timefmt::now();
+    store.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO skill_versions(id, skill_id, version_no, status, body_object_sha256, body_bytes,
+                description, content_digest, created_at, updated_at)
+             VALUES (?1,?2,(SELECT COALESCE(MAX(version_no),0)+1 FROM skill_versions WHERE skill_id=?2),
+                'draft',?3,?4,?5,?6,?7,?7)",
+            rusqlite::params![id, skill_id, body_sha, body_bytes, description.trim(), digest, now],
+        )
+        .map_err(Error::from)
+    })
+    .map_err(store_err)?;
+    store
+        .with_conn(|conn| version_row(conn, &id).map_err(|e| Error::Message(e.to_string())))
+        .map_err(store_err)
+}
+
+/// 状态推进（统一入口；合法迁移表内）。active 单份：激活时同 skill 旧 active → deprecated。
+fn transition_version(store: &Store, version_id: &str, to: &str) -> SettingsResult<SkillVersion> {
+    let allowed: &[(&str, &str)] = &[
+        ("draft", "active"),
+        ("active", "deprecated"),
+        ("deprecated", "revoked"),
+        ("active", "revoked"),
+        ("draft", "revoked"),
+    ];
+    let serr = |e: sg_store::Error| SettingsError::new("INTERNAL", e.to_string());
+    let cur = version_by_id(store, version_id).map_err(|e| match e {
+        sg_store::Error::Message(m) => SettingsError::new("NOT_FOUND", m),
+        other => serr(other),
+    })?;
+    if !allowed.iter().any(|(f, t)| *f == cur.status && *t == to) {
+        return Err(SettingsError::new(
+            "INVALID_PARAMS",
+            format!("非法状态迁移：{} -> {}", cur.status, to),
+        ));
+    }
+    let now = timefmt::now();
+    store
+        .with_conn(|conn| {
+            if to == "active" {
+                conn.execute(
+                    "UPDATE skill_versions SET status='deprecated', updated_at=?1
+                     WHERE skill_id=?2 AND status='active'",
+                    rusqlite::params![now, cur.skill_id],
+                )?;
+            }
+            conn.execute(
+                "UPDATE skill_versions SET status=?1, updated_at=?2 WHERE id=?3",
+                rusqlite::params![to, now, version_id],
+            )?;
+            Ok(())
+        })
+        .map_err(serr)?;
+    version_by_id(store, version_id).map_err(|e| match e {
+        sg_store::Error::Message(m) => SettingsError::new("INTERNAL", m),
+        other => serr(other),
+    })
+}
+
+fn version_by_id(store: &Store, id: &str) -> Result<SkillVersion, sg_store::Error> {
+    store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT id, skill_id, version_no, status, body_object_sha256, body_bytes, description,
+                    content_digest, created_at, updated_at
+             FROM skill_versions WHERE id=?1",
+            [id],
+            |r| {
+                Ok(SkillVersion {
+                    id: r.get(0)?,
+                    skill_id: r.get(1)?,
+                    version_no: r.get(2)?,
+                    status: r.get(3)?,
+                    body_object_sha256: r.get(4)?,
+                    body_bytes: r.get(5)?,
+                    description: r.get(6)?,
+                    content_digest: r.get(7)?,
+                    created_at: r.get(8)?,
+                    updated_at: r.get(9)?,
+                })
+            },
+        )
+        .map_err(|_| sg_store::Error::Message(format!("技能版本 {id} 不存在")))
+    })
+}
+
+pub fn activate_version(store: &Store, version_id: &str) -> SettingsResult<SkillVersion> {
+    transition_version(store, version_id, "active")
+}
+
+pub fn deprecate_version(store: &Store, version_id: &str) -> SettingsResult<SkillVersion> {
+    transition_version(store, version_id, "deprecated")
+}
+
+/// revoked：立即阻止未来注入；已运行 Run 按冻结事实保留（历史回放不受影响）。
+pub fn revoke_version(store: &Store, version_id: &str) -> SettingsResult<SkillVersion> {
+    transition_version(store, version_id, "revoked")
+}
+
+pub fn version_list(store: &Store, skill_id: &str) -> SettingsResult<Vec<SkillVersion>> {
+    let ids: Vec<String> = store
+        .with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id FROM skill_versions WHERE skill_id=?1 ORDER BY version_no")?;
+            let rows = stmt.query_map([skill_id], |r| r.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .map_err(|e| SettingsError::new("INTERNAL", e.to_string()))?;
+    ids.into_iter()
+        .map(|id| {
+            version_by_id(store, &id).map_err(|e| SettingsError::new("INTERNAL", e.to_string()))
+        })
+        .collect()
+}
+
+/// 绑定到具体版本（profile_version_id NULL = 全局）。
+pub fn bind_version(
+    store: &Store,
+    skill_version_id: &str,
+    profile_version_id: Option<&str>,
+) -> SettingsResult<String> {
+    if let Some(pv) = profile_version_id {
+        // 引用校验（直查表，避免 settings→agent 依赖环）。
+        let ok = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM agent_profile_versions WHERE id=?1",
+                    [pv],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(Error::from)
+            })
+            .map_err(store_err)?;
+        if ok == 0 {
+            return Err(SettingsError::new(
+                "INVALID_PARAMS",
+                "profile version 不存在",
+            ));
+        }
+    }
+    let id = ids::new_id("skb");
+    store.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO skill_bindings_v2(id, skill_version_id, profile_version_id, created_at)
+             VALUES (?1,?2,?3,?4)
+             ON CONFLICT(skill_version_id, profile_version_id) DO UPDATE SET id=excluded.id",
+            rusqlite::params![id, skill_version_id, profile_version_id, timefmt::now()],
+        )
+        .map_err(Error::from)?;
+        let bound: String = conn
+            .query_row(
+                "SELECT id FROM skill_bindings_v2 WHERE skill_version_id=?1 AND (profile_version_id IS ?2)",
+                rusqlite::params![skill_version_id, profile_version_id],
+                |r| r.get(0),
+            )
+            .map_err(Error::from)?;
+        Ok(bound)
+    })
+    .map_err(store_err)
+}
+
+/// 版本级注入替换（enabled_bodies_text 的 v2 前置查询）：
+/// 存在 active version 的技能按 version 正文注入；revoked/deprecated 不注入；
+/// legacy（无版本）技能沿用旧逻辑。
+pub fn active_version_bodies(
+    store: &Store,
+    _agent_profile_id: Option<&str>,
+) -> SettingsResult<Vec<(String, String)>> {
+    // 活跃版本正文（objects 读取在锁外，避免 Mutex 重入）。
+    let rows: Vec<(String, String)> = store
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT sv.body_object_sha256, s.name
+                 FROM skill_versions sv
+                 JOIN skills s ON s.id = sv.skill_id
+                 WHERE sv.status='active'
+                 ORDER BY s.name",
+            )?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .map_err(store_err)?;
+    let mut out = Vec::new();
+    for (sha, name) in rows {
+        let bytes = objects::open(store, &sha).map_err(store_err)?;
+        out.push((name, String::from_utf8_lossy(&bytes).trim_end().to_string()));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    use sg_store::ids;
+
+    fn setup() -> Store {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-skv-{}-{}",
+            std::process::id(),
+            ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Store::open(&dir, "test").unwrap()
+    }
+
+    /// M4-04：draft → active → deprecated → revoked 全生命周期；
+    /// active 单份（激活新版本旧版本降 deprecated）；revoked 立即离开注入面。
+    #[test]
+    fn skill_version_lifecycle_single_active() {
+        let store = setup();
+        let s = create(
+            &store,
+            "deploy-check",
+            "部署检查",
+            "v1 正文",
+            "manual",
+            None,
+        )
+        .unwrap();
+        let v1 = create_version(&store, &s.id, "v1 正文", "第一版").unwrap();
+        assert_eq!(v1.version_no, 1);
+        assert_eq!(v1.status, "draft");
+        // 同内容幂等。
+        let again = create_version(&store, &s.id, "v1 正文", "第一版").unwrap();
+        assert_eq!(again.id, v1.id);
+        activate_version(&store, &v1.id).unwrap();
+        // v2 修改正文 → 激活后 v1 降 deprecated（单 active）。
+        let v2 = create_version(&store, &s.id, "v2 正文（修订）", "第二版").unwrap();
+        assert_eq!(v2.version_no, 2);
+        activate_version(&store, &v2.id).unwrap();
+        let list = version_list(&store, &s.id).unwrap();
+        assert_eq!(list[0].status, "deprecated");
+        assert_eq!(list[1].status, "active");
+        // revoked：active 可直接撤销。
+        revoke_version(&store, &v2.id).unwrap();
+        let list = version_list(&store, &s.id).unwrap();
+        assert_eq!(list[1].status, "revoked");
+        assert!(
+            active_version_bodies(&store, None).unwrap().is_empty(),
+            "revoked 后注入面为空"
+        );
+        // revoked 后不可再激活（终态）。
+        assert!(activate_version(&store, &v2.id).is_err());
+        // 非法迁移：draft → revoked 允许，但 deprecated → active 拒绝。
+        let v3 = create_version(&store, &s.id, "v3", "第三版").unwrap();
+        assert!(
+            deprecate_version(&store, &v3.id).is_err(),
+            "draft 不能直接 deprecated"
+        );
+    }
+
+    /// 版本级绑定：指向具体 version；全局（NULL profile）绑定幂等。
+    #[test]
+    fn bind_version_targets_specific_version() {
+        let store = setup();
+        let s = create(&store, "prd-writer", "PRD", "正文", "manual", None).unwrap();
+        let v1 = create_version(&store, &s.id, "正文", "d").unwrap();
+        let bind_id = bind_version(&store, &v1.id, None).unwrap();
+        let bind_again = bind_version(&store, &v1.id, None).unwrap();
+        assert_eq!(bind_id, bind_again, "同版本同 scope 绑定幂等");
+        // 不存在的 profile version 拒绝。
+        assert!(bind_version(&store, &v1.id, Some("pv_ghost")).is_err());
+    }
+}

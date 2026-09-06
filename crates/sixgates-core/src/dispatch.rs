@@ -990,6 +990,249 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
 
         // --- Agent ---
         // 唯一入口（ADR-028）：建行（幂等）→ 立即返回 runId，循环在独立任务/连接上执行。
+        // --- M4（EvoFlow / ADR-038）：Team / Context Policy / Middleware ---
+        "agentTeam.list" => {
+            let teams = sg_agent::team::list_teams(store).map_err(store_err)?;
+            Ok(json!({ "items": teams }))
+        }
+        "agentTeam.create" => {
+            let t = sg_agent::team::create_team(
+                store,
+                &str_param(params, "key")?,
+                &str_param(params, "name")?,
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(t).unwrap_or_default())
+        }
+        "agentTeam.createVersion" => {
+            let members: Vec<sg_agent::team::TeamMemberInput> = params
+                .get("members")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|m| sg_agent::team::TeamMemberInput {
+                            role_key: m
+                                .get("roleKey")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .into(),
+                            profile_version_id: m
+                                .get("profileVersionId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .into(),
+                            fallback_mode: m
+                                .get("fallbackMode")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("generic")
+                                .into(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let v = sg_agent::team::create_version(
+                store,
+                &str_param(params, "teamId")?,
+                &str_param(params, "leadRoleKey")?,
+                params
+                    .get("maxConcurrency")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(3),
+                &params
+                    .get("requiredCapabilities")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default(),
+                params
+                    .get("reviewPolicy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none"),
+                params
+                    .get("fallbackMode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("generic"),
+                &members,
+                params
+                    .get("createdBy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local"),
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "agentTeam.activate" => {
+            let v = sg_agent::team::activate(store, &str_param(params, "versionId")?)
+                .map_err(store_err)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "agentTeam.resolvePreview" => {
+            // Role 选路预览：direct / fallback 证据 / fail_closed 明确失败。
+            let version_id = str_param(params, "teamVersionId")?;
+            let role_key = str_param(params, "roleKey")?;
+            let r =
+                sg_agent::team::resolve_role(store, &version_id, &role_key).map_err(store_err)?;
+            Ok(serde_json::to_value(r).unwrap_or_default())
+        }
+        "contextPolicy.createVersion" => {
+            let allowed: Vec<String> = params
+                .get("allowedTools")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let v = sg_context::policy::create_version(
+                store,
+                &str_param(params, "key")?,
+                opt_str_param(params, "gateId").as_deref(),
+                &params
+                    .get("sources")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "[]".into()),
+                &allowed,
+                &params
+                    .get("compaction")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".into()),
+                params
+                    .get("createdBy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local"),
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "contextPolicy.activate" => {
+            let v = sg_context::policy::activate(store, &str_param(params, "versionId")?)
+                .map_err(store_err)?;
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "contextPolicy.activeList" => {
+            // 服务端交集预览：EV-014 可视化断言面。
+            let key = str_param(params, "key")?;
+            let policy = sg_context::policy::active_by_key(store, &key)
+                .map_err(store_err)?
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "context_policy_not_found"))?;
+            let allowed: Vec<String> =
+                serde_json::from_str(&policy.allowed_tools_json).unwrap_or_default();
+            let registry_all: Vec<String> = sg_agent::tools::registry()
+                .iter()
+                .map(|d| d.name.to_string())
+                .collect();
+            let client: Vec<String> = params
+                .get("clientRequest")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let resolved =
+                sg_context::policy::resolve_tools(&registry_all, Some(&allowed), &client);
+            Ok(json!({
+                "policyVersionId": policy.id,
+                "digest": policy.content_digest,
+                "effective": resolved.effective,
+                "excluded": resolved.excluded,
+            }))
+        }
+        "middlewareProfile.createVersion" => {
+            use sg_agent::middleware::MiddlewareStep;
+            let steps: Vec<MiddlewareStep> = params
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|s| MiddlewareStep {
+                            name: s.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+                            params: s.get("params").cloned().unwrap_or(json!({})),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // M4-07：顺序校验（security 不可移除/重排，非内建拒绝）。
+            sg_agent::middleware::validate_order(&steps)
+                .map_err(|e| err(ErrorCode::InvalidParams, e.as_str()))?;
+            let digest = sg_agent::middleware::profile_digest(&steps);
+            let id = sg_store::ids::new_id("mpv");
+            let now = sg_store::timefmt::now();
+            let key = str_param(params, "key")?;
+            store.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO middleware_profile_versions(id, key, version_no, status, steps_json, content_digest, created_by, created_at, updated_at)
+                     VALUES (?1,?2,(SELECT COALESCE(MAX(version_no),0)+1 FROM middleware_profile_versions WHERE key=?3),
+                        'draft',?4,?5,?6,?7,?7)",
+                    rusqlite::params![
+                        id,
+                        key,
+                        key,
+                        serde_json::to_string(&steps).unwrap_or_default(),
+                        digest,
+                        params.get("createdBy").and_then(|v| v.as_str()).unwrap_or("local"),
+                        now
+                    ],
+                )
+                .map_err(Error::from)?;
+                Ok(())
+            })
+            .map_err(store_err)?;
+            Ok(json!({"versionId": id, "digest": digest}))
+        }
+        "middlewareProfile.activate" => {
+            let version_id = str_param(params, "versionId")?;
+            store.with_conn(|conn| {
+                let status: String = conn
+                    .query_row(
+                        "SELECT status FROM middleware_profile_versions WHERE id=?1",
+                        [&version_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(Error::from)?;
+                if status != "draft" {
+                    return Err(Error::Message("middleware_profile_invalid: 仅 draft 可激活".into()));
+                }
+                conn.execute(
+                    "UPDATE middleware_profile_versions SET status='deprecated', updated_at=?1
+                     WHERE key=(SELECT key FROM middleware_profile_versions WHERE id=?2) AND status='active'",
+                    rusqlite::params![sg_store::timefmt::now(), version_id],
+                )?;
+                conn.execute(
+                    "UPDATE middleware_profile_versions SET status='active', updated_at=?1 WHERE id=?2",
+                    rusqlite::params![sg_store::timefmt::now(), version_id],
+                )?;
+                Ok(())
+            })
+            .map_err(store_err)?;
+            Ok(json!({"status": "active"}))
+        }
+        "middlewareProfile.validate" => {
+            use sg_agent::middleware::MiddlewareStep;
+            let steps: Vec<MiddlewareStep> = params
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|s| MiddlewareStep {
+                            name: s.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+                            params: s.get("params").cloned().unwrap_or(json!({})),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            match sg_agent::middleware::validate_order(&steps) {
+                Ok(()) => Ok(
+                    json!({"valid": true, "digest": sg_agent::middleware::profile_digest(&steps)}),
+                ),
+                Err(e) => Ok(json!({"valid": false, "error": e})),
+            }
+        }
         "agent.start" => {
             let workitem_id = str_param(params, "workItemId")?;
             let goal = str_param(params, "goal")?;
@@ -1025,7 +1268,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     built["id"].as_str().unwrap_or_default().to_string()
                 }
             };
-            let allowlist: Vec<String> = params
+            let mut allowlist: Vec<String> = params
                 .get("toolAllowlist")
                 .and_then(|v| v.as_array())
                 .map(|a| {
@@ -1034,6 +1277,35 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         .collect()
                 })
                 .unwrap_or_else(|| vec!["read_file".into()]);
+            // M4-08（EV-014 / ADR-038 §6.10）：服务端工具交集——客户端只可收紧。
+            // SIXGATES_CONTEXT_POLICY_V2=1 且存在 active policy 时，
+            // effective = registry ∩ policy ∩ client（越权请求被移除并记 excluded）。
+            let mut ctx_policy_frozen: Option<String> = None;
+            let mut ctx_excluded: serde_json::Value = serde_json::Value::Null;
+            if std::env::var("SIXGATES_CONTEXT_POLICY_V2").ok().as_deref() == Some("1") {
+                let gate_for_policy = sg_workitem::get(store, &workitem_id)
+                    .map(|w| w.current_gate)
+                    .unwrap_or_default();
+                let policy = sg_context::policy::active_by_key(store, &gate_for_policy)
+                    .or_else(|_| sg_context::policy::active_by_key(store, "global"))
+                    .unwrap_or(None);
+                if let Some(p) = policy {
+                    let allowed: Vec<String> =
+                        serde_json::from_str(&p.allowed_tools_json).unwrap_or_default();
+                    let registry_all: Vec<String> = sg_agent::tools::registry()
+                        .iter()
+                        .map(|d| d.name.to_string())
+                        .collect();
+                    let resolved = sg_context::policy::resolve_tools(
+                        &registry_all,
+                        Some(&allowed),
+                        &allowlist,
+                    );
+                    allowlist = resolved.effective;
+                    ctx_policy_frozen = Some(p.id);
+                    ctx_excluded = serde_json::to_value(&resolved.excluded).unwrap_or_default();
+                }
+            }
             let budget: sg_agent::RunBudget = params
                 .get("budget")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1053,6 +1325,25 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             };
             let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
             if created {
+                // M4-08：冻结 context policy（可回查 digest 链，§3 不变量 8）。
+                if let Some(pid) = &ctx_policy_frozen {
+                    let _ = store.with_conn(|conn| {
+                        conn.execute(
+                            "UPDATE agent_runs SET context_policy_version_id=?1 WHERE id=?2",
+                            rusqlite::params![pid, run.id],
+                        )?;
+                        Ok(())
+                    });
+                }
+                if ctx_excluded.is_array() {
+                    let _ = sg_store::outbox::emit(
+                        store,
+                        "workitem",
+                        &workitem_id,
+                        "context.tools_excluded",
+                        json!({"runId": run.id, "excluded": ctx_excluded}),
+                    );
+                }
                 if trace_writes_enabled() {
                     sg_provenance::register_node(
                         store,
@@ -1079,6 +1370,27 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let run = sg_agent::get_run(store, &run_id).map_err(store_err)?;
             let mut v = serde_json::to_value(&run).unwrap_or_default();
             v["modelCalls"] = json!(sg_agent::count_model_calls(store, &run_id).unwrap_or(0));
+            // M4-08：冻结面透出（allowlist 交集 + context/middleware/team 版本引用，
+            // §3 不变量 8 可回查 digest 链）。
+            {
+                let row: (String, Option<String>, Option<String>, Option<String>) = store
+                    .with_conn(|conn| {
+                        conn.query_row(
+                            "SELECT tool_allowlist, context_policy_version_id,
+                                    middleware_profile_version_id, team_version_id
+                             FROM agent_runs WHERE id=?1",
+                            [&run_id],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        )
+                        .map_err(Error::from)
+                    })
+                    .unwrap_or_default();
+                v["toolAllowlist"] =
+                    serde_json::from_str::<serde_json::Value>(&row.0).unwrap_or_else(|_| json!([]));
+                v["contextPolicyVersionId"] = json!(row.1);
+                v["middlewareProfileVersionId"] = json!(row.2);
+                v["teamVersionId"] = json!(row.3);
+            }
             // F10：真实权限快照（'default' 为旧占位）。
             let snap_raw: String = store
                 .with_conn(|conn| {
@@ -1434,7 +1746,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             )
             .map_err(store_err)?;
             let manifest_id = manifest["id"].as_str().unwrap_or_default().to_string();
-            let allowlist: Vec<String> = params
+            let mut allowlist: Vec<String> = params
                 .get("toolAllowlist")
                 .and_then(|v| v.as_array())
                 .map(|a| {
@@ -1443,6 +1755,35 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         .collect()
                 })
                 .unwrap_or_else(|| vec!["read_file".into()]);
+            // M4-08（EV-014 / ADR-038 §6.10）：服务端工具交集——客户端只可收紧。
+            // SIXGATES_CONTEXT_POLICY_V2=1 且存在 active policy 时，
+            // effective = registry ∩ policy ∩ client（越权请求被移除并记 excluded）。
+            let mut ctx_policy_frozen: Option<String> = None;
+            let mut ctx_excluded: serde_json::Value = serde_json::Value::Null;
+            if std::env::var("SIXGATES_CONTEXT_POLICY_V2").ok().as_deref() == Some("1") {
+                let gate_for_policy = sg_workitem::get(store, &workitem_id)
+                    .map(|w| w.current_gate)
+                    .unwrap_or_default();
+                let policy = sg_context::policy::active_by_key(store, &gate_for_policy)
+                    .or_else(|_| sg_context::policy::active_by_key(store, "global"))
+                    .unwrap_or(None);
+                if let Some(p) = policy {
+                    let allowed: Vec<String> =
+                        serde_json::from_str(&p.allowed_tools_json).unwrap_or_default();
+                    let registry_all: Vec<String> = sg_agent::tools::registry()
+                        .iter()
+                        .map(|d| d.name.to_string())
+                        .collect();
+                    let resolved = sg_context::policy::resolve_tools(
+                        &registry_all,
+                        Some(&allowed),
+                        &allowlist,
+                    );
+                    allowlist = resolved.effective;
+                    ctx_policy_frozen = Some(p.id);
+                    ctx_excluded = serde_json::to_value(&resolved.excluded).unwrap_or_default();
+                }
+            }
             let budget: sg_agent::RunBudget = params
                 .get("budget")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1459,6 +1800,25 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             };
             let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
             if created {
+                // M4-08：冻结 context policy（可回查 digest 链，§3 不变量 8）。
+                if let Some(pid) = &ctx_policy_frozen {
+                    let _ = store.with_conn(|conn| {
+                        conn.execute(
+                            "UPDATE agent_runs SET context_policy_version_id=?1 WHERE id=?2",
+                            rusqlite::params![pid, run.id],
+                        )?;
+                        Ok(())
+                    });
+                }
+                if ctx_excluded.is_array() {
+                    let _ = sg_store::outbox::emit(
+                        store,
+                        "workitem",
+                        &workitem_id,
+                        "context.tools_excluded",
+                        json!({"runId": run.id, "excluded": ctx_excluded}),
+                    );
+                }
                 store
                     .with_conn(|conn| {
                         conn.execute(

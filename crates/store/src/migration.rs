@@ -61,6 +61,14 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0034_autonomy_workspace.sql"),
     ),
     (35, include_str!("../migrations/0035_plan_task_carried.sql")),
+    (
+        36,
+        include_str!("../migrations/0036_agent_teams_skills_v2.sql"),
+    ),
+    (
+        37,
+        include_str!("../migrations/0037_context_middleware.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

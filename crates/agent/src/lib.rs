@@ -7,6 +7,7 @@ use sg_policy::{self, PolicyError, Snapshot};
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
 pub mod instructions;
+pub mod middleware;
 pub mod model_protocol;
 pub mod modelgw;
 pub mod patch;
@@ -16,6 +17,7 @@ pub mod reasoning_state;
 pub mod rollout;
 pub mod router;
 pub mod schema;
+pub mod team;
 pub mod tools;
 pub use modelgw::{Budget, Gateway, Usage};
 

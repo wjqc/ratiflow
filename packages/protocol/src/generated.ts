@@ -225,7 +225,25 @@ export type RpcMethodName =
   | 'planTask.transition'
   | 'planTask.reconcile'
   | 'plan.startRunning'
-  | 'plan.dispatchReady';
+  | 'plan.dispatchReady'
+  | 'agentTeam.list'
+  | 'agentTeam.create'
+  | 'agentTeam.createVersion'
+  | 'agentTeam.activate'
+  | 'agentTeam.resolvePreview'
+  | 'contextPolicy.createVersion'
+  | 'contextPolicy.activate'
+  | 'contextPolicy.activeList'
+  | 'middlewareProfile.createVersion'
+  | 'middlewareProfile.activate'
+  | 'middlewareProfile.validate'
+  | 'skill.versionList'
+  | 'skill.createVersion'
+  | 'skill.activateVersion'
+  | 'skill.deprecateVersion'
+  | 'skill.revokeVersion'
+  | 'skill.bindVersion'
+  | 'skill.activeList';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -451,6 +469,24 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'planTask.reconcile',
   'plan.startRunning',
   'plan.dispatchReady',
+  'agentTeam.list',
+  'agentTeam.create',
+  'agentTeam.createVersion',
+  'agentTeam.activate',
+  'agentTeam.resolvePreview',
+  'contextPolicy.createVersion',
+  'contextPolicy.activate',
+  'contextPolicy.activeList',
+  'middlewareProfile.createVersion',
+  'middlewareProfile.activate',
+  'middlewareProfile.validate',
+  'skill.versionList',
+  'skill.createVersion',
+  'skill.activateVersion',
+  'skill.deprecateVersion',
+  'skill.revokeVersion',
+  'skill.bindVersion',
+  'skill.activeList',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -1749,4 +1785,89 @@ export interface PlanStartRunningParams {
 export interface PlanDispatchReadyParams {
   planRevisionId: string;
   maxParallel?: number;
+}
+
+export type AgentTeamListParams = Record<string, never>;
+
+export interface AgentTeamCreateParams {
+  key: string;
+  name: string;
+}
+
+export interface AgentTeamCreateVersionParams {
+  teamId: string;
+  leadRoleKey: string;
+  members: unknown[];
+  maxConcurrency?: number;
+  reviewPolicy?: string;
+  fallbackMode?: string;
+}
+
+export interface AgentTeamActivateParams {
+  versionId: string;
+}
+
+export interface AgentTeamResolvePreviewParams {
+  teamVersionId: string;
+  roleKey: string;
+}
+
+export interface ContextPolicyCreateVersionParams {
+  key: string;
+  allowedTools: unknown[];
+  gateId?: string;
+  sources?: unknown[];
+}
+
+export interface ContextPolicyActivateParams {
+  versionId: string;
+}
+
+export interface ContextPolicyActiveListParams {
+  key: string;
+  clientRequest?: unknown[];
+}
+
+export interface MiddlewareProfileCreateVersionParams {
+  key: string;
+  steps: unknown[];
+}
+
+export interface MiddlewareProfileActivateParams {
+  versionId: string;
+}
+
+export interface MiddlewareProfileValidateParams {
+  steps: unknown[];
+}
+
+export interface SkillVersionListParams {
+  skillId: string;
+}
+
+export interface SkillCreateVersionParams {
+  skillId: string;
+  body: string;
+  description?: string;
+}
+
+export interface SkillActivateVersionParams {
+  versionId: string;
+}
+
+export interface SkillDeprecateVersionParams {
+  versionId: string;
+}
+
+export interface SkillRevokeVersionParams {
+  versionId: string;
+}
+
+export interface SkillBindVersionParams {
+  skillVersionId: string;
+  profileVersionId?: string;
+}
+
+export interface SkillActiveListParams {
+  profileVersionId?: string;
 }

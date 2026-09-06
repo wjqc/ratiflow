@@ -221,6 +221,91 @@ pub fn create_version(
     get_version(store, &id)
 }
 
+/// M4-02：全字段版本创建（tool policy / health policy 一并冻结入 digest）。
+pub fn create_version_v2(
+    store: &Store,
+    input: ProfileVersionInput,
+) -> Result<ProfileVersion, Error> {
+    create_version(
+        store,
+        &input.profile_id,
+        &input.persona,
+        &input.sop,
+        &input.capabilities,
+        &input.output_schema,
+        &input.model_route_json,
+        &input.budget_json,
+    )?;
+    // 追加写入 0019 已建列（旧 create_version 未覆盖的字段），重算 digest 合入。
+    let digest_tail = {
+        let mut hasher = Sha256::new();
+        hasher
+            .update(format!("{}|{}", input.tool_policy_json, input.health_policy_json).as_bytes());
+        sg_store::ids::hex(&hasher.finalize())
+    };
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE agent_profile_versions
+             SET tool_policy_json=?1, health_policy_json=?2,
+                 content_digest = content_digest || ?3
+             WHERE profile_id=?4 AND content_digest=?5
+               AND id = (SELECT id FROM agent_profile_versions WHERE profile_id=?4 ORDER BY version_no DESC LIMIT 1)",
+            rusqlite::params![
+                input.tool_policy_json,
+                input.health_policy_json,
+                &digest_tail[..16],
+                input.profile_id,
+                // 定位旧 digest：取该 profile 最新版本行
+                latest_digest(conn, &input.profile_id)?
+            ],
+        )?;
+        Ok(())
+    })?;
+    store.with_conn(|conn| {
+        let id: String = conn.query_row(
+            "SELECT id FROM agent_profile_versions WHERE profile_id=?1 ORDER BY version_no DESC LIMIT 1",
+            [&input.profile_id],
+            |r| r.get(0),
+        ).map_err(Error::from)?;
+        conn.query_row(
+            &format!("SELECT {VERSION_COLUMNS} FROM agent_profile_versions WHERE id=?1"),
+            [&id],
+            row_version,
+        )
+        .map_err(Error::from)
+    })
+}
+
+fn latest_digest(conn: &rusqlite::Connection, profile_id: &str) -> Result<String, Error> {
+    conn.query_row(
+        "SELECT content_digest FROM agent_profile_versions WHERE profile_id=?1 ORDER BY version_no DESC LIMIT 1",
+        [profile_id],
+        |r| r.get(0),
+    )
+    .map_err(Error::from)
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ProfileVersionInput {
+    pub profile_id: String,
+    #[serde(default)]
+    pub persona: String,
+    #[serde(default)]
+    pub sop: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub output_schema: String,
+    #[serde(default)]
+    pub model_route_json: String,
+    #[serde(default)]
+    pub budget_json: String,
+    #[serde(default)]
+    pub tool_policy_json: String,
+    #[serde(default)]
+    pub health_policy_json: String,
+}
+
 pub fn get_version(store: &Store, version_id: &str) -> Result<ProfileVersion, Error> {
     store.with_conn(|conn| {
         conn.query_row(
