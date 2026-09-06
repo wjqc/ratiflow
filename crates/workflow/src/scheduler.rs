@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use sg_store::{ids, outbox, timefmt, Error, Store};
+use sg_store::{outbox, timefmt, Error, Store};
 
 use crate::dag;
 use crate::plan::{self, AttemptInfo};
@@ -22,13 +22,6 @@ fn is_active(state: &str) -> bool {
             | "running"
             | "awaiting_approval"
             | "reconciliation_required"
-    )
-}
-
-fn is_terminal(state: &str) -> bool {
-    matches!(
-        state,
-        "succeeded" | "failed" | "cancelled" | "manual_action_required"
     )
 }
 
@@ -298,7 +291,7 @@ pub fn reconcile(
     store: &Store,
     task_attempt_id: &str,
     resolution: &str,
-    output_digest: &str,
+    _output_digest: &str,
 ) -> Result<AttemptInfo, Error> {
     let now = timefmt::now();
     let (terminal, allow_new_attempt) = match resolution {
