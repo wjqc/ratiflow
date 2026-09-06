@@ -69,6 +69,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         37,
         include_str!("../migrations/0037_context_middleware.sql"),
     ),
+    (38, include_str!("../migrations/0038_trace_cache.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

@@ -9,9 +9,11 @@ pub mod dag;
 pub mod delivery;
 pub mod instance;
 pub mod plan;
+pub mod read_model;
 pub mod replan;
 pub mod scheduler;
 pub mod template;
+pub mod trace;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -598,6 +598,7 @@ function ExecutionProcessView({
     <div className="sg-process-grid">
       <InstanceGatesCard workItemId={workItemId} />
       <PlanCard workItemId={workItemId} />
+      <CockpitCard workItemId={workItemId} />
       {/* 左：执行时间线 */}
       <div className="sg-card sg-process-left">
         <div className="sg-card-head">执行时间线</div>
@@ -1891,6 +1892,66 @@ function GateWorkspace({
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/// M5-05（ADR-039 只读骨架）：驾驶舱卡——taskReadModel 真实进度（无估算百分比），
+/// 下一步动作 + 阻塞原因；事实变化由 checkpoint sha 可回查。
+function CockpitCard({ workItemId }: { workItemId: string }) {
+  const [data, setData] = useState<{
+    model: {
+      current_gate_id: string;
+      gates: { gate_id: string; progress: string }[];
+      tasks: { task_key: string; phase: string }[];
+      next_action: string;
+      blocked_reason: string | null;
+    };
+    factsSha256: string;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    rpc<{
+      model: {
+        current_gate_id: string;
+        gates: { gate_id: string; progress: string }[];
+        tasks: { task_key: string; phase: string }[];
+        next_action: string;
+        blocked_reason: string | null;
+      };
+      factsSha256: string;
+    }>('trace.taskReadModel', { workItemId })
+      .then((r) => {
+        if (!cancelled) setData(r);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [workItemId]);
+  if (!data) return null;
+  const { model, factsSha256 } = data;
+  return (
+    <div className="sg-card" style={{ marginBottom: 12 }}>
+      <div className="sg-card-head">
+        驾驶舱 · 当前关 {model.current_gate_id}
+        <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: 11 }} title={factsSha256}>
+          facts {factsSha256.slice(0, 8)}
+        </span>
+      </div>
+      <div style={{ padding: '8px 16px', fontSize: 13 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+          {model.gates.map((g) => (
+            <span key={g.gate_id} style={{ opacity: g.progress === 'done' ? 0.45 : 1 }}>
+              {g.gate_id}:{g.progress}
+            </span>
+          ))}
+        </div>
+        <div>下一步：{model.next_action}</div>
+        {model.blocked_reason && (
+          <div style={{ color: '#b45309' }}>阻塞：{model.blocked_reason}</div>
+        )}
+      </div>
     </div>
   );
 }

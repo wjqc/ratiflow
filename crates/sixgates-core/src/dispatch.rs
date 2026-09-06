@@ -85,7 +85,7 @@ fn bool_param(params: &Value, key: &str) -> Result<bool, RpcError> {
 }
 
 /// 放行 digest 的 policy version 分量：当前权限快照的 canonical digest。
-fn release_policy_version(store: &Store) -> String {
+pub(crate) fn release_policy_version(store: &Store) -> String {
     let (snapshot, _) = assemble_policy_snapshot(store);
     sg_policy::action_digest(&serde_json::to_value(&snapshot).unwrap_or_default())
 }
@@ -198,6 +198,38 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             | "workflow.migrate"
     ) {
         return crate::workflow_dispatch::dispatch(state, store, method, params);
+    }
+    // --- Trace 与 Slash（EvoFlow M5-04/06 / ADR-039）---
+    if matches!(
+        method,
+        "trace.graph"
+            | "trace.usage"
+            | "trace.taskReadModel"
+            | "trace.restoreCheckpoint"
+            | "command.preview"
+            | "command.execute"
+    ) {
+        if method == "command.preview" || method == "command.execute" {
+            let workitem_id = params
+                .get("workItemId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            return match method {
+                "command.preview" => crate::commands::preview(store, text, workitem_id)
+                    .map_err(|e| RpcError::new(ErrorCode::InvalidParams, e.to_string().as_str())),
+                _ => {
+                    let token = params
+                        .get("previewToken")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    crate::commands::execute(store, text, workitem_id, token).map_err(|e| {
+                        RpcError::new(ErrorCode::InvalidParams, e.to_string().as_str())
+                    })
+                }
+            };
+        }
+        return crate::trace_dispatch::dispatch(state, store, method, params);
     }
     // --- 结构化计划与任务工作区（EvoFlow M2-09 / ADR-036/037）---
     if matches!(

@@ -15,6 +15,7 @@ extern "C" {
 unsafe fn libc_getppid() -> i32 {
     getppid()
 }
+mod commands;
 mod memory_dispatch;
 mod migrate;
 mod plan_dispatch;
@@ -22,6 +23,7 @@ mod plan_runtime;
 mod settings_dispatch;
 mod state;
 mod tool_exec;
+mod trace_dispatch;
 mod workflow_dispatch;
 
 use std::sync::atomic::Ordering;

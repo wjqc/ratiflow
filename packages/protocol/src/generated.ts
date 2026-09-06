@@ -243,7 +243,13 @@ export type RpcMethodName =
   | 'skill.deprecateVersion'
   | 'skill.revokeVersion'
   | 'skill.bindVersion'
-  | 'skill.activeList';
+  | 'skill.activeList'
+  | 'trace.graph'
+  | 'trace.usage'
+  | 'trace.taskReadModel'
+  | 'trace.restoreCheckpoint'
+  | 'command.preview'
+  | 'command.execute';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -487,6 +493,12 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'skill.revokeVersion',
   'skill.bindVersion',
   'skill.activeList',
+  'trace.graph',
+  'trace.usage',
+  'trace.taskReadModel',
+  'trace.restoreCheckpoint',
+  'command.preview',
+  'command.execute',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -596,6 +608,10 @@ export const EVENT_TYPES: readonly string[] = [
   'task.failed',
   'task.unknown',
   'task.cancelled',
+  'trace.span_completed',
+  'command.previewed',
+  'command.executed',
+  'context.tools_excluded',
 ] as const;
 
 export interface TimelineEvent {
@@ -1870,4 +1886,31 @@ export interface SkillBindVersionParams {
 
 export interface SkillActiveListParams {
   profileVersionId?: string;
+}
+
+export interface TraceGraphParams {
+  workItemId: string;
+}
+
+export interface TraceUsageParams {
+  workItemId: string;
+}
+
+export interface TraceTaskReadModelParams {
+  workItemId: string;
+}
+
+export interface TraceRestoreCheckpointParams {
+  workItemId: string;
+}
+
+export interface CommandPreviewParams {
+  workItemId: string;
+  text: string;
+}
+
+export interface CommandExecuteParams {
+  workItemId: string;
+  text: string;
+  previewToken: string;
 }
