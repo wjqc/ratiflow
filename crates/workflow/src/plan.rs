@@ -78,6 +78,8 @@ pub struct PlanTaskRecord {
     pub id: String,
     pub plan_revision_id: String,
     pub task_key: String,
+    /// 复用自上一版本计划的 attempt（非空 = 不重跑，视同已完成）。
+    pub reused_from_attempt_id: Option<String>,
     pub kind: String,
     pub title: String,
     pub inputs: Vec<String>,
@@ -477,23 +479,30 @@ pub fn revision_by_id(store: &Store, id: &str) -> Result<PlanRevisionRecord, Err
 pub fn tasks_of(store: &Store, revision_id: &str) -> Result<Vec<PlanTaskRecord>, Error> {
     store.with_conn(|conn| {
         let inputs = task_inputs(conn, revision_id)?;
-        let mut ids_map: std::collections::BTreeMap<String, String> =
+        // task_key → (id, reused_from_attempt_id)。
+        let mut meta: std::collections::BTreeMap<String, (String, Option<String>)> =
             std::collections::BTreeMap::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT task_key, id FROM plan_tasks WHERE plan_revision_id=?1")?;
+            let mut stmt = conn.prepare(
+                "SELECT task_key, id, reused_from_attempt_id FROM plan_tasks WHERE plan_revision_id=?1",
+            )?;
             let rows = stmt.query_map([revision_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
             })?;
             for row in rows {
-                let (k, v) = row?;
-                ids_map.insert(k, v);
+                let (k, id, reused) = row?;
+                meta.insert(k, (id, reused));
             }
         }
         Ok(inputs
             .into_iter()
             .map(|t| PlanTaskRecord {
-                id: ids_map.get(&t.task_key).cloned().unwrap_or_default(),
+                id: meta.get(&t.task_key).map(|(id, _)| id.clone()).unwrap_or_default(),
+                reused_from_attempt_id: meta.get(&t.task_key).and_then(|(_, r)| r.clone()),
                 plan_revision_id: revision_id.to_string(),
                 task_key: t.task_key,
                 kind: t.kind,

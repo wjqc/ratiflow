@@ -217,7 +217,15 @@ export type RpcMethodName =
   | 'plan.cancel'
   | 'taskWorkspace.prepare'
   | 'taskWorkspace.get'
-  | 'taskWorkspace.finalize';
+  | 'taskWorkspace.finalize'
+  | 'plan.replanPreview'
+  | 'plan.replan'
+  | 'planTask.list'
+  | 'planTask.prepare'
+  | 'planTask.transition'
+  | 'planTask.reconcile'
+  | 'plan.startRunning'
+  | 'plan.dispatchReady';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -435,6 +443,14 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'taskWorkspace.prepare',
   'taskWorkspace.get',
   'taskWorkspace.finalize',
+  'plan.replanPreview',
+  'plan.replan',
+  'planTask.list',
+  'planTask.prepare',
+  'planTask.transition',
+  'planTask.reconcile',
+  'plan.startRunning',
+  'plan.dispatchReady',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -538,6 +554,12 @@ export const EVENT_TYPES: readonly string[] = [
   'plan.rejected',
   'plan.started',
   'plan.superseded',
+  'plan.replan_required',
+  'plan.replanned',
+  'task.succeeded',
+  'task.failed',
+  'task.unknown',
+  'task.cancelled',
 ] as const;
 
 export interface TimelineEvent {
@@ -1685,4 +1707,46 @@ export interface TaskWorkspaceFinalizeParams {
   taskAttemptId: string;
   outcome: string;
   idempotencyKey: string;
+}
+
+export interface PlanReplanPreviewParams {
+  planRevisionId: string;
+  roots: unknown[];
+}
+
+export interface PlanReplanParams {
+  planRevisionId: string;
+  roots: unknown[];
+  tasks: unknown[];
+  idempotencyKey: string;
+}
+
+export interface PlanTaskListParams {
+  planRevisionId: string;
+}
+
+export interface PlanTaskPrepareParams {
+  taskAttemptId: string;
+}
+
+export interface PlanTaskTransitionParams {
+  taskAttemptId: string;
+  outcome: string;
+  idempotencyKey: string;
+  outputDigest?: string;
+}
+
+export interface PlanTaskReconcileParams {
+  taskAttemptId: string;
+  resolution: string;
+  outputDigest?: string;
+}
+
+export interface PlanStartRunningParams {
+  taskAttemptId: string;
+}
+
+export interface PlanDispatchReadyParams {
+  planRevisionId: string;
+  maxParallel?: number;
 }

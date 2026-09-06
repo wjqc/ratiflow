@@ -3864,6 +3864,144 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "plan.replanPreview",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roots",
+          "type": "array",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.replan",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roots",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "tasks",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "planTask.list",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "planTask.prepare",
+      "params": [
+        {
+          "name": "taskAttemptId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "planTask.transition",
+      "params": [
+        {
+          "name": "taskAttemptId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "outcome",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "outputDigest",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "planTask.reconcile",
+      "params": [
+        {
+          "name": "taskAttemptId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "resolution",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "outputDigest",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.startRunning",
+      "params": [
+        {
+          "name": "taskAttemptId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.dispatchReady",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "maxParallel",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [
@@ -3966,6 +4104,12 @@
     "plan.approved",
     "plan.rejected",
     "plan.started",
-    "plan.superseded"
+    "plan.superseded",
+    "plan.replan_required",
+    "plan.replanned",
+    "task.succeeded",
+    "task.failed",
+    "task.unknown",
+    "task.cancelled"
   ]
 }

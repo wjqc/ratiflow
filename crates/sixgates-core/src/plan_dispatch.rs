@@ -299,6 +299,121 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
             let rev = plan::cancel(store, &revision_id).map_err(store_err)?;
             Ok(serde_json::to_value(&rev).unwrap_or_default())
         }
+        "plan.replanPreview" => {
+            let revision_id = str_param(params, "planRevisionId")?;
+            let roots: Vec<String> = params
+                .get("roots")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .ok_or_else(|| invalid("missing param: roots"))?;
+            let old = plan::revision_by_id(store, &revision_id).map_err(store_err)?;
+            let old_tasks = plan::tasks_of(store, &revision_id).map_err(store_err)?;
+            let dag_tasks: Vec<sg_workflow::dag::DagTask> = old_tasks
+                .iter()
+                .map(|t| {
+                    sg_workflow::dag::DagTask::from_strings(
+                        t.task_key.clone(),
+                        t.deps.clone(),
+                        matches!(
+                            t.effect_class.as_str(),
+                            "local_write" | "external_write" | "irreversible"
+                        ),
+                    )
+                })
+                .collect();
+            let closure = sg_workflow::dag::affected_closure(&dag_tasks, &roots);
+            Ok(json!({
+                "workItemId": old.workitem_id,
+                "fromRevisionId": revision_id,
+                "roots": roots,
+                "closure": closure,
+                "tasks": old_tasks,
+            }))
+        }
+        "plan.replan" => {
+            let revision_id = str_param(params, "planRevisionId")?;
+            let roots: Vec<String> = params
+                .get("roots")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .ok_or_else(|| invalid("missing param: roots"))?;
+            let tasks = parse_tasks(params)?;
+            let _ = str_param(params, "idempotencyKey")?;
+            let out = sg_workflow::replan::replan(store, &revision_id, &roots, &tasks, "local")
+                .map_err(store_err)?;
+            Ok(serde_json::to_value(&out).unwrap_or_default())
+        }
+        "planTask.list" => {
+            let revision_id = str_param(params, "planRevisionId")?;
+            let tasks = plan::tasks_of(store, &revision_id).map_err(store_err)?;
+            let attempts = plan::attempts_of(store, &revision_id).map_err(store_err)?;
+            Ok(json!({"tasks": tasks, "attempts": attempts}))
+        }
+        "planTask.prepare" => {
+            let attempt_id = str_param(params, "taskAttemptId")?;
+            let rec = crate::plan_runtime::prepare_task(store, &attempt_id).map_err(store_err)?;
+            Ok(json!({"workspace": rec}))
+        }
+        "planTask.transition" => {
+            let attempt_id = str_param(params, "taskAttemptId")?;
+            let outcome = str_param(params, "outcome")?;
+            let digest = params
+                .get("outputDigest")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let _ = str_param(params, "idempotencyKey")?;
+            if !matches!(
+                outcome.as_str(),
+                "succeeded" | "failed" | "unknown" | "cancelled"
+            ) {
+                return Err(invalid("outcome 须为 succeeded|failed|unknown|cancelled"));
+            }
+            let info = crate::plan_runtime::complete_task(store, &attempt_id, &outcome, digest)
+                .map_err(store_err)?;
+            Ok(serde_json::to_value(&info).unwrap_or_default())
+        }
+        "planTask.reconcile" => {
+            let attempt_id = str_param(params, "taskAttemptId")?;
+            let resolution = str_param(params, "resolution")?;
+            let digest = params
+                .get("outputDigest")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !matches!(
+                resolution.as_str(),
+                "not_executed" | "executed_ok" | "needs_manual"
+            ) {
+                return Err(invalid(
+                    "resolution 须为 not_executed|executed_ok|needs_manual",
+                ));
+            }
+            let info = crate::plan_runtime::reconcile_task(store, &attempt_id, &resolution, digest)
+                .map_err(store_err)?;
+            Ok(serde_json::to_value(&info).unwrap_or_default())
+        }
+        "plan.dispatchReady" => {
+            let revision_id = str_param(params, "planRevisionId")?;
+            let max_parallel = params
+                .get("maxParallel")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3) as usize;
+            let out = crate::plan_runtime::dispatch_ready(store, &revision_id, max_parallel)
+                .map_err(store_err)?;
+            Ok(json!({"dispatched": out}))
+        }
+        "plan.startRunning" => {
+            let attempt_id = str_param(params, "taskAttemptId")?;
+            crate::plan_runtime::start_running(store, &attempt_id).map_err(store_err)?;
+            Ok(json!({"ok": true}))
+        }
         "taskWorkspace.prepare" => {
             let attempt_id = str_param(params, "taskAttemptId")?;
             let rec = sg_executor::workspace::prepare(store, &attempt_id).map_err(store_err)?;

@@ -18,6 +18,7 @@ unsafe fn libc_getppid() -> i32 {
 mod memory_dispatch;
 mod migrate;
 mod plan_dispatch;
+mod plan_runtime;
 mod settings_dispatch;
 mod state;
 mod tool_exec;

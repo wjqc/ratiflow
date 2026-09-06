@@ -213,6 +213,14 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             | "taskWorkspace.prepare"
             | "taskWorkspace.get"
             | "taskWorkspace.finalize"
+            | "plan.replanPreview"
+            | "plan.replan"
+            | "planTask.list"
+            | "planTask.prepare"
+            | "planTask.transition"
+            | "planTask.reconcile"
+            | "plan.startRunning"
+            | "plan.dispatchReady"
     ) {
         return crate::plan_dispatch::dispatch(state, store, method, params);
     }

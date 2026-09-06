@@ -72,6 +72,10 @@ pub fn view(
     let mut completed: BTreeSet<String> = BTreeSet::new();
     let mut active: BTreeSet<String> = BTreeSet::new();
     let mut blocked_upstream: BTreeSet<String> = BTreeSet::new();
+    // 复用任务视同已完成（执行事实在上一版本计划）。
+    for t in tasks.iter().filter(|t| t.reused_from_attempt_id.is_some()) {
+        completed.insert(t.task_key.clone());
+    }
     let mut latest: std::collections::BTreeMap<&str, &AttemptInfo> =
         std::collections::BTreeMap::new();
     for a in &attempts {
@@ -256,6 +260,10 @@ pub fn advance(
             })
             .collect();
         let mut completed: BTreeSet<String> = BTreeSet::new();
+        // 复用任务视同已完成。
+        for t in tasks.iter().filter(|t| t.reused_from_attempt_id.is_some()) {
+            completed.insert(t.task_key.clone());
+        }
         for a in &attempts {
             if a.state == "succeeded" {
                 completed.insert(a.task_key.clone());
