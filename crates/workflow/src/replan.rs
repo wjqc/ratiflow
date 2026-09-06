@@ -431,10 +431,8 @@ mod tests {
         assert_eq!(d.risk_added, vec!["c"]);
         assert!(d.requires_reapproval());
         // 纯局部替换（local_write → local_write）无需重批。
-        let d2 = diff_plans(
-            &old,
-            &vec![task("a", &[], "read"), task("b2", &["a"], "local_write")],
-        );
+        let new2 = [task("a", &[], "read"), task("b2", &["a"], "local_write")];
+        let d2 = diff_plans(&old, &new2);
         assert_eq!(d2.removed, vec!["b"]);
         assert!(!d2.requires_reapproval(), "同档替换不扩大授权: {d2:?}");
     }
