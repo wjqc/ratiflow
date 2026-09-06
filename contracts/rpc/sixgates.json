@@ -3678,6 +3678,192 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "plan.createDraft",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "stageAttemptId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "tasks",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.updateDraft",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "tasks",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.get",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.list",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.submit",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.decide",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.start",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "plan.cancel",
+      "params": [
+        {
+          "name": "planRevisionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "taskWorkspace.prepare",
+      "params": [
+        {
+          "name": "taskAttemptId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "taskWorkspace.get",
+      "params": [
+        {
+          "name": "taskAttemptId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "taskWorkspace.finalize",
+      "params": [
+        {
+          "name": "taskAttemptId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "outcome",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [
@@ -3774,6 +3960,12 @@
     "workitem.created",
     "workflow.template_activated",
     "workflow.instance_created",
-    "workflow.instance_migrated"
+    "workflow.instance_migrated",
+    "plan.draft_created",
+    "plan.approval_requested",
+    "plan.approved",
+    "plan.rejected",
+    "plan.started",
+    "plan.superseded"
   ]
 }

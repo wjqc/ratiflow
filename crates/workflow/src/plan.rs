@@ -3,6 +3,7 @@
 //! （环/缺引用/孤立写任务，复用 dag.rs）+ 确定性 Markdown 投影。
 //! 事实只追加：重规划 = 新 revision（supersedes_id / replan_links），不回写旧版本。
 
+use rusqlite::OptionalExtension;
 use sg_store::{ids, outbox, timefmt, Error, Store};
 use sha2::{Digest, Sha256};
 
@@ -390,6 +391,38 @@ pub fn create_draft(
     revision_by_id(store, &id)
 }
 
+/// 更新 draft 任务集（仅 draft；重算 digest；事实只追加——approved 后不可改）。
+pub fn update_draft(
+    store: &Store,
+    revision_id: &str,
+    tasks: &[PlanTaskInput],
+) -> Result<PlanRevisionRecord, Error> {
+    validate_inputs(tasks)?;
+    store.with_conn(|conn| {
+        let rev = revision_row(conn, revision_id)?;
+        if rev.status != "draft" {
+            return Err(Error::Message(
+                "plan_invalid_transition: 仅 draft 版本可编辑".into(),
+            ));
+        }
+        conn.execute(
+            "DELETE FROM plan_task_edges WHERE plan_revision_id=?1",
+            [revision_id],
+        )?;
+        conn.execute(
+            "DELETE FROM plan_tasks WHERE plan_revision_id=?1",
+            [revision_id],
+        )?;
+        let now = timefmt::now();
+        insert_tasks(conn, revision_id, tasks, &now)?;
+        conn.execute(
+            "UPDATE plan_revisions SET digest=?1, updated_at=?2 WHERE id=?3",
+            rusqlite::params![content_digest(tasks), now, revision_id],
+        )?;
+        revision_row(conn, revision_id)
+    })
+}
+
 pub fn revision_by_id(store: &Store, id: &str) -> Result<PlanRevisionRecord, Error> {
     store.with_conn(|conn| revision_row(conn, id))
 }
@@ -446,6 +479,10 @@ fn transition(store: &Store, id: &str, to: &str) -> Result<PlanRevisionRecord, E
         )?;
         revision_row(conn, id)
     })
+}
+
+fn current_status(store: &Store, id: &str) -> Result<String, Error> {
+    Ok(revision_by_id(store, id)?.status)
 }
 
 fn check_digest(store: &Store, id: &str) -> Result<(), Error> {
@@ -513,7 +550,10 @@ pub fn cancel(store: &Store, id: &str) -> Result<PlanRevisionRecord, Error> {
 
 /// 开始执行：approved → executing；被本版本取代的旧 revision 标 superseded。
 /// 返回 ready set（首批准入任务，M3 scheduler 据此创建 TaskAttempt）。
-pub fn start(store: &Store, id: &str) -> Result<(PlanRevisionRecord, Vec<String>), Error> {
+/// 开始执行：approved → executing；被本版本取代的旧 revision 标 superseded；
+/// 为 ready set（无依赖任务）创建 pending TaskAttempt（§6.2 第 7 步；
+/// M3 scheduler 据此推进，attempt 幂等：已存在的跳过）。
+pub fn start(store: &Store, id: &str) -> Result<(PlanRevisionRecord, Vec<AttemptInfo>), Error> {
     check_digest(store, id)?;
     let current = revision_by_id(store, id)?;
     if let Some(old) = &current.supersedes_id {
@@ -535,18 +575,125 @@ pub fn start(store: &Store, id: &str) -> Result<(PlanRevisionRecord, Vec<String>
             )?;
         }
     }
-    let r = transition(store, id, "executing")?;
+    // 幂等：已 executing 时跳过状态迁移（崩溃恢复重放安全）。
+    let r = if current_status(store, id)?.as_str() == "executing" {
+        revision_by_id(store, id)?
+    } else {
+        transition(store, id, "executing")?
+    };
     let tasks = store.with_conn(|conn| task_inputs(conn, id))?;
     let order = dag::validate_and_order(&to_dag_tasks(&tasks))
         .map_err(|e| Error::Message(format!("{}: {}", e.token, e.message)))?;
+    // ready set = 无依赖任务（拓扑序内保持确定性顺序）。
+    let ready: Vec<String> = order
+        .into_iter()
+        .filter(|k| {
+            tasks
+                .iter()
+                .find(|t| &t.task_key == k)
+                .is_some_and(|t| t.deps.is_empty())
+        })
+        .collect();
+    let mut attempts = Vec::new();
+    for key in &ready {
+        attempts.push(ensure_attempt(store, id, key)?);
+    }
     outbox::emit(
         store,
         "workitem",
         &r.workitem_id,
         "plan.started",
-        serde_json::json!({"planRevisionId": id, "readySet": order}),
+        serde_json::json!({"planRevisionId": id, "readySet": ready}),
     )?;
-    Ok((r, order))
+    Ok((r, attempts))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttemptInfo {
+    pub id: String,
+    pub task_key: String,
+    pub task_id: String,
+    pub attempt_no: i64,
+    pub state: String,
+}
+
+/// 任务 attempt（幂等）：已存在任何 attempt → 返回最新；否则建 pending。
+pub fn ensure_attempt(
+    store: &Store,
+    revision_id: &str,
+    task_key: &str,
+) -> Result<AttemptInfo, Error> {
+    store.with_conn(|conn| {
+        let task_id: String = conn
+            .query_row(
+                "SELECT id FROM plan_tasks WHERE plan_revision_id=?1 AND task_key=?2",
+                rusqlite::params![revision_id, task_key],
+                |r| r.get(0),
+            )
+            .map_err(|_| {
+                Error::Message(format!("plan_validation_failed: 任务 {task_key} 不存在"))
+            })?;
+        if let Some(a) = conn
+            .query_row(
+                "SELECT id, attempt_no, state FROM plan_task_attempts
+                 WHERE task_id=?1 ORDER BY attempt_no DESC LIMIT 1",
+                [&task_id],
+                |r| {
+                    Ok(AttemptInfo {
+                        id: r.get(0)?,
+                        task_key: task_key.to_string(),
+                        task_id: task_id.clone(),
+                        attempt_no: r.get(1)?,
+                        state: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+        {
+            return Ok(a);
+        }
+        let id = ids::new_id("ptatt");
+        let now = timefmt::now();
+        conn.execute(
+            "INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+             VALUES (?1,?2,1,'pending',?3,?3)",
+            rusqlite::params![id, task_id, now],
+        )?;
+        Ok(AttemptInfo {
+            id,
+            task_key: task_key.to_string(),
+            task_id,
+            attempt_no: 1,
+            state: "pending".into(),
+        })
+    })
+}
+
+/// 全部 attempt（按创建序）——read model / workspace prepare 用。
+pub fn attempts_of(store: &Store, revision_id: &str) -> Result<Vec<AttemptInfo>, Error> {
+    store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT pa.id, pt.task_key, pt.id, pa.attempt_no, pa.state
+             FROM plan_task_attempts pa
+             JOIN plan_tasks pt ON pt.id = pa.task_id
+             WHERE pt.plan_revision_id=?1
+             ORDER BY pa.created_at, pa.id",
+        )?;
+        let rows = stmt.query_map([revision_id], |r| {
+            Ok(AttemptInfo {
+                id: r.get(0)?,
+                task_key: r.get(1)?,
+                task_id: r.get(2)?,
+                attempt_no: r.get(3)?,
+                state: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    })
 }
 
 /// 某关当前有效计划（最新非 superseded/rejected/cancelled）。
@@ -678,9 +825,16 @@ mod tests {
         let r = approve(&store, &r.id, "owner").unwrap();
         assert_eq!(r.status, "approved");
         assert!(r.approved_by.as_deref() == Some("owner"), "审批身份落库");
-        let (r, order) = start(&store, &r.id).unwrap();
+        let (r, attempts) = start(&store, &r.id).unwrap();
         assert_eq!(r.status, "executing");
-        assert_eq!(order, vec!["spec", "implement", "verify"]);
+        // ready set = 无依赖任务（spec）；start 已为其创建 pending attempt。
+        assert_eq!(attempts.len(), 1, "仅 spec 无依赖");
+        assert_eq!(attempts[0].task_key, "spec");
+        assert_eq!(attempts[0].state, "pending");
+        // 幂等：再次 start 不新建 attempt（executing 状态迁移跳过）。
+        let (_, again) = start(&store, &r.id).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].id, attempts[0].id, "attempt 幂等");
         // executing 不可迁移回 awaiting_approval。
         assert!(transition(&store, &r.id, "awaiting_approval").is_err());
     }

@@ -206,7 +206,18 @@ export type RpcMethodName =
   | 'workflowTemplate.deprecate'
   | 'workflow.getInstance'
   | 'workflow.migrationPreview'
-  | 'workflow.migrate';
+  | 'workflow.migrate'
+  | 'plan.createDraft'
+  | 'plan.updateDraft'
+  | 'plan.get'
+  | 'plan.list'
+  | 'plan.submit'
+  | 'plan.decide'
+  | 'plan.start'
+  | 'plan.cancel'
+  | 'taskWorkspace.prepare'
+  | 'taskWorkspace.get'
+  | 'taskWorkspace.finalize';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -413,6 +424,17 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'workflow.getInstance',
   'workflow.migrationPreview',
   'workflow.migrate',
+  'plan.createDraft',
+  'plan.updateDraft',
+  'plan.get',
+  'plan.list',
+  'plan.submit',
+  'plan.decide',
+  'plan.start',
+  'plan.cancel',
+  'taskWorkspace.prepare',
+  'taskWorkspace.get',
+  'taskWorkspace.finalize',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -510,6 +532,12 @@ export const EVENT_TYPES: readonly string[] = [
   'workflow.template_activated',
   'workflow.instance_created',
   'workflow.instance_migrated',
+  'plan.draft_created',
+  'plan.approval_requested',
+  'plan.approved',
+  'plan.rejected',
+  'plan.started',
+  'plan.superseded',
 ] as const;
 
 export interface TimelineEvent {
@@ -1599,5 +1627,62 @@ export interface WorkflowMigrationPreviewParams {
 export interface WorkflowMigrateParams {
   workItemId: string;
   targetVersionId: string;
+  idempotencyKey: string;
+}
+
+export interface PlanCreateDraftParams {
+  workItemId: string;
+  tasks: unknown[];
+  idempotencyKey: string;
+  stageAttemptId?: string;
+}
+
+export interface PlanUpdateDraftParams {
+  planRevisionId: string;
+  tasks: unknown[];
+  idempotencyKey: string;
+}
+
+export interface PlanGetParams {
+  planRevisionId?: string;
+  workItemId?: string;
+}
+
+export interface PlanListParams {
+  workItemId: string;
+}
+
+export interface PlanSubmitParams {
+  planRevisionId: string;
+}
+
+export interface PlanDecideParams {
+  planRevisionId: string;
+  decision: string;
+  decidedBy: string;
+  reason?: string;
+}
+
+export interface PlanStartParams {
+  planRevisionId: string;
+  idempotencyKey: string;
+}
+
+export interface PlanCancelParams {
+  planRevisionId: string;
+  idempotencyKey: string;
+}
+
+export interface TaskWorkspacePrepareParams {
+  taskAttemptId: string;
+}
+
+export interface TaskWorkspaceGetParams {
+  taskAttemptId: string;
+}
+
+export interface TaskWorkspaceFinalizeParams {
+  taskAttemptId: string;
+  outcome: string;
   idempotencyKey: string;
 }

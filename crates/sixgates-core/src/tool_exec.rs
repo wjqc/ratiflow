@@ -200,16 +200,82 @@ fn git_out_full(dir: &std::path::Path, git_args: &[&str]) -> Option<(i32, String
     Some((out.status.code().unwrap_or(-1), text))
 }
 
+/// M2-08（ADR-037 §6.6）：执行前 PlanGuard——决策顺序第 3 环。
+/// Registry/Schema 解析成功后、真正执行前按 Run phase 判定；
+/// effect 无法确认（未注册工具不会走到这里；注册表漂移）= fail-closed。
+fn parse_effect(effect_class: &str) -> Option<sg_policy::plan_guard::EffectClass> {
+    use sg_policy::plan_guard::EffectClass;
+    match effect_class {
+        "none" => Some(EffectClass::None),
+        "read" => Some(EffectClass::Read),
+        "local_write" => Some(EffectClass::LocalWrite),
+        "external_write" => Some(EffectClass::ExternalWrite),
+        "irreversible" => Some(EffectClass::Irreversible),
+        _ => None,
+    }
+}
+
+fn run_phase_of(store: &Store, run_id: &str) -> sg_policy::plan_guard::GuardPhase {
+    use sg_policy::plan_guard::GuardPhase;
+    let phase = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row("SELECT phase FROM agent_runs WHERE id=?1", [run_id], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap_or_else(|_| "execution".into()))
+        })
+        .unwrap_or_else(|_| "execution".into());
+    match phase.as_str() {
+        "planning" => GuardPhase::Planning,
+        "reconciliation" => GuardPhase::Reconciliation,
+        _ => GuardPhase::Execution,
+    }
+}
+
+fn plan_guard_check(
+    store: &Store,
+    run_id: &str,
+    tool_name: &str,
+    effect: Option<sg_policy::plan_guard::EffectClass>,
+) -> Result<(), String> {
+    let phase = run_phase_of(store, run_id);
+    match sg_policy::plan_guard::check(phase, tool_name, effect) {
+        sg_policy::plan_guard::GuardDecision::Allow => Ok(()),
+        sg_policy::plan_guard::GuardDecision::Deny { token, reason } => {
+            Err(format!("{token}: {reason}"))
+        }
+    }
+}
+
 /// 构建注入 execute_run 的工具执行器（Run 任务内使用，经 run_store 访问库）。
 pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> SharedToolExecutor {
     Arc::new(move |p: &sg_agent::Proposal| -> Result<String, String> {
         // M6：MCP 工具不走静态注册表（动态注册+审批治理），结果按 64KiB 裁剪。
         if let Some(rest) = p.tool.strip_prefix("mcp__") {
+            // Registry 步：活跃注册解析（撤销 → tool_revoked，先于 PlanGuard）。
+            let resolved = resolve_mcp(&store, rest);
+            let (server_name, tool_name, active) = resolved?;
+            // 分类步：readOnlyHint → read；否则保守 external_write。
+            let effect = if active.read_only {
+                sg_policy::plan_guard::EffectClass::Read
+            } else {
+                sg_policy::plan_guard::EffectClass::ExternalWrite
+            };
+            // PlanGuard 步（M2-08）：phase 判定，planning 只放行只读 MCP。
+            plan_guard_check(
+                &store,
+                &p.run_id,
+                &format!("mcp__{server_name}__{tool_name}"),
+                Some(effect),
+            )?;
             let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
             let out = mcp_invoke(&ctx, &store, p, rest, &args)?;
             return Ok(tools::truncate_output(&out, 64 * 1024));
         }
         let def = tools::find(&p.tool).ok_or_else(|| format!("unknown tool: {}", p.tool))?;
+        // PlanGuard 步（M2-08）：注册表 effect_class 分类 → phase 判定。
+        plan_guard_check(&store, &p.run_id, &p.tool, parse_effect(def.effect_class))?;
         let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
         let out = match p.tool.as_str() {
             "write_file" => tools::write_draft(&ctx, &args)?,
@@ -244,6 +310,167 @@ pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> Sha
         // 输出截断（F05）：进模型消息的是截断版。
         Ok(tools::truncate_output(&out, def.max_result_bytes))
     })
+}
+
+#[cfg(test)]
+mod plan_guard_tests {
+    use super::*;
+    use sg_agent::tools::ToolCtx;
+    use std::process::Command;
+    use std::sync::Arc;
+
+    /// EV-006 / M2 退出标准：planning phase 的副作用调用 100% 被执行层拒绝，
+    /// 零副作用；execution phase 不受影响（legacy Run 默认 execution）。
+    fn git_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-pg-{}-{}",
+            std::process::id(),
+            sg_store::ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@sixgates.local"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+        std::fs::write(dir.join("app.txt"), "line1\n").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-qm", "init"]] {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+        dir
+    }
+
+    fn store_with_run(phase: &str) -> (Arc<Store>, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-pgs-{}-{}",
+            std::process::id(),
+            sg_store::ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(&dir, "test").unwrap());
+        let run_id = sg_store::ids::new_id("run");
+        store
+            .with_conn(|c| {
+                let now = sg_store::timefmt::now();
+                c.execute(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main',?1)",
+                    [&now],
+                )?;
+                c.execute(
+                    "INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi','pj','t','','[]','requirements',?1,?1)",
+                    [&now],
+                )?;
+                c.execute(
+                    "INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('ctx1','wi','{}','standard',?1)",
+                    [&now],
+                )?;
+                c.execute(
+                    "INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                        tool_allowlist, budget, policy_snapshot, idempotency_key, status, phase, created_at, updated_at)
+                     VALUES (?1,'wi','','g','sha','ctx1','[]','{}','default',?2,'running',?3,?1,?1)",
+                    rusqlite::params![run_id, now, phase],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        (store, run_id)
+    }
+
+    fn proposal(run_id: &str, tool: &str) -> sg_agent::Proposal {
+        sg_agent::Proposal {
+            id: sg_store::ids::new_id("tp"),
+            run_id: run_id.into(),
+            tool: tool.into(),
+            arguments: "{}".into(),
+            risk: "low".into(),
+            action_digest: "d".into(),
+            decision: "proposed".into(),
+            result: String::new(),
+            created_at: String::new(),
+        }
+    }
+
+    fn ctx_for(dir: &std::path::Path) -> ToolCtx {
+        ToolCtx {
+            mode: sg_executor::Mode::KernelRestricted,
+            work_dir: Some(dir.to_path_buf()),
+            artifacts_dir: dir.join("artifacts"),
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn planning_rejects_all_side_effect_tools_with_zero_side_effects() {
+        let repo = git_repo();
+        let (store, run_id) = store_with_run("planning");
+        let executor = make_executor(ctx_for(&repo), store.clone(), "pj".into());
+        let content_before = std::fs::read_to_string(repo.join("app.txt")).unwrap();
+        for tool in ["write_file", "apply_patch", "run_command"] {
+            let err = executor(&proposal(&run_id, tool)).unwrap_err();
+            assert!(
+                err.starts_with("plan_guard_denied"),
+                "{tool} planning 必须被 PlanGuard 拒绝: {err}"
+            );
+        }
+        // 零副作用：工作区未变、无草稿工件。
+        assert_eq!(
+            std::fs::read_to_string(repo.join("app.txt")).unwrap(),
+            content_before
+        );
+        let _ = store;
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn planning_allows_reads_and_execution_phase_unaffected() {
+        let repo = git_repo();
+        let (store, run_id) = store_with_run("planning");
+        let executor = make_executor(ctx_for(&repo), store.clone(), "pj".into());
+        // read_file 放行。
+        let mut p = proposal(&run_id, "read_file");
+        p.arguments = serde_json::json!({"path":"app.txt"}).to_string();
+        let out = executor(&p).unwrap();
+        assert!(out.contains("line1"), "planning 读文件放行: {out}");
+        // execution phase：run_command 照常执行（legacy 默认不受影响）。
+        let (store2, run2) = store_with_run("execution");
+        let executor2 = make_executor(ctx_for(&repo), store2, "pj".into());
+        let mut p2 = proposal(&run2, "run_command");
+        p2.arguments = serde_json::json!({"argv":["echo","hi"]}).to_string();
+        let out = executor2(&p2).unwrap();
+        assert!(
+            out.contains("hi"),
+            "execution 命令不受 PlanGuard 影响: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn unknown_effect_fails_closed_in_planning() {
+        // 注册表外工具（unknown tool）在 PlanGuard 之前就被 Registry 步拒绝。
+        let repo = git_repo();
+        let (store, run_id) = store_with_run("planning");
+        let executor = make_executor(ctx_for(&repo), store, "pj".into());
+        let err = executor(&proposal(&run_id, "not_a_tool")).unwrap_err();
+        assert!(err.contains("unknown tool"), "{err}");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }
 
 #[cfg(test)]
@@ -621,18 +848,12 @@ mod apply_patch_flow_tests {
 
 /// M6：MCP 工具调用——活跃注册校验（撤销/漂移明确失败）→ 进程级 stdio 会话 →
 /// 超时三态（写工具 = tool_outcome_unknown 禁自动重试）→ 裁剪 + 审计标注。
-fn mcp_invoke(
-    ctx: &tools::ToolCtx,
+/// MCP Registry 步：活跃注册解析（server/tool 名 + 活跃定义）。
+/// 撤销/未激活 → tool_revoked（先于 PlanGuard——未知工具不进 phase 判定）。
+fn resolve_mcp(
     store: &Arc<Store>,
-    proposal: &sg_agent::Proposal,
-    model_name: &str,
-    args: &Value,
-) -> Result<String, String> {
-    if ctx.read_only {
-        return Err("action_denied: 隔离 worktree 不可用，拒绝调用 MCP 工具".into());
-    }
-    let rest = model_name.strip_prefix("mcp__").unwrap_or(model_name);
-    // 解析 server/tool：尝试每个 "__" 分割点，以活跃注册表为准。
+    rest: &str,
+) -> Result<(String, String, sg_settings::mcp_ext::ActiveMcpTool), String> {
     let mut resolved: Option<(String, String)> = None;
     for (i, _) in rest.match_indices("__") {
         let server = &rest[..i];
@@ -645,7 +866,23 @@ fn mcp_invoke(
     let (server_name, tool_name) = resolved.ok_or_else(|| {
         "tool_revoked: MCP 工具已撤销/未激活（冻结 Run 不换工具，明确失败）".to_string()
     })?;
-    let active = sg_settings::mcp_ext::active_tool_for_invocation(store, &server_name, &tool_name)?;
+    let active = sg_settings::mcp_ext::active_tool_for_invocation(store, &server_name, &tool_name)
+        .map_err(|e| e.to_string())?;
+    Ok((server_name, tool_name, active))
+}
+
+fn mcp_invoke(
+    ctx: &tools::ToolCtx,
+    store: &Arc<Store>,
+    proposal: &sg_agent::Proposal,
+    model_name: &str,
+    args: &Value,
+) -> Result<String, String> {
+    if ctx.read_only {
+        return Err("action_denied: 隔离 worktree 不可用，拒绝调用 MCP 工具".into());
+    }
+    let rest = model_name.strip_prefix("mcp__").unwrap_or(model_name);
+    let (_server_name, tool_name, active) = resolve_mcp(store, rest)?;
     if active.transport != "stdio" {
         // https 本构建 fail-closed（远端不受本机沙箱保护，需独立评审后接入）。
         return Err(format!(

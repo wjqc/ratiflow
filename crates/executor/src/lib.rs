@@ -3,6 +3,7 @@
 //! 内核沙箱在 `sandbox/`（macOS Seatbelt / Linux Landlock）。
 pub mod process;
 pub mod sandbox;
+pub mod workspace;
 
 use serde::{Deserialize, Serialize};
 

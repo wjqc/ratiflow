@@ -199,6 +199,23 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
     ) {
         return crate::workflow_dispatch::dispatch(state, store, method, params);
     }
+    // --- 结构化计划与任务工作区（EvoFlow M2-09 / ADR-036/037）---
+    if matches!(
+        method,
+        "plan.createDraft"
+            | "plan.updateDraft"
+            | "plan.get"
+            | "plan.list"
+            | "plan.submit"
+            | "plan.decide"
+            | "plan.start"
+            | "plan.cancel"
+            | "taskWorkspace.prepare"
+            | "taskWorkspace.get"
+            | "taskWorkspace.finalize"
+    ) {
+        return crate::plan_dispatch::dispatch(state, store, method, params);
+    }
     match method {
         // --- 系统 ---
         "core.version" => Ok(

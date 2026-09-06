@@ -127,6 +127,95 @@ fn status_of(store: &Store, workitem_id: &str, main_head: &str) -> Option<Worktr
     })
 }
 
+// ---------------- M2-07：任务级 worktree（EvoFlow §6.3 / ADR-037 §6.7） ----------------
+// 写 TaskAttempt 独立 worktree：dataDir/worktrees/<workItemId>/<planRevisionId>/<taskAttemptId>，
+// 从计划冻结的 base HEAD 挂出（不是主工作区当前 HEAD——审批等待期间漂移不进任务）。
+
+/// 任务 worktree 路径约定（与 0034 task_workspaces.path 一致）。
+pub fn task_worktree_path(
+    store: &Store,
+    workitem_id: &str,
+    plan_revision_id: &str,
+    task_attempt_id: &str,
+) -> PathBuf {
+    worktree_root(store, workitem_id)
+        .join(plan_revision_id)
+        .join(task_attempt_id)
+}
+
+/// 挂出任务 worktree（幂等）：detached at base_head；目录已存在则返回当前状态。
+pub fn ensure_task_worktree(
+    store: &Store,
+    workitem_id: &str,
+    plan_revision_id: &str,
+    task_attempt_id: &str,
+    base_head: &str,
+) -> Result<WorktreeInfo, Error> {
+    let Some(local_root) = local_root_of(store, workitem_id)? else {
+        return Err(Error::Message("worktree_unavailable: 无 local_root".into()));
+    };
+    let main = PathBuf::from(&local_root);
+    let path = task_worktree_path(store, workitem_id, plan_revision_id, task_attempt_id);
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                path.to_string_lossy().as_ref(),
+                base_head,
+            ])
+            .output()
+            .map_err(|e| Error::Message(format!("workspace_unavailable: {e}")))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(Error::Message(format!(
+                "workspace_unavailable: git worktree add 失败 {stderr}"
+            )));
+        }
+    }
+    let main_head = git_out(&main, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let head = git_out(&path, &["rev-parse", "HEAD"])
+        .ok_or_else(|| Error::Message("workspace_unavailable: 任务 worktree 状态不可读".into()))?;
+    let branch = git_out(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let dirty = git_out(&path, &["status", "--porcelain"]).unwrap_or_default();
+    Ok(WorktreeInfo {
+        path: path.to_string_lossy().to_string(),
+        head,
+        branch,
+        dirty_files: dirty.lines().filter(|l| !l.trim().is_empty()).count(),
+        main_head,
+    })
+}
+
+/// 任务 worktree 工作区 digest：脏文件清单（路径+状态+内容行数）canonical 哈希。
+/// before/after 对比 = 变更指纹（0034 workspace_digest_before/after）。
+pub fn task_workspace_digest(
+    store: &Store,
+    workitem_id: &str,
+    plan_revision_id: &str,
+    task_attempt_id: &str,
+) -> Result<String, Error> {
+    use sha2::{Digest, Sha256};
+    let path = task_worktree_path(store, workitem_id, plan_revision_id, task_attempt_id);
+    let dirty = git_out(&path, &["status", "--porcelain"]).unwrap_or_default();
+    let mut lines: Vec<String> = dirty
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(String::from)
+        .collect();
+    lines.sort();
+    let head = git_out(&path, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(format!("wd1|{head}|{}", lines.join("\n")).as_bytes());
+    Ok(sg_store::ids::hex(&hasher.finalize()))
+}
+
 /// 恢复受管 worktree 到目标 HEAD（仅本目录；主工作区不参与）。
 /// `git reset --hard` + `clean -fd` 在 SixGates 受管 worktree 内是合法恢复操作，
 /// 与 SG-RBK-005 禁止的"主工作区隐式 hard reset"无关。
@@ -244,6 +333,38 @@ mod tests {
             main_repo.join("agent-output.md").metadata().is_err()
                 || !main_repo.join("agent-output.md").exists()
         );
+    }
+
+    /// M2-07：任务 worktree 从计划冻结 base HEAD 挂出——主区在"冻结后"新提交不进任务；
+    /// 两个 attempt 路径互不重叠（EV-007 路径面）。
+    #[test]
+    fn task_worktree_pins_base_head_and_paths_are_isolated() {
+        let (s, _repo_str, main_repo) = setup_with_git_repo();
+        let base_head = git_out(&main_repo, &["rev-parse", "HEAD"]).unwrap();
+        // 冻结后主区新提交（模拟审批等待期间漂移）。
+        std::fs::write(main_repo.join("drift.txt"), "later\n").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-m", "drift"]] {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main_repo)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+        let info = ensure_task_worktree(&s, "wi_1", "pr1", "pa1", &base_head).unwrap();
+        assert_eq!(info.head, base_head, "任务 worktree 钉在计划冻结 base HEAD");
+        assert!(
+            !std::path::Path::new(&info.path).join("drift.txt").exists(),
+            "冻结后的主区漂移不进任务工作区"
+        );
+        let info2 = ensure_task_worktree(&s, "wi_1", "pr1", "pa2", &base_head).unwrap();
+        assert_ne!(info.path, info2.path, "两个 attempt 路径不重叠");
+        // digest：写文件后变化。
+        let d0 = task_workspace_digest(&s, "wi_1", "pr1", "pa1").unwrap();
+        std::fs::write(std::path::Path::new(&info.path).join("out.txt"), "x\n").unwrap();
+        let d1 = task_workspace_digest(&s, "wi_1", "pr1", "pa1").unwrap();
+        assert_ne!(d0, d1, "digest 反映工作区变更");
     }
 
     #[test]

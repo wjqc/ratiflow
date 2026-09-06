@@ -597,6 +597,7 @@ function ExecutionProcessView({
   return (
     <div className="sg-process-grid">
       <InstanceGatesCard workItemId={workItemId} />
+      <PlanCard workItemId={workItemId} />
       {/* 左：执行时间线 */}
       <div className="sg-card sg-process-left">
         <div className="sg-card-head">执行时间线</div>
@@ -1890,6 +1891,51 @@ function GateWorkspace({
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/// M2-09（ADR-036/037 只读骨架）：结构化计划卡。
+/// SIXGATES_PLAN_DAG 关闭时 RPC 返回 feature_disabled → 静默不渲染（零行为变化）。
+function PlanCard({ workItemId }: { workItemId: string }) {
+  const [data, setData] = useState<{
+    latest?: {
+      revision: { revision_no: number; status: string };
+      tasks: { task_key: string; kind: string; effect_class: string; deps: string[] }[];
+      attempts: { task_key: string; state: string }[];
+    };
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    rpc<{ latest?: { revision: { revision_no: number; status: string }; tasks: { task_key: string; kind: string; effect_class: string; deps: string[] }[]; attempts: { task_key: string; state: string }[] } }>(
+      'plan.get',
+      { workItemId },
+    )
+      .then((r) => {
+        if (!cancelled) setData(r);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [workItemId]);
+  if (!data?.latest) return null;
+  const { revision, tasks, attempts } = data.latest;
+  const stateOf = (key: string) => attempts.find((a) => a.task_key === key)?.state ?? '未开始';
+  return (
+    <div className="sg-card" style={{ marginBottom: 12 }}>
+      <div className="sg-card-head">
+        计划 v{revision.revision_no} · {revision.status}
+      </div>
+      <div style={{ padding: '8px 16px', fontSize: 13 }}>
+        {tasks.map((t) => (
+          <div key={t.task_key} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+            <span style={{ opacity: 0.6 }}>{t.effect_class}</span>
+            <span>{t.task_key}</span>
+            <span style={{ marginLeft: 'auto', opacity: 0.75 }}>{stateOf(t.task_key)}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

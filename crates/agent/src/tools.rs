@@ -15,6 +15,8 @@ pub struct ToolDef {
     pub timeout_sec: i64,
     /// 参数 JSON Schema（形状说明；对齐 contracts/jsonschema/tool-definition.schema.json）。
     pub parameters: fn() -> Value,
+    /// M2-08：副作用分类（PlanGuard phase 判定输入；ADR-037 §6.6）。
+    pub effect_class: &'static str,
 }
 
 fn params_read_file() -> Value {
@@ -55,6 +57,7 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 60,
         parameters: params_apply_patch,
+        effect_class: "local_write",
     };
     static READ_FILE: ToolDef = ToolDef {
         name: "read_file",
@@ -64,6 +67,7 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 60,
         parameters: params_read_file,
+        effect_class: "read",
     };
     static RUN_COMMAND: ToolDef = ToolDef {
         name: "run_command",
@@ -73,6 +77,7 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 120,
         parameters: params_run_command,
+        effect_class: "local_write",
     };
     static SEARCH_KNOWLEDGE: ToolDef = ToolDef {
         name: "search_knowledge",
@@ -82,6 +87,7 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 30,
         parameters: params_search_knowledge,
+        effect_class: "read",
     };
     static WRITE_FILE: ToolDef = ToolDef {
         name: "write_file",
@@ -91,6 +97,7 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 60,
         parameters: params_write_file,
+        effect_class: "local_write",
     };
     // 字典序：apply_patch < read_file < run_command < search_knowledge < write_file
     vec![
