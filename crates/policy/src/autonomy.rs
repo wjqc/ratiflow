@@ -152,6 +152,28 @@ pub fn validate_grant(
     Ok(grant)
 }
 
+/// 派发闸专用的状态/时限校验（工具/风险白名单由 Goal 执行时逐动作校验）。
+pub fn validate_grant_status(
+    store: &Store,
+    grant_id: &str,
+    now: &str,
+) -> Result<GrantRecord, GrantError> {
+    let grant = load_grant(store, grant_id).map_err(|_| GrantError::NotFound)?;
+    match grant.status.as_str() {
+        "active" => {}
+        "revoked" => return Err(GrantError::Revoked),
+        "expired" => return Err(GrantError::Expired),
+        "exhausted" => return Err(GrantError::Exhausted),
+        _ => return Err(GrantError::NotFound),
+    }
+    if let Some(exp) = &grant.expires_at {
+        if !exp.is_empty() && exp.as_str() <= now {
+            return Err(GrantError::Expired);
+        }
+    }
+    Ok(grant)
+}
+
 /// 从 policy_snapshot JSON 读自治模式（agent.start 装配时写入；缺省 Agent）。
 pub fn mode_of_snapshot(policy_snapshot: &str) -> AutonomyMode {
     serde_json::from_str::<serde_json::Value>(policy_snapshot)
@@ -319,5 +341,177 @@ mod tests {
             mode_of_snapshot(r#"{"sandbox":{},"autonomyMode":"plan"}"#),
             AutonomyMode::Plan
         );
+    }
+}
+
+// ---------------- M6-03（EvoFlow 方案 §6.5 / ADR-037）：Goal 自动放行谓词 ----------------
+// Goal v2 七条硬条件的可判定子集（M6 交付面）：grant 未撤销未过期 + allow_gate_release
+// + 无 pending 审批 + 最新计划无 unknown/manual attempt。其余（release digest 一致、
+// trace coverage/evidence/requirements 满足）由放行链既有校验承接；
+// SIXGATES_AUTO_GATE_RELEASE 默认 0——谓词可用但消费侧关闭（EV-021）。
+
+pub const AUTO_GATE_RELEASE_FLAG: &str = "SIXGATES_AUTO_GATE_RELEASE";
+
+pub fn auto_gate_release_enabled() -> bool {
+    std::env::var(AUTO_GATE_RELEASE_FLAG).ok().as_deref() == Some("1")
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AutoReleaseCheck {
+    pub allowed: bool,
+    pub reasons: Vec<String>,
+}
+
+fn grant_by_id(store: &Store, grant_id: &str) -> Result<(String, Option<String>, i64), Error> {
+    store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT status, COALESCE(expires_at,''), allow_gate_release
+             FROM autonomy_grants WHERE id=?1",
+            [grant_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| Error::Message("autonomy_grant_required: grant 不存在".into()))
+    })
+}
+
+/// Goal v2 自动放行谓词（返回结构化原因，任一不满足即 paused，绝不假批准）。
+pub fn automatic_release_check(
+    store: &Store,
+    workitem_id: &str,
+    grant_id: &str,
+    now: &str,
+) -> Result<AutoReleaseCheck, Error> {
+    let mut reasons = Vec::new();
+    // 1) flag。
+    if !auto_gate_release_enabled() {
+        reasons.push("auto_gate_release_disabled".into());
+    }
+    // 2) grant 状态/时限/授权位。
+    match grant_by_id(store, grant_id) {
+        Ok((status, expires_at, allow_release)) => {
+            if status != "active" {
+                reasons.push(format!("grant_{status}"));
+            }
+            let expired = expires_at
+                .as_ref()
+                .is_some_and(|e| !e.is_empty() && e.as_str() <= now);
+            if expired {
+                reasons.push("grant_expired".into());
+            }
+            if allow_release == 0 {
+                reasons.push("grant_allow_gate_release_off".into());
+            }
+        }
+        Err(e) => reasons.push(e.to_string()),
+    }
+    // 3) 无 pending 审批。
+    let pending: i64 = store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM approvals WHERE workitem_id=?1 AND status='requested'",
+            [workitem_id],
+            |r| r.get(0),
+        )
+        .map_err(Error::from)
+    })?;
+    if pending > 0 {
+        reasons.push(format!("pending_approvals:{pending}"));
+    }
+    // 4) 最新计划无 unknown/manual attempt。
+    let bad_attempts: i64 = store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM plan_task_attempts pa
+             JOIN plan_tasks pt ON pt.id = pa.task_id
+             JOIN plan_revisions pr ON pr.id = pt.plan_revision_id
+             WHERE pr.workitem_id=?1
+               AND pa.state IN ('unknown','manual_action_required','reconciliation_required')",
+            [workitem_id],
+            |r| r.get(0),
+        )
+        .map_err(Error::from)
+    })?;
+    if bad_attempts > 0 {
+        reasons.push(format!("unknown_or_manual_attempts:{bad_attempts}"));
+    }
+    Ok(AutoReleaseCheck {
+        allowed: reasons.is_empty(),
+        reasons,
+    })
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+
+    fn setup() -> Store {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-goal-{}-{}",
+            std::process::id(),
+            sg_store::ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir, "test").unwrap();
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main','t');
+                    INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi','pj','t','','[]','requirements','t','t');",
+                )
+                .map_err(Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// Goal v2 谓词：flag 关/无授权位/撤销/过期/unknown 任一即拒绝（EV-021）。
+    #[test]
+    fn automatic_release_predicate_gates() {
+        let store = setup();
+        let mk = |status: &str, expires: &str, allow: i64| {
+            store
+                .with_conn(|c| {
+                    c.execute(
+                        "INSERT INTO autonomy_grants(id, status, expires_at, allow_gate_release, granted_at, created_at, updated_at)
+                         VALUES (?1,?2,?3,?4,'t','t','t')",
+                        rusqlite::params![format!("g_{status}_{expires}_{allow}"), status, expires, allow],
+                    )
+                    .map_err(Error::from)?;
+                    Ok(())
+                })
+                .unwrap();
+        };
+        mk("active", "2099-01-01", 1);
+        mk("revoked", "2099-01-01", 1);
+        mk("active", "2020-01-01", 1);
+        mk("active", "2099-01-01", 0);
+        // flag 关闭（默认）→ 一律拒绝。
+        let r =
+            automatic_release_check(&store, "wi", "g_active_2099-01-01_1", "2026-09-06").unwrap();
+        assert!(
+            !r.allowed
+                && r.reasons
+                    .contains(&"auto_gate_release_disabled".to_string())
+        );
+        // flag 开 → 该 grant 通过（无 pending/unknown）。
+        std::env::set_var(AUTO_GATE_RELEASE_FLAG, "1");
+        let r =
+            automatic_release_check(&store, "wi", "g_active_2099-01-01_1", "2026-09-06").unwrap();
+        assert!(r.allowed, "{:?}", r.reasons);
+        // 撤销/过期/未授权位 → 各自拒绝。
+        for (gid, reason) in [
+            ("g_revoked_2099-01-01_1", "grant_revoked"),
+            ("g_active_2020-01-01_1", "grant_expired"),
+            ("g_active_2099-01-01_0", "grant_allow_gate_release_off"),
+        ] {
+            let r = automatic_release_check(&store, "wi", gid, "2026-09-06").unwrap();
+            assert!(
+                !r.allowed && r.reasons.iter().any(|x| x.contains(reason)),
+                "{gid}: {:?}",
+                r.reasons
+            );
+        }
+        std::env::remove_var(AUTO_GATE_RELEASE_FLAG);
     }
 }

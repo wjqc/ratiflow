@@ -199,6 +199,21 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
     ) {
         return crate::workflow_dispatch::dispatch(state, store, method, params);
     }
+    // --- 自动化调度与 Goal（EvoFlow M6-04 / ADR-037/039）---
+    if matches!(
+        method,
+        "automation.create"
+            | "automation.list"
+            | "automation.pause"
+            | "automation.resume"
+            | "automation.runNow"
+            | "automation.history"
+            | "goal.autoReleaseCheck"
+            | "autonomy.createGrant"
+            | "notification.list"
+    ) {
+        return automation_rpc(store, method, params);
+    }
     // --- Trace 与 Slash（EvoFlow M5-04/06 / ADR-039）---
     if matches!(
         method,
@@ -3386,5 +3401,244 @@ mod model_usage_daily_tests {
         );
         assert_eq!(run1.last().unwrap()["cacheHitRatio"], json!(0.5));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// M6-04：automation.* / goal.* RPC（SIXGATES_AUTOMATIONS 门控创建/触发；
+/// 查询面不受限——审计可见）。
+fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
+    let automation_flag = std::env::var("SIXGATES_AUTOMATIONS").ok().as_deref() == Some("1");
+    let invalid = |m: String| RpcError::new(ErrorCode::InvalidParams, m.as_str());
+    let store_err =
+        |e: sg_store::Error| RpcError::new(ErrorCode::InternalError, e.to_string().as_str());
+    let str_param = |k: &str| -> Result<String, RpcError> {
+        params
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| invalid(format!("missing param: {k}")))
+    };
+    match method {
+        "automation.create" => {
+            if !automation_flag {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                ));
+            }
+            let a = sg_workflow::automation::create(
+                store,
+                &str_param("key")?,
+                params.get("projectId").and_then(|v| v.as_str()),
+                params.get("workItemId").and_then(|v| v.as_str()),
+                &params
+                    .get("intent")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".into()),
+                params
+                    .get("intervalSecs")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(3600),
+                params
+                    .get("misfirePolicy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("skip"),
+                params
+                    .get("overlapPolicy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("skip"),
+                params.get("autonomyGrantId").and_then(|v| v.as_str()),
+                params
+                    .get("createdBy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local"),
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(a).unwrap_or_default())
+        }
+        "automation.list" => {
+            let items: Vec<Value> = store
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, key, COALESCE(workitem_id,''), interval_secs, next_fire_at,
+                                status, revision FROM automations ORDER BY created_at",
+                    )?;
+                    let rows = stmt.query_map([], |r| {
+                        Ok(json!({
+                            "id": r.get::<_, String>(0)?,
+                            "key": r.get::<_, String>(1)?,
+                            "workItemId": r.get::<_, String>(2)?,
+                            "intervalSecs": r.get::<_, i64>(3)?,
+                            "nextFireAt": r.get::<_, String>(4)?,
+                            "status": r.get::<_, String>(5)?,
+                            "revision": r.get::<_, i64>(6)?,
+                        }))
+                    })?;
+                    let mut out = Vec::new();
+                    for row in rows {
+                        out.push(row?);
+                    }
+                    Ok(out)
+                })
+                .map_err(store_err)?;
+            Ok(json!({ "items": items }))
+        }
+        "automation.pause" | "automation.resume" => {
+            if !automation_flag {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                ));
+            }
+            let status = if method == "automation.pause" {
+                "paused"
+            } else {
+                "active"
+            };
+            let a = sg_workflow::automation::set_status(
+                store,
+                &str_param("automationId")?,
+                status,
+                params
+                    .get("expectedRevision")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(a).unwrap_or_default())
+        }
+        "automation.runNow" => {
+            if !automation_flag {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                ));
+            }
+            let automation_id = str_param("automationId")?;
+            let scheduled_for = params
+                .get("scheduledFor")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(sg_store::timefmt::now);
+            let (status, note) =
+                crate::automation_dispatch::fire_one(store, &automation_id, &scheduled_for)
+                    .map_err(store_err)?;
+            Ok(
+                json!({"automationId": automation_id, "scheduledFor": scheduled_for, "status": status, "note": note}),
+            )
+        }
+        "automation.history" => {
+            let automation_id = str_param("automationId")?;
+            let items: Vec<Value> = store
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT scheduled_for, receipt, status, note, created_at
+                         FROM automation_runs WHERE automation_id=?1 ORDER BY created_at",
+                    )?;
+                    let rows = stmt.query_map([&automation_id], |r| {
+                        Ok(json!({
+                            "scheduledFor": r.get::<_, String>(0)?,
+                            "receipt": r.get::<_, String>(1)?,
+                            "status": r.get::<_, String>(2)?,
+                            "note": r.get::<_, String>(3)?,
+                            "createdAt": r.get::<_, String>(4)?,
+                        }))
+                    })?;
+                    let mut out = Vec::new();
+                    for row in rows {
+                        out.push(row?);
+                    }
+                    Ok(out)
+                })
+                .map_err(store_err)?;
+            Ok(json!({ "items": items }))
+        }
+        "autonomy.createGrant" => {
+            if !automation_flag {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                ));
+            }
+            let id = sg_store::ids::new_id("agr");
+            let now = sg_store::timefmt::now();
+            let workitem_id = str_param("workItemId")?;
+            let allowed_tools = params
+                .get("allowedTools")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let allowed_risks = params
+                .get("allowedRisks")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            store.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO autonomy_grants(id, workitem_id, allowed_tools_json, allowed_risks_json,
+                        expires_at, granted_at, created_at, updated_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?6,?6)",
+                    rusqlite::params![
+                        id,
+                        workitem_id,
+                        serde_json::to_string(&allowed_tools).unwrap_or_default(),
+                        serde_json::to_string(&allowed_risks).unwrap_or_default(),
+                        params.get("expiresAt").and_then(|v| v.as_str()).unwrap_or(""),
+                        now
+                    ],
+                )
+                .map_err(Error::from)?;
+                Ok(())
+            })
+            .map_err(store_err)?;
+            Ok(json!({"grantId": id}))
+        }
+        "goal.autoReleaseCheck" => {
+            let check = sg_policy::autonomy::automatic_release_check(
+                store,
+                &str_param("workItemId")?,
+                &str_param("grantId")?,
+                &sg_store::timefmt::now(),
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(check).unwrap_or_default())
+        }
+        "notification.list" => {
+            let items: Vec<Value> = store
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, kind, COALESCE(workitem_id,''), COALESCE(automation_id,''),
+                                payload_json, delivered, created_at
+                         FROM notification_outbox ORDER BY created_at LIMIT 100",
+                    )?;
+                    let rows = stmt.query_map([], |r| {
+                        Ok(json!({
+                            "id": r.get::<_, String>(0)?,
+                            "kind": r.get::<_, String>(1)?,
+                            "workItemId": r.get::<_, String>(2)?,
+                            "automationId": r.get::<_, String>(3)?,
+                            "payload": serde_json::from_str::<Value>(&r.get::<_, String>(4)?).unwrap_or(json!({})),
+                            "delivered": r.get::<_, i64>(5)? != 0,
+                            "createdAt": r.get::<_, String>(6)?,
+                        }))
+                    })?;
+                    let mut out = Vec::new();
+                    for row in rows {
+                        out.push(row?);
+                    }
+                    Ok(out)
+                })
+                .map_err(store_err)?;
+            Ok(json!({ "items": items }))
+        }
+        _ => Err(invalid(format!("unknown automation method: {method}"))),
     }
 }

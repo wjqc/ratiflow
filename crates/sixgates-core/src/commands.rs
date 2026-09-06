@@ -34,7 +34,6 @@ impl SlashIntent {
             SlashIntent::Migrate => "换模板",
         }
     }
-
 }
 
 #[derive(Debug, Clone)]

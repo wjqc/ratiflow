@@ -15,6 +15,7 @@ extern "C" {
 unsafe fn libc_getppid() -> i32 {
     getppid()
 }
+mod automation_dispatch;
 mod commands;
 mod memory_dispatch;
 mod migrate;
@@ -168,6 +169,16 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
             eprintln!("{{\"level\":\"warn\",\"msg\":\"rollback resume failed: {e}\"}}");
         }
     }
+    // M6-04：自动化孤儿触发收敛（重复启动不重复执行——receipt 已去重，只标终态）。
+    if std::env::var("SIXGATES_AUTOMATIONS").ok().as_deref() == Some("1") {
+        match sg_workflow::automation::reconcile_orphans(&store) {
+            Ok(n) if n > 0 => {
+                eprintln!("{{\"level\":\"info\",\"msg\":\"automation orphan reconcile: {n}\"}}");
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("{{\"level\":\"warn\",\"msg\":\"automation reconcile: {e}\"}}"),
+        }
+    }
     // Agent Run 启动对账：崩溃/重启遗留的 queued/running 标 failed(interrupted)，
     // 前端轮询立即见终态，不再挂满超时窗口。
     match sg_agent::reconcile_interrupted(&store) {
@@ -254,6 +265,30 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
             loop {
                 tick.tick().await;
                 flush_once(&app, &wtx).await;
+            }
+        });
+    }
+
+    // M6-04：自动化调度 timer（SIXGATES_AUTOMATIONS=1；5s tick）。
+    if std::env::var("SIXGATES_AUTOMATIONS").ok().as_deref() == Some("1") {
+        let app_timer = app.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let result = app_timer
+                    .db
+                    .call(automation_dispatch::fire_due)
+                    .await;
+                match result {
+                    Ok(Ok(fired)) if !fired.is_empty() => {
+                        for (id, status, note) in &fired {
+                            eprintln!("{{\"level\":\"info\",\"msg\":\"automation {id} -> {status}: {note}\"}}");
+                        }
+                    }
+                    _ => {}
+                }
             }
         });
     }

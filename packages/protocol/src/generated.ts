@@ -249,7 +249,17 @@ export type RpcMethodName =
   | 'trace.taskReadModel'
   | 'trace.restoreCheckpoint'
   | 'command.preview'
-  | 'command.execute';
+  | 'command.execute'
+  | 'automation.create'
+  | 'automation.list'
+  | 'automation.pause'
+  | 'automation.resume'
+  | 'automation.runNow'
+  | 'automation.history'
+  | 'goal.autoReleaseCheck'
+  | 'notification.list'
+  | 'skill.importFromRegistry'
+  | 'autonomy.createGrant';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -499,6 +509,16 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'trace.restoreCheckpoint',
   'command.preview',
   'command.execute',
+  'automation.create',
+  'automation.list',
+  'automation.pause',
+  'automation.resume',
+  'automation.runNow',
+  'automation.history',
+  'goal.autoReleaseCheck',
+  'notification.list',
+  'skill.importFromRegistry',
+  'autonomy.createGrant',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -612,6 +632,10 @@ export const EVENT_TYPES: readonly string[] = [
   'command.previewed',
   'command.executed',
   'context.tools_excluded',
+  'automation.triggered',
+  'automation.skipped',
+  'automation.paused',
+  'automation.failed',
 ] as const;
 
 export interface TimelineEvent {
@@ -1913,4 +1937,54 @@ export interface CommandExecuteParams {
   workItemId: string;
   text: string;
   previewToken: string;
+}
+
+export interface AutomationCreateParams {
+  key: string;
+  intent: unknown;
+  intervalSecs: number;
+  workItemId?: string;
+  misfirePolicy?: string;
+  overlapPolicy?: string;
+  autonomyGrantId?: string;
+}
+
+export type AutomationListParams = Record<string, never>;
+
+export interface AutomationPauseParams {
+  automationId: string;
+  expectedRevision: number;
+}
+
+export interface AutomationResumeParams {
+  automationId: string;
+  expectedRevision: number;
+}
+
+export interface AutomationRunNowParams {
+  automationId: string;
+  scheduledFor?: string;
+}
+
+export interface AutomationHistoryParams {
+  automationId: string;
+}
+
+export interface GoalAutoReleaseCheckParams {
+  workItemId: string;
+  grantId: string;
+}
+
+export type NotificationListParams = Record<string, never>;
+
+export interface SkillImportFromRegistryParams {
+  repoUrl: string;
+  pinSha: string;
+}
+
+export interface AutonomyCreateGrantParams {
+  workItemId: string;
+  allowedTools?: unknown[];
+  allowedRisks?: unknown[];
+  expiresAt?: string;
 }

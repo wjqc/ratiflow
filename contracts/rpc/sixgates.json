@@ -4350,6 +4350,174 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "automation.create",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "intent",
+          "type": "object",
+          "required": true
+        },
+        {
+          "name": "intervalSecs",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "misfirePolicy",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "overlapPolicy",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "autonomyGrantId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "automation.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "automation.pause",
+      "params": [
+        {
+          "name": "automationId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "automation.resume",
+      "params": [
+        {
+          "name": "automationId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "automation.runNow",
+      "params": [
+        {
+          "name": "automationId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "scheduledFor",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "automation.history",
+      "params": [
+        {
+          "name": "automationId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "goal.autoReleaseCheck",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "grantId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "notification.list",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "skill.importFromRegistry",
+      "params": [
+        {
+          "name": "repoUrl",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "pinSha",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "autonomy.createGrant",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "allowedTools",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "allowedRisks",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "expiresAt",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [
@@ -4462,6 +4630,10 @@
     "trace.span_completed",
     "command.previewed",
     "command.executed",
-    "context.tools_excluded"
+    "context.tools_excluded",
+    "automation.triggered",
+    "automation.skipped",
+    "automation.paused",
+    "automation.failed"
   ]
 }

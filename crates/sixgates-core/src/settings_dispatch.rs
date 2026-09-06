@@ -747,6 +747,23 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                 .collect();
             Ok(json!({ "items": items }))
         }
+        "skill.importFromRegistry" => {
+            let out = settings::skill_registry::import_from_git(
+                store,
+                s(p, "repoUrl")?,
+                s(p, "pinSha")?,
+                p.get("createdBy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local"),
+            )
+            .map_err(|e| {
+                serr(settings::SettingsError::new(
+                    "INVALID_PARAMS",
+                    e.to_string(),
+                ))
+            })?;
+            Ok(serde_json::to_value(out).unwrap_or_default())
+        }
         "backup.create" => {
             let op = settings::operations::begin(store, "backup.create", false).map_err(serr)?;
             let _ = settings::operations::progress(

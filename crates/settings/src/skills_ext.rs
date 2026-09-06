@@ -137,7 +137,7 @@ pub fn list(store: &Store) -> SettingsResult<Vec<Skill>> {
         .map_err(store_err)
 }
 
-fn skill_by_name(store: &Store, name: &str) -> SettingsResult<Option<Skill>> {
+pub(crate) fn skill_by_name(store: &Store, name: &str) -> SettingsResult<Option<Skill>> {
     store
         .with_conn(|conn| {
             Ok(conn
