@@ -9,6 +9,7 @@ pub mod dag;
 pub mod delivery;
 pub mod instance;
 pub mod plan;
+pub mod replan;
 pub mod template;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

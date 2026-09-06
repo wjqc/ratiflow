@@ -23,6 +23,8 @@ pub struct DagTask {
     pub deps: Vec<String>,
     /// 写任务（local_write/external_write/irreversible effect）标记，孤立检查用。
     pub is_write: bool,
+    /// 复用携带（replan 闭包外成功任务）：产物已存在，豁免孤立写检查。
+    pub is_reused: bool,
 }
 
 impl DagTask {
@@ -31,6 +33,7 @@ impl DagTask {
             task_key: task_key.to_string(),
             deps: deps.iter().map(|s| s.to_string()).collect(),
             is_write,
+            is_reused: false,
         }
     }
 
@@ -40,6 +43,17 @@ impl DagTask {
             task_key,
             deps,
             is_write,
+            is_reused: false,
+        }
+    }
+
+    /// replan 携带任务：产物已物化，豁免孤立写检查。
+    pub fn carried(task_key: String, deps: Vec<String>, is_write: bool) -> Self {
+        Self {
+            task_key,
+            deps,
+            is_write,
+            is_reused: true,
         }
     }
 }
@@ -72,7 +86,8 @@ pub fn validate_and_order(tasks: &[DagTask]) -> Result<Vec<String>, DagError> {
             }
         }
     }
-    // 孤立写任务：无上游依赖且无下游消费的写任务（副作用无人核对）。
+    // 孤立写任务：无上游依赖且无下游消费的写任务（副作用无人核对）；
+    // 复用携带任务豁免（产物已物化，消费方由上一版本计划的历史保证）。
     let mut has_downstream: BTreeSet<&str> = BTreeSet::new();
     for t in tasks {
         for dep in &t.deps {
@@ -80,7 +95,11 @@ pub fn validate_and_order(tasks: &[DagTask]) -> Result<Vec<String>, DagError> {
         }
     }
     for t in tasks {
-        if t.is_write && t.deps.is_empty() && !has_downstream.contains(t.task_key.as_str()) {
+        if t.is_write
+            && !t.is_reused
+            && t.deps.is_empty()
+            && !has_downstream.contains(t.task_key.as_str())
+        {
             return Err(DagError {
                 token: "plan_validation_failed",
                 message: format!("孤立写任务 {}（无上游输入且无下游消费）", t.task_key),

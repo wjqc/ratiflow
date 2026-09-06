@@ -7,7 +7,7 @@ use rusqlite::OptionalExtension;
 use sg_store::{ids, outbox, timefmt, Error, Store};
 use sha2::{Digest, Sha256};
 
-use crate::dag::{self, DagTask};
+use crate::dag;
 
 /// §6.2 PlanRevision 状态机合法迁移。
 fn can_transition(from: &str, to: &str) -> bool {
@@ -15,6 +15,9 @@ fn can_transition(from: &str, to: &str) -> bool {
         (from, to),
         ("draft", "awaiting_approval")
             | ("draft", "cancelled")
+            // replan 无需重批的快路径（§6.4：diff 无授权扩大时免重审）；
+            // RPC plan.decide 仍要求命中 pending 审批行，正常计划不可绕过评审。
+            | ("draft", "approved")
             | ("awaiting_approval", "approved")
             | ("awaiting_approval", "rejected")
             | ("awaiting_approval", "cancelled")
@@ -85,24 +88,28 @@ pub struct PlanTaskRecord {
     pub team_role_key: Option<String>,
 }
 
+impl PlanTaskRecord {
+    /// 回读转定义输入（replan 携带/diff 用）。
+    pub fn as_input(&self) -> PlanTaskInput {
+        PlanTaskInput {
+            task_key: self.task_key.clone(),
+            kind: self.kind.clone(),
+            title: self.title.clone(),
+            inputs: self.inputs.clone(),
+            expected_outputs: self.expected_outputs.clone(),
+            acceptance: self.acceptance.clone(),
+            effect_class: self.effect_class.clone(),
+            deps: self.deps.clone(),
+            team_role_key: self.team_role_key.clone(),
+        }
+    }
+}
+
 fn is_write_effect(effect_class: &str) -> bool {
     matches!(
         effect_class,
         "local_write" | "external_write" | "irreversible"
     )
-}
-
-fn to_dag_tasks(tasks: &[PlanTaskInput]) -> Vec<DagTask> {
-    tasks
-        .iter()
-        .map(|t| {
-            DagTask::from_strings(
-                t.task_key.clone(),
-                t.deps.clone(),
-                is_write_effect(&t.effect_class),
-            )
-        })
-        .collect()
 }
 
 /// 内容 digest：task_key 排序的 canonical 结构（deps 同步排序），前缀 pd1。
@@ -154,7 +161,10 @@ const EFFECTS: [&str; 5] = [
     "irreversible",
 ];
 
-fn validate_inputs(tasks: &[PlanTaskInput]) -> Result<Vec<String>, Error> {
+fn validate_inputs_ex(
+    tasks: &[PlanTaskInput],
+    exempt_orphan: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, Error> {
     // 结构校验（kind/effect 枚举）在入库前；图校验（环/引用/孤立写）复用 dag.rs。
     for t in tasks {
         if !KINDS.contains(&t.kind.as_str()) {
@@ -175,8 +185,24 @@ fn validate_inputs(tasks: &[PlanTaskInput]) -> Result<Vec<String>, Error> {
             ));
         }
     }
-    dag::validate_and_order(&to_dag_tasks(tasks))
+    let dag_tasks: Vec<dag::DagTask> = tasks
+        .iter()
+        .map(|t| {
+            let mut d = dag::DagTask::from_strings(
+                t.task_key.clone(),
+                t.deps.clone(),
+                is_write_effect(&t.effect_class),
+            );
+            d.is_reused = exempt_orphan.contains(&t.task_key);
+            d
+        })
+        .collect();
+    dag::validate_and_order(&dag_tasks)
         .map_err(|e| Error::Message(format!("{}: {}", e.token, e.message)))
+}
+
+fn validate_inputs(tasks: &[PlanTaskInput]) -> Result<Vec<String>, Error> {
+    validate_inputs_ex(tasks, &std::collections::BTreeSet::new())
 }
 
 /// 确定性 Markdown 投影（用户可读；权威在结构化表）。按拓扑序渲染。
@@ -354,7 +380,28 @@ pub fn create_draft(
     created_by: &str,
     supersedes_id: Option<&str>,
 ) -> Result<PlanRevisionRecord, Error> {
-    validate_inputs(tasks)?;
+    create_draft_ex(
+        store,
+        workitem_id,
+        stage_attempt_id,
+        tasks,
+        created_by,
+        supersedes_id,
+        &std::collections::BTreeSet::new(),
+    )
+}
+
+/// replan 变体：豁免集合内的复用任务跳过孤立写检查（产物已物化）。
+pub fn create_draft_ex(
+    store: &Store,
+    workitem_id: &str,
+    stage_attempt_id: &str,
+    tasks: &[PlanTaskInput],
+    created_by: &str,
+    supersedes_id: Option<&str>,
+    exempt_orphan: &std::collections::BTreeSet<String>,
+) -> Result<PlanRevisionRecord, Error> {
+    validate_inputs_ex(tasks, exempt_orphan)?;
     let id = ids::new_id("prev");
     let now = timefmt::now();
     store.with_conn(|conn| {
@@ -485,6 +532,20 @@ fn current_status(store: &Store, id: &str) -> Result<String, Error> {
     Ok(revision_by_id(store, id)?.status)
 }
 
+/// 携带/复用任务键（孤立写检查豁免集）：replan 落 carried_from_old / reused_from_attempt_id。
+fn exemptions_of(conn: &rusqlite::Connection, revision_id: &str) -> Result<Vec<String>, Error> {
+    let mut stmt = conn.prepare(
+        "SELECT task_key FROM plan_tasks
+         WHERE plan_revision_id=?1 AND (carried_from_old=1 OR reused_from_attempt_id IS NOT NULL)",
+    )?;
+    let rows = stmt.query_map([revision_id], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 fn check_digest(store: &Store, id: &str) -> Result<(), Error> {
     let current = revision_by_id(store, id)?;
     let tasks = store.with_conn(|conn| task_inputs(conn, id))?;
@@ -499,8 +560,12 @@ fn check_digest(store: &Store, id: &str) -> Result<(), Error> {
 /// 提交审批：draft → awaiting_approval（再次激活校验，防 draft 期间内容被改出环）。
 pub fn submit(store: &Store, id: &str) -> Result<PlanRevisionRecord, Error> {
     check_digest(store, id)?;
-    let tasks = store.with_conn(|conn| task_inputs(conn, id))?;
-    validate_inputs(&tasks)?;
+    let (tasks, exempt) = store.with_conn(|conn| {
+        let tasks = task_inputs(conn, id)?;
+        let ex = exemptions_of(conn, id)?;
+        Ok((tasks, ex))
+    })?;
+    validate_inputs_ex(&tasks, &exempt.into_iter().collect())?;
     let r = transition(store, id, "awaiting_approval")?;
     outbox::emit(
         store,
@@ -581,9 +646,25 @@ pub fn start(store: &Store, id: &str) -> Result<(PlanRevisionRecord, Vec<Attempt
     } else {
         transition(store, id, "executing")?
     };
-    let tasks = store.with_conn(|conn| task_inputs(conn, id))?;
-    let order = dag::validate_and_order(&to_dag_tasks(&tasks))
-        .map_err(|e| Error::Message(format!("{}: {}", e.token, e.message)))?;
+    let (tasks, exempt) = store.with_conn(|conn| {
+        let tasks = task_inputs(conn, id)?;
+        let ex = exemptions_of(conn, id)?;
+        Ok((tasks, ex))
+    })?;
+    let order = validate_inputs_ex(&tasks, &exempt.into_iter().collect())?;
+    // 复用任务（reused_from_attempt_id）不重跑：排除出 ready attempt 创建。
+    let reused: std::collections::BTreeSet<String> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT task_key FROM plan_tasks
+             WHERE plan_revision_id=?1 AND reused_from_attempt_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([id], |r| r.get::<_, String>(0))?;
+        let mut out = std::collections::BTreeSet::new();
+        for row in rows {
+            out.insert(row?);
+        }
+        Ok(out)
+    })?;
     // ready set = 无依赖任务（拓扑序内保持确定性顺序）。
     let ready: Vec<String> = order
         .into_iter()
@@ -596,6 +677,9 @@ pub fn start(store: &Store, id: &str) -> Result<(PlanRevisionRecord, Vec<Attempt
         .collect();
     let mut attempts = Vec::new();
     for key in &ready {
+        if reused.contains(key) {
+            continue; // 复用：执行事实已在上一版本，不建新 attempt
+        }
         attempts.push(ensure_attempt(store, id, key)?);
     }
     outbox::emit(

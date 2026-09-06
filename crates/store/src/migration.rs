@@ -60,6 +60,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         34,
         include_str!("../migrations/0034_autonomy_workspace.sql"),
     ),
+    (35, include_str!("../migrations/0035_plan_task_carried.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。
