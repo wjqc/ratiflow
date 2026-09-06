@@ -1,6 +1,8 @@
 //! 风险分级、ActionDigest 与审批（v2 ADR-022/023 行为等价）。
 //! 审批绑定 ActionDigest：参数变化使既有批准立即失效。
 
+pub mod plan_guard;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
