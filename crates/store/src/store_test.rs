@@ -732,4 +732,141 @@ mod tests {
         });
         assert!(bad_state.is_err(), "attempt state CHECK 应拒绝 done");
     }
+    /// M2-05（0034）：autonomy_grants/workspace_policy_versions/task_workspaces/
+    /// run_interrupts/agent_runs 冻结 refs/approvals 扩作用域。
+    #[test]
+    fn migration_0034_autonomy_workspace_semantics() {
+        let (store, _guard) = open();
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main','t');
+                    INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi','pj','t','','[]','requirements','t','t');
+                    INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('ctx1','wi','{}','standard','t');
+                    INSERT INTO stage_attempts(id, workitem_id, gate, attempt_no, branch_no, state, entry_snapshot_id,
+                        input_package_sha256, active_output_package_id, predecessor_attempt_id, created_at, updated_at)
+                     VALUES ('att1','wi','requirements',1,1,'prepared','','',NULL,NULL,'t','t');
+                    INSERT INTO plan_revisions(id, workitem_id, stage_attempt_id, revision_no, status, digest, created_at, updated_at)
+                     VALUES ('pr1','wi','att1',1,'draft','d','t','t');
+                    INSERT INTO plan_tasks(id, plan_revision_id, task_key, kind, effect_class, created_at)
+                     VALUES ('pt1','pr1','t1','local_write','local_write','t');
+                    INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+                     VALUES ('pa1','pt1',1,'ready','t','t');",
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        // grant：合法行 + 非法状态拒绝。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO autonomy_grants(id, workitem_id, gate_id, plan_digest, limits_json, granted_at, expires_at, created_at, updated_at)
+                     VALUES ('ag1','wi','requirements','pd1','{}','t','t','t','t')",
+                    [],
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        let bad_grant: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO autonomy_grants(id, status, granted_at, created_at, updated_at)
+                 VALUES ('ag2','paused','t','t','t')",
+                [],
+            )?)
+        });
+        assert!(bad_grant.is_err(), "grant status CHECK 应拒绝 paused");
+        // workspace policy：合法 + 非法策略拒绝。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO workspace_policy_versions(id, strategy, sandbox_minimum, digest, created_at, updated_at)
+                     VALUES ('wsp1','task_worktree','kernel_restricted','d','t','t')",
+                    [],
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        let bad_policy: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO workspace_policy_versions(id, strategy, sandbox_minimum, digest, created_at, updated_at)
+                 VALUES ('wsp2','unsafe','kernel_restricted','d','t','t')",
+                [],
+            )?)
+        });
+        assert!(bad_policy.is_err(), "strategy CHECK 应拒绝 unsafe");
+        // task workspace：attempt 唯一 + path 唯一（两个写 task 不共享路径——EV-007）。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO task_workspaces(id, task_attempt_id, workspace_policy_version_id, path, base_head, created_at, updated_at)
+                     VALUES ('tw1','pa1','wsp1','dataDir/worktrees/wi/pr1/pa1','head1','t','t')",
+                    [],
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        let dup_attempt: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO task_workspaces(id, task_attempt_id, path, created_at, updated_at)
+                 VALUES ('tw2','pa1','another/path','t','t')",
+                [],
+            )?)
+        });
+        assert!(dup_attempt.is_err(), "task_attempt UNIQUE 应拒绝第二工作区");
+        let dup_path: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+                 VALUES ('pa2','pt1',2,'pending','t','t')",
+                [],
+            )?)
+        });
+        assert!(dup_path.is_err(), "单活跃约束承接：同任务第二活跃拒绝");
+        // approvals 扩作用域：plan_revision/autonomy_grant 可写；未知类型拒绝。
+        let plan_approval: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO approvals(id, subject_type, subject_id, action_digest, risk, expires_at, created_at)
+                 VALUES ('apr1','plan_revision','pr1','d','medium','t','t')",
+                [],
+            )?)
+        });
+        assert!(plan_approval.is_ok());
+        let bad_subject: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO approvals(id, subject_type, subject_id, action_digest, risk, expires_at, created_at)
+                 VALUES ('apr2','plan','pr1','d','medium','t','t')",
+                [],
+            )?)
+        });
+        assert!(
+            bad_subject.is_err(),
+            "approvals subject_type CHECK 应拒绝 plan"
+        );
+        // agent_runs 冻结 refs 列存在且可写。
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                        tool_allowlist, budget, policy_snapshot, idempotency_key, status, plan_revision_id,
+                        plan_task_attempt_id, workspace_policy_version_id, phase, created_at, updated_at)
+                     VALUES ('run1','wi','','g','sha','ctx1','[]','{}','default','ik34','queued',
+                        'pr1','pa1','wsp1','execution','t','t');
+                    INSERT INTO run_interrupts(id, run_id, kind, question, created_at, updated_at)
+                     VALUES ('ri1','run1','clarification','要不要继续？','t','t');",
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        let bad_phase: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute("UPDATE agent_runs SET phase='idle' WHERE id='run1'", [])?)
+        });
+        assert!(bad_phase.is_err(), "agent_runs phase CHECK 应拒绝 idle");
+    }
 }

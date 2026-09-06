@@ -116,7 +116,8 @@ pub fn evaluate(input: &GuardInput) -> GuardDecision {
                 return GuardDecision::Allow;
             }
             // 明确只读 MCP：mcp__ 前缀且 effect 为 none/read。
-            if input.tool_name.starts_with("mcp__") && matches!(effect, EffectClass::None | EffectClass::Read)
+            if input.tool_name.starts_with("mcp__")
+                && matches!(effect, EffectClass::None | EffectClass::Read)
             {
                 return GuardDecision::Allow;
             }
@@ -160,7 +161,13 @@ mod tests {
         for tool in ["write_file", "apply_patch", "run_command"] {
             let d = check(GuardPhase::Planning, tool, Some(EffectClass::LocalWrite));
             assert!(
-                matches!(d, GuardDecision::Deny { token: "plan_guard_denied", .. }),
+                matches!(
+                    d,
+                    GuardDecision::Deny {
+                        token: "plan_guard_denied",
+                        ..
+                    }
+                ),
                 "{tool} 应被拒绝: {d:?}"
             );
         }
@@ -168,29 +175,62 @@ mod tests {
 
     #[test]
     fn planning_allows_reads_clarification_and_plan_draft() {
-        for tool in ["read_file", "search_knowledge", "ask_clarification", "plan.writeDraft"] {
+        for tool in [
+            "read_file",
+            "search_knowledge",
+            "ask_clarification",
+            "plan.writeDraft",
+        ] {
             let d = check(GuardPhase::Planning, tool, Some(EffectClass::Read));
             assert!(matches!(d, GuardDecision::Allow), "{tool} 应放行: {d:?}");
         }
         // plan.writeDraft effect 是 none 也放行。
-        let d = check(GuardPhase::Planning, "plan.writeDraft", Some(EffectClass::None));
+        let d = check(
+            GuardPhase::Planning,
+            "plan.writeDraft",
+            Some(EffectClass::None),
+        );
         assert!(matches!(d, GuardDecision::Allow));
     }
 
     #[test]
     fn planning_allows_only_readonly_mcp() {
-        let d = check(GuardPhase::Planning, "mcp__srv__read_thing", Some(EffectClass::Read));
+        let d = check(
+            GuardPhase::Planning,
+            "mcp__srv__read_thing",
+            Some(EffectClass::Read),
+        );
         assert!(matches!(d, GuardDecision::Allow));
-        let d = check(GuardPhase::Planning, "mcp__srv__send_thing", Some(EffectClass::ExternalWrite));
-        assert!(matches!(d, GuardDecision::Deny { token: "plan_guard_denied", .. }));
+        let d = check(
+            GuardPhase::Planning,
+            "mcp__srv__send_thing",
+            Some(EffectClass::ExternalWrite),
+        );
+        assert!(matches!(
+            d,
+            GuardDecision::Deny {
+                token: "plan_guard_denied",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn unknown_effect_fails_closed_in_every_phase() {
-        for phase in [GuardPhase::Planning, GuardPhase::Execution, GuardPhase::Reconciliation] {
+        for phase in [
+            GuardPhase::Planning,
+            GuardPhase::Execution,
+            GuardPhase::Reconciliation,
+        ] {
             let d = check(phase, "run_command", None);
             assert!(
-                matches!(d, GuardDecision::Deny { token: "plan_guard_unknown_effect", .. }),
+                matches!(
+                    d,
+                    GuardDecision::Deny {
+                        token: "plan_guard_unknown_effect",
+                        ..
+                    }
+                ),
                 "{phase:?} unknown effect 必须 fail-closed: {d:?}"
             );
         }
@@ -198,12 +238,30 @@ mod tests {
 
     #[test]
     fn execution_allows_known_effects_and_reconciliation_stays_readonly() {
-        let d = check(GuardPhase::Execution, "run_command", Some(EffectClass::LocalWrite));
+        let d = check(
+            GuardPhase::Execution,
+            "run_command",
+            Some(EffectClass::LocalWrite),
+        );
         assert!(matches!(d, GuardDecision::Allow));
         // reconciliation：写工具拒绝（对账只允许查询类）。
-        let d = check(GuardPhase::Reconciliation, "apply_patch", Some(EffectClass::LocalWrite));
-        assert!(matches!(d, GuardDecision::Deny { token: "plan_guard_denied", .. }));
-        let d = check(GuardPhase::Reconciliation, "read_file", Some(EffectClass::Read));
+        let d = check(
+            GuardPhase::Reconciliation,
+            "apply_patch",
+            Some(EffectClass::LocalWrite),
+        );
+        assert!(matches!(
+            d,
+            GuardDecision::Deny {
+                token: "plan_guard_denied",
+                ..
+            }
+        ));
+        let d = check(
+            GuardPhase::Reconciliation,
+            "read_file",
+            Some(EffectClass::Read),
+        );
         assert!(matches!(d, GuardDecision::Allow));
     }
 }
