@@ -753,6 +753,44 @@ pub fn ensure_attempt(
     })
 }
 
+/// 显式新建下一 attempt（仅 reconcile not_executed 重试路径；绕过幂等返回）。
+pub fn create_next_attempt(
+    store: &Store,
+    revision_id: &str,
+    task_key: &str,
+) -> Result<AttemptInfo, Error> {
+    store.with_conn(|conn| {
+        let task_id: String = conn
+            .query_row(
+                "SELECT id FROM plan_tasks WHERE plan_revision_id=?1 AND task_key=?2",
+                rusqlite::params![revision_id, task_key],
+                |r| r.get(0),
+            )
+            .map_err(|_| {
+                Error::Message(format!("plan_validation_failed: 任务 {task_key} 不存在"))
+            })?;
+        let next_no: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(attempt_no),0)+1 FROM plan_task_attempts WHERE task_id=?1",
+            [&task_id],
+            |r| r.get(0),
+        )?;
+        let id = ids::new_id("ptatt");
+        let now = timefmt::now();
+        conn.execute(
+            "INSERT INTO plan_task_attempts(id, task_id, attempt_no, state, created_at, updated_at)
+             VALUES (?1,?2,?3,'pending',?4,?4)",
+            rusqlite::params![id, task_id, next_no, now],
+        )?;
+        Ok(AttemptInfo {
+            id,
+            task_key: task_key.to_string(),
+            task_id,
+            attempt_no: next_no,
+            state: "pending".into(),
+        })
+    })
+}
+
 /// 全部 attempt（按创建序）——read model / workspace prepare 用。
 pub fn attempts_of(store: &Store, revision_id: &str) -> Result<Vec<AttemptInfo>, Error> {
     store.with_conn(|conn| {

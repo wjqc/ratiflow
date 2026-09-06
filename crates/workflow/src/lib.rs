@@ -10,6 +10,7 @@ pub mod delivery;
 pub mod instance;
 pub mod plan;
 pub mod replan;
+pub mod scheduler;
 pub mod template;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
