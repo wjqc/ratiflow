@@ -39,6 +39,50 @@ fn str_param(params: &Value, key: &str) -> Result<String, RpcError> {
         .ok_or_else(|| invalid(format!("missing param: {key}")))
 }
 
+/// 计划审批的受治理裁决（评审 P1 修复抽出共享）：`plan.decide` 与 `approval.decide`
+/// 的 plan_revision 路由共用同一入口——先过期清理，再解析 pending 审批并 CAS 通过，
+/// 最后做计划状态迁移。旁路它只 CAS 审批会让 revision 永卡 awaiting_approval。
+pub(crate) fn decide_plan_governed(
+    store: &Store,
+    revision_id: &str,
+    decision: &str,
+    decided_by: &str,
+    reason: &str,
+) -> Result<Value, RpcError> {
+    if !matches!(decision, "approved" | "rejected") {
+        return Err(invalid("decision 须为 approved|rejected"));
+    }
+    sg_policy::expire_stale(store)
+        .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
+    let approval_id: Option<String> = store
+        .with_conn(|conn| {
+            let row: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM approvals WHERE subject_type='plan_revision'
+                     AND subject_id=?1 AND status='requested'
+                     ORDER BY created_at DESC LIMIT 1",
+                    [revision_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(sg_store::Error::from)?;
+            Ok(row)
+        })
+        .map_err(store_err)?;
+    let Some(approval_id) = approval_id else {
+        return Err(invalid("approval_invalid: 无待决计划审批"));
+    };
+    sg_policy::decide(store, &approval_id, decision, decided_by, reason)
+        .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
+    let rev = if decision == "approved" {
+        plan::approve(store, revision_id, decided_by)
+    } else {
+        plan::reject(store, revision_id, decided_by)
+    }
+    .map_err(store_err)?;
+    Ok(serde_json::to_value(&rev).unwrap_or_default())
+}
+
 fn parse_tasks(params: &Value) -> Result<Vec<PlanTaskInput>, RpcError> {
     let arr = params
         .get("tasks")
@@ -228,9 +272,16 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
         "plan.updateDraft" => {
             let revision_id = str_param(params, "planRevisionId")?;
             let tasks = parse_tasks(params)?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let rev = plan::update_draft(store, &revision_id, &tasks).map_err(store_err)?;
-            Ok(serde_json::to_value(&rev).unwrap_or_default())
+            let idem = params
+                .get("idempotencyKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 幂等回执：同 key 重放返回首次响应，不重复覆盖草稿。
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.updateDraft", || {
+                let rev = plan::update_draft(store, &revision_id, &tasks).map_err(store_err)?;
+                Ok(serde_json::to_value(&rev).unwrap_or_default())
+            })
         }
         "plan.get" => {
             if let Some(id) = params.get("planRevisionId").and_then(|v| v.as_str()) {
@@ -276,52 +327,36 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
             let decision = str_param(params, "decision")?;
             let decided_by = str_param(params, "decidedBy")?;
             let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-            if !matches!(decision.as_str(), "approved" | "rejected") {
-                return Err(invalid("decision 须为 approved|rejected"));
-            }
-            // 解析 pending 审批 → 既有链裁决 → 计划状态迁移。
-            let approval_id: Option<String> = store
-                .with_conn(|conn| {
-                    let row: Option<String> = conn
-                        .query_row(
-                            "SELECT id FROM approvals WHERE subject_type='plan_revision'
-                             AND subject_id=?1 AND status='requested'
-                             ORDER BY created_at DESC LIMIT 1",
-                            [&revision_id],
-                            |r| r.get(0),
-                        )
-                        .optional()
-                        .map_err(sg_store::Error::from)?;
-                    Ok(row)
-                })
-                .map_err(store_err)?;
-            let Some(approval_id) = approval_id else {
-                return Err(invalid("approval_invalid: 无待决计划审批"));
-            };
-            sg_policy::decide(store, &approval_id, &decision, &decided_by, reason)
-                .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
-            let rev = if decision == "approved" {
-                plan::approve(store, &revision_id, &decided_by)
-            } else {
-                plan::reject(store, &revision_id, &decided_by)
-            }
-            .map_err(store_err)?;
-            Ok(serde_json::to_value(&rev).unwrap_or_default())
+            decide_plan_governed(store, &revision_id, &decision, &decided_by, reason)
         }
         "plan.start" => {
             let revision_id = str_param(params, "planRevisionId")?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let (rev, attempts) = plan::start(store, &revision_id).map_err(store_err)?;
-            Ok(json!({
-                "revision": serde_json::to_value(&rev).unwrap_or_default(),
-                "readyAttempts": attempts,
-            }))
+            let idem = params
+                .get("idempotencyKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 幂等回执：同 key 重放返回首次响应（start 非幂等，重执行会撞状态机）。
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.start", || {
+                let (rev, attempts) = plan::start(store, &revision_id).map_err(store_err)?;
+                Ok(json!({
+                    "revision": serde_json::to_value(&rev).unwrap_or_default(),
+                    "readyAttempts": attempts,
+                }))
+            })
         }
         "plan.cancel" => {
             let revision_id = str_param(params, "planRevisionId")?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let rev = plan::cancel(store, &revision_id).map_err(store_err)?;
-            Ok(serde_json::to_value(&rev).unwrap_or_default())
+            let idem = params
+                .get("idempotencyKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 幂等回执：同 key 重放返回首次响应，不重复迁移/发事件。
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.cancel", || {
+                let rev = plan::cancel(store, &revision_id).map_err(store_err)?;
+                Ok(serde_json::to_value(&rev).unwrap_or_default())
+            })
         }
         "plan.replanPreview" => {
             let revision_id = str_param(params, "planRevisionId")?;
@@ -399,53 +434,62 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
             let digest = params
                 .get("outputDigest")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let _ = str_param(params, "idempotencyKey")?;
-            if !matches!(
-                outcome.as_str(),
-                "succeeded" | "failed" | "unknown" | "cancelled"
-            ) {
-                return Err(invalid("outcome 须为 succeeded|failed|unknown|cancelled"));
-            }
-            // 执行证明（EvoFlow 评审 P0-2 修复）：succeeded 不接受客户端自报——
-            // 必须存在绑定本 attempt 的 Agent Run 且终态 completed_execution；
-            // failed/unknown/cancelled 保留人工申报通道（对账/取消语义）。
-            if outcome == "succeeded" {
-                if digest.is_empty() {
-                    return Err(invalid(
-                        "output_digest_required: succeeded 须携带非空 outputDigest",
-                    ));
+                .unwrap_or("")
+                .to_string();
+            let idem = params
+                .get("idempotencyKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 幂等回执：同 key 重放返回首次终态，不重复回填/发事件。
+            crate::dispatch::with_rpc_receipt(store, &idem, "planTask.transition", || {
+                if !matches!(
+                    outcome.as_str(),
+                    "succeeded" | "failed" | "unknown" | "cancelled"
+                ) {
+                    return Err(invalid("outcome 须为 succeeded|failed|unknown|cancelled"));
                 }
-                let proof: Option<(String, String)> = store
-                    .with_conn(|conn| {
-                        Ok(conn
-                            .query_row(
-                                "SELECT id, status FROM agent_runs
-                                 WHERE plan_task_attempt_id=?1
-                                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                                [&attempt_id],
-                                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-                            )
-                            .ok())
-                    })
-                    .unwrap_or(None);
-                match proof {
-                    Some((_, status)) if status == "completed_execution" => {}
-                    Some((_, status)) => {
-                        return Err(invalid(format!(
-                            "task_execution_proof_required: 绑定 Run 终态为 {status}，不得申报 succeeded"
-                        )));
-                    }
-                    None => {
+                // 执行证明（EvoFlow 评审 P0-2 修复）：succeeded 不接受客户端自报——
+                // 必须存在绑定本 attempt 的 Agent Run 且终态 completed_execution；
+                // failed/unknown/cancelled 保留人工申报通道（对账/取消语义）。
+                if outcome == "succeeded" {
+                    if digest.is_empty() {
                         return Err(invalid(
-                            "task_execution_proof_required: succeeded 须先经 agent.start(planTaskAttemptId) 绑定本 attempt 并完成执行",
+                            "output_digest_required: succeeded 须携带非空 outputDigest",
                         ));
                     }
+                    let proof: Option<(String, String)> = store
+                        .with_conn(|conn| {
+                            Ok(conn
+                                .query_row(
+                                    "SELECT id, status FROM agent_runs
+                                     WHERE plan_task_attempt_id=?1
+                                     ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                                    [&attempt_id],
+                                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                                )
+                                .ok())
+                        })
+                        .unwrap_or(None);
+                    match proof {
+                        Some((_, status)) if status == "completed_execution" => {}
+                        Some((_, status)) => {
+                            return Err(invalid(format!(
+                                "task_execution_proof_required: 绑定 Run 终态为 {status}，不得申报 succeeded"
+                            )));
+                        }
+                        None => {
+                            return Err(invalid(
+                                "task_execution_proof_required: succeeded 须先经 agent.start(planTaskAttemptId) 绑定本 attempt 并完成执行",
+                            ));
+                        }
+                    }
                 }
-            }
-            let info = crate::plan_runtime::complete_task(store, &attempt_id, &outcome, digest)
-                .map_err(store_err)?;
-            Ok(serde_json::to_value(&info).unwrap_or_default())
+                let info =
+                    crate::plan_runtime::complete_task(store, &attempt_id, &outcome, &digest)
+                        .map_err(store_err)?;
+                Ok(serde_json::to_value(&info).unwrap_or_default())
+            })
         }
         "planTask.reconcile" => {
             let attempt_id = str_param(params, "taskAttemptId")?;
@@ -494,10 +538,17 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
         "taskWorkspace.finalize" => {
             let attempt_id = str_param(params, "taskAttemptId")?;
             let outcome = str_param(params, "outcome")?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let rec = sg_executor::workspace::finalize(store, &attempt_id, &outcome)
-                .map_err(store_err)?;
-            Ok(json!({"workspace": rec}))
+            let idem = params
+                .get("idempotencyKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 幂等回执：同 key 重放返回首次收尾结果，不重复迁移工作区状态。
+            crate::dispatch::with_rpc_receipt(store, &idem, "taskWorkspace.finalize", || {
+                let rec = sg_executor::workspace::finalize(store, &attempt_id, &outcome)
+                    .map_err(store_err)?;
+                Ok(json!({"workspace": rec}))
+            })
         }
         _ => Err(invalid(format!("unknown plan method: {method}"))),
     }

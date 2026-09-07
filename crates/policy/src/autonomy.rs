@@ -130,7 +130,11 @@ pub fn validate_grant(
     risk: &str,
     now: &str,
 ) -> Result<GrantRecord, GrantError> {
-    let grant = load_grant(store, grant_id).map_err(|_| GrantError::NotFound)?;
+    let grant = refresh_expiry(
+        store,
+        load_grant(store, grant_id).map_err(|_| GrantError::NotFound)?,
+        now,
+    );
     match grant.status.as_str() {
         "active" => {}
         "revoked" => return Err(GrantError::Revoked),
@@ -158,7 +162,11 @@ pub fn validate_grant_status(
     grant_id: &str,
     now: &str,
 ) -> Result<GrantRecord, GrantError> {
-    let grant = load_grant(store, grant_id).map_err(|_| GrantError::NotFound)?;
+    let grant = refresh_expiry(
+        store,
+        load_grant(store, grant_id).map_err(|_| GrantError::NotFound)?,
+        now,
+    );
     match grant.status.as_str() {
         "active" => {}
         "revoked" => return Err(GrantError::Revoked),
@@ -172,6 +180,53 @@ pub fn validate_grant_status(
         }
     }
     Ok(grant)
+}
+
+/// 撤销（缺陷审计 2026-09-07 补齐产品化路径）：即时生效——逐动作校验都按行内
+/// status 判定，撤销后下一次 validate 即 Revoked。对已 revoked 的重放幂等返回。
+pub fn revoke_grant(store: &Store, grant_id: &str, reason: &str) -> Result<GrantRecord, Error> {
+    let updated = store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE autonomy_grants SET status='revoked', revoked_at=?1, revoked_reason=?2, updated_at=?1
+             WHERE id=?3 AND status='active'",
+            rusqlite::params![sg_store::timefmt::now(), reason, grant_id],
+        )
+        .map_err(Error::from)?;
+        Ok(conn.changes())
+    })?;
+    if updated == 0 {
+        let grant = load_grant(store, grant_id)?;
+        if grant.status == "revoked" {
+            return Ok(grant);
+        }
+        return Err(Error::Message(format!(
+            "autonomy_grant_invalid: grant {grant_id} 状态 {} 不可撤销",
+            grant.status
+        )));
+    }
+    load_grant(store, grant_id)
+}
+
+/// 到期落库：active 且已过 expires_at → 状态位写实为 expired（治理可见），
+/// 返回刷新后的记录；未到期/已终态原样返回。
+fn refresh_expiry(store: &Store, grant: GrantRecord, now: &str) -> GrantRecord {
+    let due = grant.status == "active"
+        && grant
+            .expires_at
+            .as_ref()
+            .is_some_and(|e| !e.is_empty() && e.as_str() <= now);
+    if !due {
+        return grant;
+    }
+    let _ = store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE autonomy_grants SET status='expired', updated_at=?1 WHERE id=?2 AND status='active'",
+            rusqlite::params![sg_store::timefmt::now(), grant.id],
+        )
+        .map_err(Error::from)?;
+        Ok(())
+    });
+    load_grant(store, &grant.id).unwrap_or(grant)
 }
 
 /// 从 policy_snapshot JSON 读自治模式（agent.start 装配时写入；缺省 Agent）。
@@ -341,6 +396,59 @@ mod tests {
             mode_of_snapshot(r#"{"sandbox":{},"autonomyMode":"plan"}"#),
             AutonomyMode::Plan
         );
+    }
+
+    #[test]
+    fn revoke_is_immediate_idempotent_and_expiry_persists() {
+        let store = setup();
+        seed_grant(&store, "g1", "active", "", &["run_command"], &["high"]);
+        validate_grant(
+            &store,
+            "g1",
+            "run_command",
+            "high",
+            "2026-01-01T00:00:00.000Z",
+        )
+        .unwrap();
+        let g = revoke_grant(&store, "g1", "人工撤销").unwrap();
+        assert_eq!(g.status, "revoked");
+        // 撤销即时生效：下一次逐动作校验即 Revoked。
+        assert!(matches!(
+            validate_grant(
+                &store,
+                "g1",
+                "run_command",
+                "high",
+                "2026-01-01T00:00:00.000Z"
+            ),
+            Err(GrantError::Revoked)
+        ));
+        // 重放撤销幂等。
+        assert_eq!(
+            revoke_grant(&store, "g1", "again").unwrap().status,
+            "revoked"
+        );
+        // 非 active 且非 revoked：不可撤销。
+        seed_grant(&store, "g3", "exhausted", "", &[], &[]);
+        assert!(revoke_grant(&store, "g3", "x").is_err());
+
+        // 到期落库：validate 报 Expired 且行内状态位写实为 expired（治理可见）。
+        seed_grant(&store, "g2", "active", "2026-01-01T00:00:00.000Z", &[], &[]);
+        assert!(matches!(
+            validate_grant_status(&store, "g2", "2026-09-07T00:00:00.000Z"),
+            Err(GrantError::Expired)
+        ));
+        let status: String = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT status FROM autonomy_grants WHERE id='g2'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(Error::from)
+            })
+            .unwrap();
+        assert_eq!(status, "expired");
     }
 }
 

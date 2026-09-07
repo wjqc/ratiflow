@@ -21,19 +21,38 @@ pub struct MacKeychain;
 
 impl CredentialStore for MacKeychain {
     fn put(&self, account: &str, secret: &str) -> Result<(), String> {
-        let output = Command::new("security")
+        use std::io::Write;
+        use std::process::Stdio;
+        if secret.contains('\n') {
+            return Err("secret 不能包含换行（stdin 传递按行分帧）".into());
+        }
+        // 密码经 stdin 传入（缺陷审计 P1-10）：argv 形态任意本地进程 ps 可见。
+        // `-w` 置于末位时 security 从 stdin 读两行（password + retype），不进 argv。
+        let mut child = Command::new("security")
             .args([
                 "add-generic-password",
                 "-s",
                 KEYCHAIN_SERVICE,
                 "-a",
                 account,
-                "-w",
-                secret,
                 "-U",
+                "-w",
             ])
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| e.to_string())?;
+        {
+            let mut stdin = child.stdin.take().ok_or("keychain stdin 不可用")?;
+            stdin
+                .write_all(secret.as_bytes())
+                .and_then(|_| stdin.write_all(b"\n"))
+                .and_then(|_| stdin.write_all(secret.as_bytes()))
+                .and_then(|_| stdin.write_all(b"\n"))
+                .map_err(|e| e.to_string())?;
+        }
+        let output = child.wait_with_output().map_err(|e| e.to_string())?;
         if output.status.success() {
             Ok(())
         } else {

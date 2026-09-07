@@ -90,6 +90,63 @@ pub(crate) fn release_policy_version(store: &Store) -> String {
     sg_policy::action_digest(&serde_json::to_value(&snapshot).unwrap_or_default())
 }
 
+/// gate.decideRelease 的 RPC 体（评审 P1 修复抽出共享）：
+/// approval.decide 对 gate_release 主体必须路由到这里——digest 漂移复检（AC-SW-03）
+/// 只存在于 decide_release 治理链，通用 sg_policy::decide 会旁路它。
+fn gate_decide_release_rpc(store: &Store, params: &Value) -> RpcResult {
+    let mut result = sg_workitem::release::decide_release(
+        store,
+        &str_param(params, "approvalId")?,
+        &str_param(params, "decision")?,
+        &str_param(params, "decidedBy")?,
+        &opt_str_param(params, "reason").unwrap_or_default(),
+        &release_policy_version(store),
+    )
+    .map_err(store_err)?;
+    sg_store::audit::append(
+        store,
+        &str_param(params, "decidedBy")?,
+        &format!("gate.release.{}", str_param(params, "decision")?),
+        "approval",
+        &str_param(params, "approvalId")?,
+        json!({}),
+    )
+    .map_err(store_err)?;
+    // ADR-031 C2：放行成功 → 镜像 ReleaseDecided 事件（事件权威，DB 为投影）。
+    // 事件写入失败不回滚已成的放行，但如实记审计并在响应标注（事件先行的
+    // 严格顺序属投影化改造里程碑，见 ADR-031 实施状态）。
+    match sg_workitem::release_events::mirror_release_decided(
+        store,
+        result["attempt"]["workitem_id"]
+            .as_str()
+            .unwrap_or_default(),
+        result["attempt"]["gate"].as_str().unwrap_or_default(),
+        result["attempt"]["id"].as_str().unwrap_or_default(),
+        result["release_digest"].as_str().unwrap_or_default(),
+        &str_param(params, "decision")?,
+        &str_param(params, "decidedBy")?,
+    ) {
+        Ok(Some(event_id)) => {
+            result["releaseEventId"] = json!(event_id);
+        }
+        Ok(None) => {
+            result["releaseEventId"] = json!(null);
+        }
+        Err(e) => {
+            let _ = sg_store::audit::append(
+                store,
+                "system",
+                "gate.release.event_mirror_failed",
+                "approval",
+                &str_param(params, "approvalId")?,
+                json!({ "error": e.to_string() }),
+            );
+            result["releaseEventMirrorError"] = json!(e.to_string());
+        }
+    }
+    Ok(result)
+}
+
 /// M1 谱系新写开关（可回退点）：SIXGATES_TRACE_WRITES=0 关闭全部谱系写入/回填，保留表结构。
 pub(crate) fn trace_writes_enabled() -> bool {
     std::env::var("SIXGATES_TRACE_WRITES")
@@ -97,9 +154,17 @@ pub(crate) fn trace_writes_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// 显式幂等回执（评审 P1 修复）：带 idempotencyKey 的 mutation 首次执行后落
-/// rpc_receipts（迁移 0040）；重放直接返回首次响应——不再重复建版本/重复变更状态。
-/// key 缺省（空）保持旧行为（立即执行，不落回执）。
+/// 显式幂等回执（评审 P1 修复，缺陷审计 2026-09-07 二次加固）：
+/// 1) 认领式防并发重放：先 INSERT OR IGNORE 占位（response_json=''），占位失败 =
+///    已有同 key 请求——正在执行则拒绝（rpc_receipt_in_flight），已完成则原样重放，
+///    不再出现"查-执-插三段都 miss、并发重放重复执行 mutation"。
+/// 2) 错误也落回执：重放返回首次错误 envelope，不重执行（原实现只存成功响应）。
+/// 3) crash 自愈：占位行超过 IN_FLIGHT_TTL 视为执行方已死，刷新时间戳后接管重执行。
+///    （mutation 与回执写入仍非跨进程原子，接管窗口是 SQLite 单文件下的已知边界。）
+/// 4) scoping：回执按 (method, idem_key) 唯一（0041），跨方法复用 key 不再串台。
+const RPC_RECEIPT_IN_FLIGHT_TTL_SECS: i64 = 300;
+const RPC_RECEIPT_ERROR_KEY: &str = "__sg_rpc_error";
+
 pub(crate) fn with_rpc_receipt<F>(
     store: &Store,
     idem_key: &str,
@@ -112,32 +177,98 @@ where
     if idem_key.is_empty() {
         return f();
     }
-    let existing: Option<String> = store
+    let claimed = store
         .with_conn(|conn| {
-            Ok(conn
-                .query_row(
-                    "SELECT response_json FROM rpc_receipts WHERE idem_key=?1",
-                    [idem_key],
-                    |r| r.get(0),
-                )
-                .ok())
+            conn.execute(
+                "INSERT OR IGNORE INTO rpc_receipts(idem_key, method, response_json, created_at)
+                 VALUES (?1,?2,'',?3)",
+                rusqlite::params![idem_key, method, sg_store::timefmt::now()],
+            )
+            .map_err(sg_store::Error::from)?;
+            Ok(conn.changes() == 1)
         })
-        .unwrap_or(None);
-    if let Some(body) = existing {
-        return serde_json::from_str(&body)
-            .map_err(|_| RpcError::new(ErrorCode::InternalError, "rpc_receipt_corrupt"));
+        .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
+    if !claimed {
+        let (body, created_at): (String, String) = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT response_json, created_at FROM rpc_receipts
+                     WHERE idem_key=?1 AND method=?2",
+                    [idem_key, method],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|_| sg_store::Error::Message("rpc_receipt_missing".into()))
+            })
+            .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
+        if body.is_empty() {
+            // 空占位：并发正在执行，或执行方已 crash。未超 TTL → 让客户端稍后重试；
+            // 已超 TTL → 刷新占位时间戳，落到底部接管重执行。
+            if sg_store::timefmt::age_secs(&created_at) < RPC_RECEIPT_IN_FLIGHT_TTL_SECS {
+                return Err(RpcError::new(
+                    ErrorCode::Conflict,
+                    "rpc_receipt_in_flight: 同幂等键请求正在执行，请稍后重试",
+                ));
+            }
+            store
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE rpc_receipts SET created_at=?3
+                         WHERE idem_key=?1 AND method=?2 AND response_json=''",
+                        rusqlite::params![idem_key, method, sg_store::timefmt::now()],
+                    )
+                    .map_err(sg_store::Error::from)?;
+                    Ok(())
+                })
+                .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
+        } else {
+            // 已有首次结果：错误或成功都原样重放，不重执行 mutation。
+            if let Ok(env) = serde_json::from_str::<Value>(&body) {
+                if env.get(RPC_RECEIPT_ERROR_KEY).is_some() {
+                    let err: RpcError = serde_json::from_value(env[RPC_RECEIPT_ERROR_KEY].clone())
+                        .map_err(|_| {
+                            RpcError::new(ErrorCode::InternalError, "rpc_receipt_corrupt")
+                        })?;
+                    return Err(err);
+                }
+            }
+            return serde_json::from_str(&body)
+                .map_err(|_| RpcError::new(ErrorCode::InternalError, "rpc_receipt_corrupt"));
+        }
     }
-    let out = f()?;
-    let _ = store.with_conn(|conn| {
-        conn.execute(
-            "INSERT OR IGNORE INTO rpc_receipts(idem_key, method, response_json, created_at)
-             VALUES (?1,?2,?3,?4)",
-            rusqlite::params![idem_key, method, out.to_string(), sg_store::timefmt::now()],
-        )
-        .map_err(sg_store::Error::from)?;
-        Ok(())
-    });
-    Ok(out)
+    match f() {
+        Ok(out) => {
+            store
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE rpc_receipts SET response_json=?3
+                         WHERE idem_key=?1 AND method=?2",
+                        rusqlite::params![idem_key, method, out.to_string()],
+                    )
+                    .map_err(sg_store::Error::from)?;
+                    Ok(())
+                })
+                .map_err(|e| {
+                    RpcError::new(
+                        ErrorCode::InternalError,
+                        format!("rpc_receipt_write_failed: {e}").as_str(),
+                    )
+                })?;
+            Ok(out)
+        }
+        Err(e) => {
+            let env =
+                json!({ RPC_RECEIPT_ERROR_KEY: serde_json::to_value(&e).unwrap_or_default() });
+            let _ = store.with_conn(|conn| {
+                conn.execute(
+                    "UPDATE rpc_receipts SET response_json=?3 WHERE idem_key=?1 AND method=?2",
+                    rusqlite::params![idem_key, method, env.to_string()],
+                )
+                .map_err(sg_store::Error::from)?;
+                Ok(())
+            });
+            Err(e)
+        }
+    }
 }
 
 /// 统一取消服务（agent.cancel 与 Slash /取消 共用，EvoFlow 评审 P0 修复）：
@@ -280,6 +411,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             | "automation.history"
             | "goal.autoReleaseCheck"
             | "autonomy.createGrant"
+            | "autonomy.revokeGrant"
             | "notification.list"
     ) {
         return automation_rpc(store, method, params);
@@ -1720,59 +1852,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             .map_err(store_err)?;
             Ok(result)
         }
-        "gate.decideRelease" => {
-            let mut result = sg_workitem::release::decide_release(
-                store,
-                &str_param(params, "approvalId")?,
-                &str_param(params, "decision")?,
-                &str_param(params, "decidedBy")?,
-                &opt_str_param(params, "reason").unwrap_or_default(),
-                &release_policy_version(store),
-            )
-            .map_err(store_err)?;
-            sg_store::audit::append(
-                store,
-                &str_param(params, "decidedBy")?,
-                &format!("gate.release.{}", str_param(params, "decision")?),
-                "approval",
-                &str_param(params, "approvalId")?,
-                json!({}),
-            )
-            .map_err(store_err)?;
-            // ADR-031 C2：放行成功 → 镜像 ReleaseDecided 事件（事件权威，DB 为投影）。
-            // 事件写入失败不回滚已成的放行，但如实记审计并在响应标注（事件先行的
-            // 严格顺序属投影化改造里程碑，见 ADR-031 实施状态）。
-            match sg_workitem::release_events::mirror_release_decided(
-                store,
-                result["attempt"]["workitem_id"]
-                    .as_str()
-                    .unwrap_or_default(),
-                result["attempt"]["gate"].as_str().unwrap_or_default(),
-                result["attempt"]["id"].as_str().unwrap_or_default(),
-                result["release_digest"].as_str().unwrap_or_default(),
-                &str_param(params, "decision")?,
-                &str_param(params, "decidedBy")?,
-            ) {
-                Ok(Some(event_id)) => {
-                    result["releaseEventId"] = json!(event_id);
-                }
-                Ok(None) => {
-                    result["releaseEventId"] = json!(null);
-                }
-                Err(e) => {
-                    let _ = sg_store::audit::append(
-                        store,
-                        "system",
-                        "gate.release.event_mirror_failed",
-                        "approval",
-                        &str_param(params, "approvalId")?,
-                        json!({ "error": e.to_string() }),
-                    );
-                    result["releaseEventMirrorError"] = json!(e.to_string());
-                }
-            }
-            Ok(result)
-        }
+        "gate.decideRelease" => gate_decide_release_rpc(store, params),
         "gate.getRelease" => {
             sg_workitem::release::get_release(store, &str_param(params, "releaseId")?)
                 .map_err(store_err)
@@ -2112,17 +2192,46 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "approval.decide" => {
             let approval_id = str_param(params, "approvalId")?;
             let decision = str_param(params, "decision")?;
-            // 批准前重算 digest 由领域层 validate_for 保证；前端只提交决定。
-            let appr = sg_policy::decide(
-                store,
-                &approval_id,
-                &decision,
-                &str_param(params, "decidedBy")?,
-                &opt_str_param(params, "reason").unwrap_or_default(),
-            )
-            .map_err(store_err)?;
             let decided_by = str_param(params, "decidedBy")?;
             let reason = opt_str_param(params, "reason").unwrap_or_default();
+            // subject_type 路由（评审 P1 修复）：gate_release / plan_revision 必须走各自
+            // 治理链（gate 的 digest 漂移复检、plan 的状态迁移）；通用 decide 只裁决
+            // 无漂移语义的主体（tool_proposal、deployment 等）。原实现统一 CAS 通过，
+            // digest 复检被完全跳过，构成治理旁路。
+            let subject = sg_policy::get(store, &approval_id).map_err(store_err)?;
+            match subject.subject_type.as_str() {
+                "gate_release" => {
+                    return gate_decide_release_rpc(store, params);
+                }
+                "plan_revision" => {
+                    if !matches!(decision.as_str(), "approved" | "rejected") {
+                        return Err(err(
+                            ErrorCode::InvalidParams,
+                            "decision must be approved|rejected for plan_revision",
+                        ));
+                    }
+                    let out = crate::plan_dispatch::decide_plan_governed(
+                        store,
+                        &subject.subject_id,
+                        &decision,
+                        &decided_by,
+                        &reason,
+                    )?;
+                    sg_store::audit::append(
+                        store,
+                        &decided_by,
+                        &format!("approval.{decision}"),
+                        "approval",
+                        &approval_id,
+                        json!({"subjectId": subject.subject_id}),
+                    )
+                    .map_err(store_err)?;
+                    return Ok(out);
+                }
+                _ => {}
+            }
+            let appr = sg_policy::decide(store, &approval_id, &decision, &decided_by, &reason)
+                .map_err(store_err)?;
             sg_store::audit::append(
                 store,
                 &decided_by,
@@ -2965,6 +3074,10 @@ fn spawn_run_task(
         });
         (snap, envelope, m, src)
     };
+    // 取消令牌提前创建并注册（缺陷审计 P1-9）：ToolCtx 持有令牌，
+    // 在途工具子进程可被取消即时中止，而非等 timeout 自然结束。
+    let token = Arc::new(sg_integrations::CancelToken::new());
+    state.runs.register(run_id, token.clone());
     let ctx = sg_agent::tools::ToolCtx {
         mode,
         work_dir: work_dir.clone(),
@@ -2972,6 +3085,7 @@ fn spawn_run_task(
         // P0-4：回退到主工作区 = 只读模式（run_command 被拒绝），可写执行必须发生在
         // 受管 worktree（workitem 级或任务级 TaskWorkspace）。
         read_only: worktree_info.is_none() && !task_workspace_used && !local_root.is_empty(),
+        cancel: Some(token.clone()),
     };
     let executor =
         crate::tool_exec::make_executor(ctx, state.run_store.clone(), project_id.clone());
@@ -3135,8 +3249,8 @@ fn spawn_run_task(
             let _ = r.append("memory_block_missing", missing);
         }
     }
-    let token = Arc::new(sg_integrations::CancelToken::new());
-    state.runs.register(run_id, token.clone());
+    // （取消令牌已提前到 ToolCtx 装配处创建并注册——避免此处二次注册
+    //   把 ctx 持有的令牌从注册表顶掉，取消信号从此失联。）
     // M2：高频 UI delta 转发器（易失通道；不落库）。
     let forwarder: Arc<dyn sg_agent::modelgw::TurnDeltaForwarder> = Arc::new(
         crate::deltas::HubForwarder::new(state.deltas.clone(), run_id, &workitem_id),
@@ -3560,15 +3674,15 @@ mod model_usage_daily_tests {
         let old = sg_store::timefmt::now_plus_minutes(-40 * 24 * 60);
         store
             .with_conn(|conn| {
-                for (id, run, tin, tout, cached, created) in [
-                    ("mt_d1", "run1", 120_i64, 30_i64, 60_i64, today.as_str()),
-                    ("mt_d2", "run2", 10, 5, 0, today.as_str()),
-                    ("mt_old", "run1", 999, 999, 999, old.as_str()),
+                for (id, run, seq, tin, tout, cached, created) in [
+                    ("mt_d1", "run1", 2_i64, 120_i64, 30_i64, 60_i64, today.as_str()),
+                    ("mt_d2", "run2", 1, 10, 5, 0, today.as_str()),
+                    ("mt_old", "run1", 1, 999, 999, 999, old.as_str()),
                 ] {
                     conn.execute(
                         "INSERT INTO model_turns(id, agent_run_id, turn_seq, tokens_in, tokens_out, cached_tokens, created_at)
-                         VALUES (?1,?2,1,?3,?4,?5,?6)",
-                        rusqlite::params![id, run, tin, tout, cached, created],
+                         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                        rusqlite::params![id, run, seq, tin, tout, cached, created],
                     )
                     .map_err(Error::from)?;
                 }
@@ -3626,6 +3740,17 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                     "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
                 ));
             }
+            let interval_secs = params
+                .get("intervalSecs")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(3600);
+            // 下限校验（缺陷审计）：interval<=0 会让每 tick 恒过期，触发洪泛。
+            if interval_secs < 1 {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidParams,
+                    "interval_secs_invalid: intervalSecs 须 >= 1",
+                ));
+            }
             let a = sg_workflow::automation::create(
                 store,
                 &str_param("key")?,
@@ -3635,10 +3760,7 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                     .get("intent")
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "{}".into()),
-                params
-                    .get("intervalSecs")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(3600),
+                interval_secs,
                 params
                     .get("misfirePolicy")
                     .and_then(|v| v.as_str())
@@ -3800,6 +3922,35 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             })
             .map_err(store_err)?;
             Ok(json!({"grantId": id}))
+        }
+        "autonomy.revokeGrant" => {
+            if !automation_flag {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                ));
+            }
+            // 撤销即时生效（缺陷审计修复：此前全库无撤销路径）。
+            let grant = sg_policy::autonomy::revoke_grant(
+                store,
+                &str_param("grantId")?,
+                params.get("reason").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+            .map_err(store_err)?;
+            sg_store::audit::append(
+                store,
+                "local",
+                "autonomy.grant_revoked",
+                "autonomy_grant",
+                &grant.id,
+                json!({}),
+            )
+            .map_err(store_err)?;
+            Ok(json!({
+                "grantId": grant.id,
+                "status": grant.status,
+                "workitemId": grant.workitem_id,
+            }))
         }
         "goal.autoReleaseCheck" => {
             let check = sg_policy::autonomy::automatic_release_check(

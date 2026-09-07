@@ -154,6 +154,14 @@ pub fn dispatch_ready(
     revision_id: &str,
     max_parallel: usize,
 ) -> Result<Vec<AttemptInfo>, Error> {
+    // 派发闸（缺陷审计 P1-7）：仅 executing 的 revision 可派发——
+    // 已取消/已取代/待重规划的计划不再产生新的派发。
+    let rev_status = plan::current_status(store, revision_id)?;
+    if rev_status != "executing" {
+        return Err(Error::Message(format!(
+            "plan_revision_not_executing: {revision_id} 状态 {rev_status}，不得派发"
+        )));
+    }
     let view = view(store, revision_id, max_parallel)?;
     let tasks = plan::tasks_of(store, revision_id)?;
     let effect_of: std::collections::BTreeMap<&str, &str> = tasks
@@ -210,24 +218,47 @@ pub fn advance(
         _ => return Err(Error::Message(format!("task_outcome_invalid: {outcome}"))),
     };
     let info = store.with_conn(|conn| {
-        let (task_id, task_key, state): (String, String, String) = conn
+        let (task_id, task_key, state, revision_status): (String, String, String, String) = conn
             .query_row(
-                "SELECT pt.id, pt.task_key, pa.state FROM plan_task_attempts pa
-                 JOIN plan_tasks pt ON pt.id = pa.task_id WHERE pa.id=?1",
+                "SELECT pt.id, pt.task_key, pa.state, pr.status
+                 FROM plan_task_attempts pa
+                 JOIN plan_tasks pt ON pt.id = pa.task_id
+                 JOIN plan_revisions pr ON pr.id = pt.plan_revision_id
+                 WHERE pa.id=?1",
                 [task_attempt_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                    ))
+                },
             )
             .map_err(|_| Error::Message("task_dependency_blocked: attempt 不存在".into()))?;
+        // 取消/重规划后的旧 revision 不得继续回填（缺陷审计 P1-7：取消语义
+        // 原只落在 revision 头行，已取消计划的写任务可照常申报成功）。
+        if revision_status != "executing" {
+            return Err(Error::Message(format!(
+                "plan_revision_not_executing: revision 状态 {revision_status}，不得回填任务 outcome"
+            )));
+        }
         if !is_active(&state) {
             return Err(Error::Message(format!(
                 "task_state_invalid: {state} 不可回填 outcome"
             )));
         }
-        conn.execute(
+        // CAS 回填（缺陷审计 P1-8）：观察到活跃态后并发方可能已改写，条件更新防双终态。
+        let changed = conn.execute(
             "UPDATE plan_task_attempts SET state=?1, input_digest=CASE WHEN ?3='' THEN input_digest ELSE ?3 END,
-                finished_at=?2, updated_at=?2 WHERE id=?4",
-            rusqlite::params![terminal, now, output_digest, task_attempt_id],
+                finished_at=?2, updated_at=?2 WHERE id=?4 AND state=?5",
+            rusqlite::params![terminal, now, output_digest, task_attempt_id, state],
         )?;
+        if changed == 0 {
+            return Err(Error::Message(format!(
+                "task_state_conflict: attempt {task_attempt_id} 状态已被并发修改（观察到 {state}）"
+            )));
+        }
         Ok(AttemptInfo {
             id: task_attempt_id.to_string(),
             task_key,
@@ -326,10 +357,16 @@ pub fn reconcile(
                 "task_reconciliation_invalid: {state} 无需对账"
             )));
         }
-        conn.execute(
-            "UPDATE plan_task_attempts SET state=?1, finished_at=?2, updated_at=?2 WHERE id=?3",
-            rusqlite::params![terminal, now, task_attempt_id],
+        // CAS 终态回写：与 advance 同理防并发双写。
+        let changed = conn.execute(
+            "UPDATE plan_task_attempts SET state=?1, finished_at=?2, updated_at=?2 WHERE id=?3 AND state=?4",
+            rusqlite::params![terminal, now, task_attempt_id, state],
         )?;
+        if changed == 0 {
+            return Err(Error::Message(format!(
+                "task_state_conflict: attempt {task_attempt_id} 状态已被并发修改（观察到 {state}）"
+            )));
+        }
         Ok(AttemptInfo {
             id: task_attempt_id.to_string(),
             task_key,

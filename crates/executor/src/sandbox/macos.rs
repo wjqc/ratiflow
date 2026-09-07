@@ -234,8 +234,9 @@ pub fn wrap_args(argv: &[String], profile: &str) -> Vec<String> {
 pub fn execute(
     policy: &SandboxPolicy,
     m: &crate::ExecutionManifest,
+    cancel: Option<&sg_integrations::CancelToken>,
 ) -> Result<crate::ExecResult, crate::ExecError> {
     let profile = generate_profile(policy);
     let args = wrap_args(&m.argv, &profile);
-    crate::process::run_local(SANDBOX_EXEC, &args, m, "kernel_restricted", None)
+    crate::process::run_local(SANDBOX_EXEC, &args, m, "kernel_restricted", None, cancel)
 }

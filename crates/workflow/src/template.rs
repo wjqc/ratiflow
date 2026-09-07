@@ -317,8 +317,10 @@ pub fn update_draft(
 }
 
 /// 激活：draft → active；同模板旧 active → deprecated。激活前重算 digest 校验内容未被篡改。
+/// 整体在单事务内（缺陷审计 2026-09-07）：两条 UPDATE 非原子会出现"零 active 版本"窗口，
+/// 期间 create_with_template 全量被砖且无自愈路径。
 pub fn activate(store: &Store, version_id: &str) -> Result<VersionRecord, Error> {
-    store.with_conn(|conn| {
+    store.with_tx(|conn| {
         let version = version_row(conn, version_id)?;
         if version.status == "active" {
             return Ok(version); // 幂等重放

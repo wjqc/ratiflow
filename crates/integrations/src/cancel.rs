@@ -22,6 +22,14 @@ impl Default for CancelToken {
     }
 }
 
+impl std::fmt::Debug for CancelToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
 impl CancelToken {
     pub fn new() -> Self {
         let (tx, _rx) = tokio::sync::watch::channel(false);

@@ -41,6 +41,7 @@ pub fn run_local(
     m: &ExecutionManifest,
     mode: &str,
     pre_exec: Option<Box<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    cancel: Option<&sg_integrations::CancelToken>,
 ) -> Result<ExecResult, ExecError> {
     let start = Instant::now();
     let mut cmd = Command::new(bin);
@@ -83,6 +84,7 @@ pub fn run_local(
 
     let deadline = Instant::now() + Duration::from_secs(m.timeout_sec.max(1) as u64);
     let mut timed_out = false;
+    let mut cancelled = false;
     let mut status = None;
     loop {
         match child.try_wait().map_err(|e| ExecError::Io(e.to_string()))? {
@@ -91,6 +93,13 @@ pub fn run_local(
                 break;
             }
             None => {
+                // 取消面（缺陷审计 P1-9）：取消请求置位即杀整组，副作用不再继续发生。
+                if cancel.is_some_and(|c| c.is_cancelled()) {
+                    kill_process_group(child.id());
+                    let _ = child.kill();
+                    cancelled = true;
+                    break;
+                }
                 if Instant::now() >= deadline {
                     // 先杀整组（含沙箱中间进程与真实工作进程），再回收僵尸。
                     kill_process_group(child.id());
@@ -102,7 +111,7 @@ pub fn run_local(
             }
         }
     }
-    if timed_out {
+    if timed_out || cancelled {
         let _ = child.wait(); // 回收僵尸进程
     }
     let stdout = String::from_utf8_lossy(&t_out.join().unwrap_or_default()).to_string();
@@ -113,6 +122,7 @@ pub fn run_local(
         stdout,
         stderr,
         duration_ms: start.elapsed().as_millis() as u64,
+        cancelled,
         timed_out,
         sandbox_policy_digest: String::new(),
     })

@@ -255,10 +255,17 @@ pub fn replan(
         .filter(|t| old_keys.contains(t.task_key.as_str()))
         .map(|t| t.task_key.clone())
         .collect();
-    // 旧 revision → replan_required。
+    // 旧 revision → replan_required；活跃 attempt 级联取消（缺陷审计 P1-7：
+    // 残留 running/ready attempt 会让已取代计划继续占用派发容量并尝试回填）。
     store.with_conn(|conn| {
         conn.execute(
             "UPDATE plan_revisions SET status='replan_required', updated_at=?1 WHERE id=?2",
+            rusqlite::params![timefmt::now(), old_revision_id],
+        )?;
+        conn.execute(
+            "UPDATE plan_task_attempts SET state='cancelled', finished_at=?1, updated_at=?1
+             WHERE state IN ('pending','ready','preparing_workspace','running','awaiting_approval','reconciliation_required')
+               AND task_id IN (SELECT id FROM plan_tasks WHERE plan_revision_id=?2)",
             rusqlite::params![timefmt::now(), old_revision_id],
         )?;
         Ok(())

@@ -75,13 +75,41 @@ fn pending_rr_for_attempt(
             .query_row(
                 &format!(
                     "SELECT {RR_COLUMNS} FROM gate_release_requests
-                     WHERE stage_attempt_id=?1 AND state='pending' ORDER BY created_at DESC LIMIT 1"
+                     WHERE stage_attempt_id=?1 AND state='pending' AND approval_id IS NOT NULL
+                     ORDER BY created_at DESC LIMIT 1"
                 ),
                 [attempt_id],
                 row_rr,
             )
             .ok();
         Ok(rr)
+    })
+}
+
+/// 孤儿清理（缺陷审计 2026-09-07）：requestRelease 的"建请求→建审批→回填 approval_id"
+/// 序列中途 crash 会留下 approval_id IS NULL 的 pending 行——重试命中它直接返回、
+/// resume_pending 的 JOIN 跳过 NULL，该关被永久毒化。这类行是崩溃残骸而非活请求：
+/// 入口与启动恢复处一律 superseded。
+fn abort_orphan_rrs(store: &Store, attempt_id: Option<&str>) -> Result<(), Error> {
+    store.with_conn(|conn| {
+        let now = timefmt::now();
+        match attempt_id {
+            Some(aid) => {
+                conn.execute(
+                    "UPDATE gate_release_requests SET state='superseded', decided_at=?1
+                     WHERE stage_attempt_id=?2 AND state='pending' AND approval_id IS NULL",
+                    rusqlite::params![now, aid],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "UPDATE gate_release_requests SET state='superseded', decided_at=?1
+                     WHERE state='pending' AND approval_id IS NULL",
+                    rusqlite::params![now],
+                )?;
+            }
+        }
+        Ok(())
     })
 }
 
@@ -347,6 +375,8 @@ pub fn request_release(
     // 否则不可进入审批（fail-closed）。
     let deliverable = crate::deliverable::require_for_release(store, workitem_id, gate)?;
     let attempt = attempt::advance_to_review_ready(store, workitem_id, gate)?;
+    // 先清崩溃残骸（approval_id IS NULL 的 pending），避免幂等入口命中毒化行。
+    abort_orphan_rrs(store, Some(&attempt.id))?;
     if attempt.state == "awaiting_user_approval" {
         if let Some(existing) = pending_rr_for_attempt(store, &attempt.id)? {
             return Ok(serde_json::to_value(existing).unwrap_or_default());
@@ -431,14 +461,12 @@ pub fn request_release(
         Some(workitem_id),
         Some(&attempt.id),
     )?;
-    store.with_conn(|conn| {
+    // 回填 approval_id 与包引用在同一事务（审计修复：两段 UPDATE 曾各自提交）。
+    store.with_tx(|conn| {
         conn.execute(
             "UPDATE gate_release_requests SET approval_id=?1 WHERE id=?2",
             rusqlite::params![approval.id, rr_id],
         )?;
-        Ok(())
-    })?;
-    store.with_conn(|conn| {
         conn.execute(
             "UPDATE stage_attempts SET active_output_package_id=?1, updated_at=?2 WHERE id=?3",
             rusqlite::params![package_id, timefmt::now(), attempt.id],
@@ -631,7 +659,8 @@ pub fn decide_release(
             }
             let awaiting = attempt::transition(store, &attempt.id, "changes_requested")?;
             let _ = attempt::transition(store, &awaiting.id, "running")?;
-            store.with_conn(|conn| {
+            // 包引用解除与请求落态同事务（缺陷审计：两段 UPDATE 曾可中途断裂）。
+            store.with_tx(|conn| {
                 conn.execute(
                     "UPDATE stage_attempts SET active_output_package_id=NULL, updated_at=?1 WHERE id=?2",
                     rusqlite::params![timefmt::now(), attempt.id],
@@ -774,7 +803,12 @@ pub fn invalidate_pending_if_drift(
 }
 
 /// 崩溃恢复（启动时）：审批已决但推进未完成的放行请求补完（蓝图 §4.2 单事务语义的补偿路径）。
-pub fn resume_pending(store: &Store) -> Result<usize, Error> {
+/// policy_version：与 decide_release 同源的 digest 分量——补完前必须复检（AC-SW-03），
+/// 拦截"审批通过后输出/权限快照再漂移"或经旁路路径通过的审批。
+pub fn resume_pending(store: &Store, policy_version: &str) -> Result<usize, Error> {
+    // 启动即清理崩溃残骸：approval_id IS NULL 的 pending 不会出现在下方 JOIN 里，
+    // 若不显式作废将永久滞留 pending。
+    abort_orphan_rrs(store, None)?;
     let pending: Vec<(ReleaseRequest, String, String)> = store.with_conn(|conn| {
         // JOIN 下裸列名 id/created_at 与 approvals 歧义：全部限定 r.（启动 resume 曾因此整体失败）。
         let rr = RR_COLUMNS
@@ -816,7 +850,43 @@ pub fn resume_pending(store: &Store) -> Result<usize, Error> {
             Err(_) => continue,
         };
         let result = match status.as_str() {
-            "approved" => complete_approve(store, &rr, &attempt, &attempt.gate, &decided_by),
+            "approved" => {
+                // AC-SW-03：补完与 decide_release 同权重——digest 漂移（含审批后漂移、
+                // 或审批经通用 approval.decide 旁路通过）在此拦截，请求作废并通知。
+                let drift = build_manifest(store, &attempt.workitem_id, &attempt.gate, &attempt)
+                    .map(|(_, manifest_sha)| {
+                        release_digest(
+                            &attempt.workitem_id,
+                            attempt.gate.as_str(),
+                            &attempt.id,
+                            &attempt.entry_snapshot_id,
+                            &manifest_sha,
+                            policy_version,
+                        ) != rr.release_digest
+                    });
+                match drift {
+                    Ok(true) => {
+                        supersede_rr(store, &rr.id)?;
+                        if let Some(appr) = rr.approval_id.as_deref() {
+                            let _ = sg_policy::expire(store, appr, "输出已变化，旧放行审批失效");
+                        }
+                        outbox::emit(
+                            store,
+                            "workitem",
+                            &attempt.workitem_id,
+                            "gate.changes_requested",
+                            serde_json::json!({
+                                "workitemId": attempt.workitem_id,
+                                "gate": attempt.gate,
+                                "reason": "output_digest_changed"
+                            }),
+                        )?;
+                        Ok(())
+                    }
+                    Ok(false) => complete_approve(store, &rr, &attempt, &attempt.gate, &decided_by),
+                    Err(e) => Err(e),
+                }
+            }
             "rejected" => attempt::transition(store, &attempt.id, "rejected").map(|_| ()),
             _ => Ok(()),
         };

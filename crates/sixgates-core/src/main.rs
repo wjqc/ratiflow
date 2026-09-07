@@ -150,7 +150,8 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
     }
 
     // 放行崩溃恢复：审批已决但推进未完成的请求补完（蓝图 §4.2 原子语义补偿）。
-    match sg_workitem::release::resume_pending(&store) {
+    // 补完前按 decide_release 同一 policy_version 复检 digest（AC-SW-03）。
+    match sg_workitem::release::resume_pending(&store, &dispatch::release_policy_version(&store)) {
         Ok(n) if n > 0 => {
             eprintln!("{{\"level\":\"info\",\"msg\":\"release resume: {n} completed\"}}");
         }

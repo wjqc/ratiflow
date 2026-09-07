@@ -371,8 +371,13 @@ pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> Sha
                     );
                 }
                 let manifest = tools::build_manifest(def, &args, &ctx)?;
+                // 取消面（缺陷审计 P1-9）：在途子进程随 CancelToken 即时中止。
                 let result =
-                    sg_executor::execute(ctx.mode, &manifest).map_err(|e| e.to_string())?;
+                    sg_executor::execute_with_cancel(ctx.mode, &manifest, ctx.cancel.as_deref())
+                        .map_err(|e| e.to_string())?;
+                if result.cancelled {
+                    return Err("run_cancelled: 取消请求已中止在途工具执行".into());
+                }
                 serde_json::to_string(&result).map_err(|e| e.to_string())?
             }
         };
@@ -482,6 +487,7 @@ mod plan_guard_tests {
             work_dir: Some(dir.to_path_buf()),
             artifacts_dir: dir.join("artifacts"),
             read_only: false,
+            cancel: None,
         }
     }
 
@@ -676,6 +682,7 @@ mod apply_patch_tests {
             work_dir: Some(dir.to_path_buf()),
             artifacts_dir: dir.join("artifacts-run"),
             read_only: false,
+            cancel: None,
         }
     }
 
@@ -903,6 +910,7 @@ mod apply_patch_flow_tests {
             work_dir: Some(repo.clone()),
             artifacts_dir: store.data_dir.join("artifacts").join("run_flow"),
             read_only: false,
+            cancel: None,
         };
         let run_store_dir =
             std::env::temp_dir().join(format!("sg-apflow-run-{}", sg_store::ids::new_id("t")));
@@ -1053,20 +1061,52 @@ fn mcp_invoke(
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(60);
-    let mut client = sg_integrations::mcp::McpClient::new(
-        sg_integrations::mcp::StdioTransport::spawn(&active.command, &active.args)?,
-    );
-    let invoke = (|| -> Result<sg_integrations::mcp::McpToolCallOutcome, String> {
-        client.initialize().map_err(|e| e.to_string())?;
-        client
-            .call_tool(
-                &tool_name,
-                args.clone(),
-                std::time::Duration::from_secs(timeout),
-            )
-            .map_err(|e| e.to_string())
-    })();
-    client.shutdown();
+    // 取消面（缺陷审计 P1-9）：调用在工作线程执行，本线程 200ms 轮询取消令牌——
+    // 取消即刻返回并标记 run_cancelled，不再陪子进程跑满 timeout；
+    // 工作线程仍受 timeout 上限约束并在结束时回收 MCP 子进程。
+    let audit_server = active.server_name.clone();
+    let audit_transport = active.transport.clone();
+    let audit_digest = active.schema_digest.clone();
+    let audit_read_only = active.read_only;
+    let worker_tool = tool_name.clone();
+    let worker_args = args.clone();
+    let (tx, rx) =
+        std::sync::mpsc::channel::<Result<sg_integrations::mcp::McpToolCallOutcome, String>>();
+    let _worker = std::thread::spawn(move || {
+        let outcome = (|| -> Result<sg_integrations::mcp::McpToolCallOutcome, String> {
+            let mut client = sg_integrations::mcp::McpClient::new(
+                sg_integrations::mcp::StdioTransport::spawn(&active.command, &active.args)?,
+            );
+            let out = (|| -> Result<sg_integrations::mcp::McpToolCallOutcome, String> {
+                client.initialize().map_err(|e| e.to_string())?;
+                client
+                    .call_tool(
+                        &worker_tool,
+                        worker_args,
+                        std::time::Duration::from_secs(timeout),
+                    )
+                    .map_err(|e| e.to_string())
+            })();
+            client.shutdown();
+            out
+        })();
+        let _ = tx.send(outcome.clone());
+    });
+    let invoke = loop {
+        if ctx.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            return Err(
+                "run_cancelled: 取消请求已中止在途 MCP 工具调用（子进程由 timeout 上限回收）"
+                    .into(),
+            );
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(out) => break out,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break Err("mcp_worker_disconnected: MCP 调用线程异常退出".into());
+            }
+        }
+    };
 
     // 审计：server 身份/transport/沙箱标注（诚实边界：本地直启非容器）。
     let _ = sg_store::audit::append(
@@ -1076,9 +1116,9 @@ fn mcp_invoke(
         "tool_proposal",
         &proposal.id,
         serde_json::json!({
-            "server": active.server_name, "tool": tool_name,
-            "transport": active.transport,
-            "schemaDigest": active.schema_digest,
+            "server": audit_server, "tool": tool_name,
+            "transport": audit_transport,
+            "schemaDigest": audit_digest,
             "sandboxed": false,
             "note": "MCP 工具执行不经本机内核沙箱（治理=提案/审批/审计）",
         }),
@@ -1093,7 +1133,7 @@ fn mcp_invoke(
             Ok(out)
         }
         Ok(sg_integrations::mcp::McpToolCallOutcome::Timeout) => {
-            if active.read_only {
+            if audit_read_only {
                 // 只读超时 = 可重试错误（无副作用歧义）。
                 Err(format!(
                     "mcp_timeout: 工具 {tool_name} 超时（{timeout}s），可修正后重试"
@@ -1224,6 +1264,7 @@ for line in sys.stdin:
             work_dir: Some(repo.to_path_buf()),
             artifacts_dir: repo.join("artifacts"),
             read_only: false,
+            cancel: None,
         }
     }
 

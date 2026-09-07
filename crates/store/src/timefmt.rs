@@ -30,3 +30,14 @@ pub fn now_plus_minutes(minutes: i64) -> String {
     let t = OffsetDateTime::now_utc() + time::Duration::minutes(minutes);
     format_now(t)
 }
+
+/// s（RFC3339）距今的整秒数，负值（未来时钟）截为 0。
+/// s 不可解析时返回 i64::MAX：损坏的时间戳按"足够久远"处理，
+/// 让幂等回执的接管路径可以自愈，而不是永久阻塞该 key。
+pub fn age_secs(s: &str) -> i64 {
+    let Some(t) = parse(s) else {
+        return i64::MAX;
+    };
+    let now = OffsetDateTime::now_utc();
+    (now - t).whole_seconds().max(0)
+}

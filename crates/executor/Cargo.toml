@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 sg-store = { workspace = true }
 sg-workitem = { workspace = true }
 rusqlite = { workspace = true }
+sg-integrations = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 libc = "0.2"

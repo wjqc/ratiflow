@@ -104,14 +104,15 @@ pub fn probe() -> SandboxCapability {
 pub(crate) fn backend_execute(
     policy: &SandboxPolicy,
     m: &crate::ExecutionManifest,
+    cancel: Option<&sg_integrations::CancelToken>,
 ) -> Result<crate::ExecResult, crate::ExecError> {
     #[cfg(target_os = "macos")]
     {
-        return macos::execute(policy, m);
+        return macos::execute(policy, m, cancel);
     }
     #[cfg(target_os = "linux")]
     {
-        return linux::execute(policy, m);
+        return linux::execute(policy, m, cancel);
     }
     #[allow(unreachable_code)]
     {

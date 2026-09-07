@@ -181,32 +181,42 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
         "workflowTemplate.updateDraft" => {
             let version_id = str_param(params, "versionId")?;
             let gates = parse_gates(params)?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let version = sg_workflow::template::update_draft(store, &version_id, &gates)
-                .map_err(store_err)?;
-            Ok(version_json(&version))
+            let idem = opt_str(params, "idempotencyKey");
+            // 幂等回执：同 key 重放返回首次响应，不重复覆盖草稿。
+            crate::dispatch::with_rpc_receipt(store, &idem, "workflowTemplate.updateDraft", || {
+                let version = sg_workflow::template::update_draft(store, &version_id, &gates)
+                    .map_err(store_err)?;
+                Ok(version_json(&version))
+            })
         }
         "workflowTemplate.activate" => {
             let version_id = str_param(params, "versionId")?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let version = sg_workflow::template::activate(store, &version_id).map_err(store_err)?;
-            sg_store::outbox::emit(
-                store,
-                "workflow",
-                &version.template_id,
-                "workflow.template_activated",
-                json!({"templateId": version.template_id, "versionId": version.id,
-                       "versionNo": version.version_no, "digest": version.content_digest}),
-            )
-            .map_err(store_err)?;
-            Ok(version_json(&version))
+            let idem = opt_str(params, "idempotencyKey");
+            // 幂等回执：同 key 重放返回首次响应，不重复换 active/发事件。
+            crate::dispatch::with_rpc_receipt(store, &idem, "workflowTemplate.activate", || {
+                let version =
+                    sg_workflow::template::activate(store, &version_id).map_err(store_err)?;
+                sg_store::outbox::emit(
+                    store,
+                    "workflow",
+                    &version.template_id,
+                    "workflow.template_activated",
+                    json!({"templateId": version.template_id, "versionId": version.id,
+                           "versionNo": version.version_no, "digest": version.content_digest}),
+                )
+                .map_err(store_err)?;
+                Ok(version_json(&version))
+            })
         }
         "workflowTemplate.deprecate" => {
             let version_id = str_param(params, "versionId")?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let version =
-                sg_workflow::template::deprecate(store, &version_id).map_err(store_err)?;
-            Ok(version_json(&version))
+            let idem = opt_str(params, "idempotencyKey");
+            // 幂等回执：同 key 重放返回首次响应，不重复迁移状态。
+            crate::dispatch::with_rpc_receipt(store, &idem, "workflowTemplate.deprecate", || {
+                let version =
+                    sg_workflow::template::deprecate(store, &version_id).map_err(store_err)?;
+                Ok(version_json(&version))
+            })
         }
         "workflow.getInstance" => {
             let workitem_id = str_param(params, "workItemId")?;
@@ -234,19 +244,22 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
         "workflow.migrate" => {
             let workitem_id = str_param(params, "workItemId")?;
             let target = str_param(params, "targetVersionId")?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let instance =
-                sg_workflow::instance::migrate(store, &workitem_id, &target).map_err(store_err)?;
-            sg_store::outbox::emit(
-                store,
-                "workflow",
-                &workitem_id,
-                "workflow.instance_migrated",
-                json!({"workItemId": workitem_id, "toVersionId": target,
-                       "currentGateId": instance.current_gate_id}),
-            )
-            .map_err(store_err)?;
-            Ok(serde_json::to_value(&instance).unwrap_or_default())
+            let idem = opt_str(params, "idempotencyKey");
+            // 幂等回执：同 key 重放返回首次实例投影，不重复 DELETE/INSERT 投影。
+            crate::dispatch::with_rpc_receipt(store, &idem, "workflow.migrate", || {
+                let instance = sg_workflow::instance::migrate(store, &workitem_id, &target)
+                    .map_err(store_err)?;
+                sg_store::outbox::emit(
+                    store,
+                    "workflow",
+                    &workitem_id,
+                    "workflow.instance_migrated",
+                    json!({"workItemId": workitem_id, "toVersionId": target,
+                           "currentGateId": instance.current_gate_id}),
+                )
+                .map_err(store_err)?;
+                Ok(serde_json::to_value(&instance).unwrap_or_default())
+            })
         }
         _ => Err(err_invalid(format!("unknown workflow method: {method}"))),
     }

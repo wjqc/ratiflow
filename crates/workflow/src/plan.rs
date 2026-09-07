@@ -24,6 +24,7 @@ fn can_transition(from: &str, to: &str) -> bool {
             | ("approved", "executing")
             | ("approved", "cancelled")
             | ("executing", "completed")
+            | ("executing", "cancelled")
             | ("executing", "replan_required")
             | ("replan_required", "superseded")
     )
@@ -537,7 +538,8 @@ fn transition(store: &Store, id: &str, to: &str) -> Result<PlanRevisionRecord, E
     })
 }
 
-fn current_status(store: &Store, id: &str) -> Result<String, Error> {
+/// revision 当前状态（供调度器/运行时的派发与回填闸门读取）。
+pub fn current_status(store: &Store, id: &str) -> Result<String, Error> {
     Ok(revision_by_id(store, id)?.status)
 }
 
@@ -619,7 +621,27 @@ pub fn reject(store: &Store, id: &str, _decided_by: &str) -> Result<PlanRevision
 }
 
 pub fn cancel(store: &Store, id: &str) -> Result<PlanRevisionRecord, Error> {
-    transition(store, id, "cancelled")
+    let r = transition(store, id, "cancelled")?;
+    // 级联取消活跃 attempt（缺陷审计 P1-7）：取消语义不能只落在 revision 头行——
+    // 残留的 pending/ready/running attempt 占容量且此后任何回填都被
+    // plan_revision_not_executing 闸门拒绝，必须一并终结。
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE plan_task_attempts SET state='cancelled', finished_at=?1, updated_at=?1
+             WHERE state IN ('pending','ready','preparing_workspace','running','awaiting_approval','reconciliation_required')
+               AND task_id IN (SELECT id FROM plan_tasks WHERE plan_revision_id=?2)",
+            rusqlite::params![timefmt::now(), id],
+        )?;
+        Ok(())
+    })?;
+    outbox::emit(
+        store,
+        "workitem",
+        &r.workitem_id,
+        "plan.cancelled",
+        serde_json::json!({"planRevisionId": id}),
+    )?;
+    Ok(r)
 }
 
 /// 开始执行：approved → executing；被本版本取代的旧 revision 标 superseded。
@@ -783,6 +805,19 @@ pub fn create_next_attempt(
             [&task_id],
             |r| r.get(0),
         )?;
+        // 重试预算（缺陷审计）：max_attempts 列曾零引用，unknown→对账可无限新建 attempt。
+        let max_attempts: i64 = conn
+            .query_row(
+                "SELECT max_attempts FROM plan_tasks WHERE id=?1",
+                [&task_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(3);
+        if next_no > max_attempts {
+            return Err(Error::Message(format!(
+                "task_retry_budget_exhausted: 任务 attempt 次数已达上限 {max_attempts}，不再自动新建（需人工对账）"
+            )));
+        }
         let id = ids::new_id("ptatt");
         let now = timefmt::now();
         conn.execute(

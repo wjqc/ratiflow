@@ -211,9 +211,17 @@ fn prctl_set_no_new_privs() -> i64 {
 pub fn execute(
     policy: &SandboxPolicy,
     m: &crate::ExecutionManifest,
+    cancel: Option<&sg_integrations::CancelToken>,
 ) -> Result<crate::ExecResult, crate::ExecError> {
     let hook_policy = policy.clone();
     let hook: Box<dyn Fn() -> Result<(), String> + Send + Sync> =
         Box::new(move || restrict_self_in_child(&hook_policy));
-    crate::process::run_local(&m.argv[0], &m.argv[1..], m, "kernel_restricted", Some(hook))
+    crate::process::run_local(
+        &m.argv[0],
+        &m.argv[1..],
+        m,
+        "kernel_restricted",
+        Some(hook),
+        cancel,
+    )
 }

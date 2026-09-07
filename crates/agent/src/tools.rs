@@ -140,6 +140,9 @@ pub struct ToolCtx {
     /// P0-4：隔离 worktree 不可用且回退到用户 local_root 时置位——
     /// run_command 等可写工具被拒绝（蓝图 SG-RBK-005：可写执行必须在受管域内）。
     pub read_only: bool,
+    /// Run 取消令牌（缺陷审计 P1-9）：在途子进程执行中置位即整组 kill，
+    /// 取消不再等子进程跑满 timeout。装配层从 Run 注册表注入；None = 无取消面。
+    pub cancel: Option<std::sync::Arc<sg_integrations::CancelToken>>,
 }
 
 /// 提案参数 → 受约束 ExecutionManifest（read_file / run_command）。
@@ -364,6 +367,7 @@ mod tests {
             work_dir: Some(root.clone()),
             artifacts_dir: root.join("artifacts"),
             read_only: false,
+            cancel: None,
         }
     }
 

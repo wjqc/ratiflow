@@ -992,16 +992,41 @@ fn mark_proposal(
     })
 }
 
+/// 终态集合：completed_execution（成功）/ failed / cancelled。
+/// "completed" 不是本实现的合法 run 终态，列入以防状态漂移。
+fn is_run_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "completed_execution" | "failed" | "cancelled" | "completed"
+    )
+}
+
 fn set_status(store: &Store, run: &mut AgentRun, to: &str, event: &str) -> Result<(), Error> {
-    run.status = to.into();
-    store.with_conn(|conn| {
+    // 终态 CAS（缺陷审计 P1-8）：取消/完成/失败竞争时，后写不得翻转已有终态、
+    // 不得对同一终态重复发事件。条件更新：行处于非终态、或已与目标同态（幂等重放）才写。
+    // status 与 result 同语句原子写：终态轮询方不可见"failed 而 result 未落"的中间窗口。
+    let changed = store.with_conn(|conn| {
         conn.execute(
-            // status 与 result 同语句原子写：终态轮询方不可见"failed 而 result 未落"的中间窗口。
-            "UPDATE agent_runs SET status=?1, result=?2, updated_at=?3 WHERE id=?4",
+            "UPDATE agent_runs SET status=?1, result=?2, updated_at=?3
+             WHERE id=?4 AND (status NOT IN ('completed_execution','failed','cancelled','completed') OR status=?1)",
             rusqlite::params![to, run.result, timefmt::now(), run.id],
         )?;
-        Ok(())
+        Ok(conn.changes())
     })?;
+    if changed == 0 {
+        // 行已被并发方终结为不同终态：以库内现状为准，本地静默收敛（不发事件）。
+        let current: String = store.with_conn(|conn| {
+            conn.query_row(
+                "SELECT status FROM agent_runs WHERE id=?1",
+                [&run.id],
+                |r| r.get(0),
+            )
+            .map_err(|_| Error::Message(format!("run {} 不存在", run.id)))
+        })?;
+        run.status = current;
+        return Ok(());
+    }
+    run.status = to.into();
     outbox::emit(
         store,
         "agent_run",
@@ -1167,10 +1192,7 @@ pub fn trace(store: &Store, run_id: &str) -> Result<serde_json::Value, Error> {
 
 pub fn cancel(store: &Store, id: &str) -> Result<(), Error> {
     let mut run = get_run(store, id)?;
-    if matches!(
-        run.status.as_str(),
-        "completed_execution" | "failed" | "cancelled"
-    ) {
+    if is_run_terminal(&run.status) {
         return Ok(());
     }
     set_status(store, &mut run, "cancelled", "run.cancelled")?;

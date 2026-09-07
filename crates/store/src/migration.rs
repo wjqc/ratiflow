@@ -75,6 +75,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         40,
         include_str!("../migrations/0040_gate_acceptance_rpc_receipts.sql"),
     ),
+    (
+        41,
+        include_str!("../migrations/0041_receipt_scoping_single_active.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。
@@ -166,7 +170,17 @@ pub fn run(store: &crate::Store) -> Result<(), crate::Error> {
             }
         })();
         // 恢复 FK ON 不依赖调用方自觉（§12.1 第 4 条）。
-        let _ = conn.pragma_update(None, "foreign_keys", "ON");
+        // 失败必须显性化（缺陷审计：`let _` 吞错会让本连接终生 FK OFF 且无任何痕迹）。
+        if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
+            eprintln!("{{\"level\":\"error\",\"msg\":\"migration FK restore failed: {e}\"}}");
+        }
+        let fk_on: bool = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+            .map(|v| v != 0)
+            .unwrap_or(false);
+        if !fk_on {
+            eprintln!("{{\"level\":\"error\",\"msg\":\"migration FK restore failed: foreign_keys is OFF\"}}");
+        }
         outcome
     })?;
     // 提交后防御性复核（§12.1 第 4 条）。

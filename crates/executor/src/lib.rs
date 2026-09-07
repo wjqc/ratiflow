@@ -93,6 +93,9 @@ pub struct ExecResult {
     pub stderr: String,
     pub duration_ms: u64,
     pub timed_out: bool,
+    /// 取消面（缺陷审计 P1-9）：执行中途收到取消请求并已 kill 整组。
+    #[serde(default)]
+    pub cancelled: bool,
     /// M3：kernel_restricted 时的策略 digest（执行快照/审计固定）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sandbox_policy_digest: String,
@@ -141,7 +144,17 @@ pub fn validate(mode: Mode, m: &ExecutionManifest) -> Result<(), ExecError> {
     Ok(())
 }
 
+/// 取消面（缺陷审计 P1-9）：在途执行随 CancelToken 置位即时 kill 整组，
+/// 不再等 timeout 自然结束。execute 保持无取消语义（兼容既有调用方）。
 pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecError> {
+    execute_with_cancel(mode, m, None)
+}
+
+pub fn execute_with_cancel(
+    mode: Mode,
+    m: &ExecutionManifest,
+    cancel: Option<&sg_integrations::CancelToken>,
+) -> Result<ExecResult, ExecError> {
     validate(mode, m)?;
     match mode {
         Mode::Disabled => Err(ExecError::Disabled(
@@ -156,12 +169,12 @@ pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecErro
                     m.argv[0]
                 )));
             }
-            process::run_local(&m.argv[0], &m.argv[1..], m, "safe_restricted", None)
+            process::run_local(&m.argv[0], &m.argv[1..], m, "safe_restricted", None, cancel)
         }
-        Mode::KernelRestricted => execute_kernel_restricted(m),
+        Mode::KernelRestricted => execute_kernel_restricted(m, cancel),
         Mode::UnsafeExplicit => {
             let bin = m.argv[0].clone();
-            process::run_local(&bin, &m.argv[1..], m, "unsafe_explicit", None)
+            process::run_local(&bin, &m.argv[1..], m, "unsafe_explicit", None, cancel)
         }
         Mode::Docker => {
             let docker =
@@ -183,7 +196,7 @@ pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecErro
                 args.push(m.image.clone());
             }
             args.extend(m.argv.iter().cloned());
-            let result = process::run_local(&docker, &args, m, "docker", None)?;
+            let result = process::run_local(&docker, &args, m, "docker", None, cancel)?;
             if result.timed_out {
                 let _ = std::process::Command::new(&docker)
                     .args(["rm", "-f", &container])
@@ -201,7 +214,10 @@ pub fn execute(mode: Mode, m: &ExecutionManifest) -> Result<ExecResult, ExecErro
 /// - Linux Landlock 且 network_off → sandbox_denied（Landlock FS 限制不含网络，
 ///   强网络隔离由 Docker 承担——诚实降级，不假装隔离）；
 /// - 策略 digest 附在 ExecResult（执行快照/审计回查）。
-fn execute_kernel_restricted(m: &ExecutionManifest) -> Result<ExecResult, ExecError> {
+fn execute_kernel_restricted(
+    m: &ExecutionManifest,
+    cancel: Option<&sg_integrations::CancelToken>,
+) -> Result<ExecResult, ExecError> {
     let cap = sandbox::probe();
     if cap.backend == sandbox::SandboxBackend::Unavailable.as_str() {
         return Err(ExecError::SandboxUnavailable(cap.blocked_reason));
@@ -217,7 +233,7 @@ fn execute_kernel_restricted(m: &ExecutionManifest) -> Result<ExecResult, ExecEr
             "Landlock 不含网络隔离（需 ABI≥4 或改用 Docker/显式放开 networkOff）".into(),
         ));
     }
-    let mut result = sandbox::backend_execute(&policy, m)?;
+    let mut result = sandbox::backend_execute(&policy, m, cancel)?;
     result.sandbox_policy_digest = digest;
     Ok(result)
 }
