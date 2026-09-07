@@ -145,6 +145,11 @@ export type RpcMethodName =
   | 'gate.manualConfirmations'
   | 'gate.requestSkip'
   | 'gate.evaluateFastTrack'
+  | 'rework.preview'
+  | 'rework.request'
+  | 'rework.decide'
+  | 'rework.get'
+  | 'rework.list'
   | 'stage.attempts'
   | 'stage.package'
   | 'snapshot.get'
@@ -425,6 +430,11 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'gate.manualConfirmations',
   'gate.requestSkip',
   'gate.evaluateFastTrack',
+  'rework.preview',
+  'rework.request',
+  'rework.decide',
+  'rework.get',
+  'rework.list',
   'stage.attempts',
   'stage.package',
   'snapshot.get',
@@ -1401,6 +1411,37 @@ export interface GateEvaluateFastTrackParams {
   workItemId: string;
   gate: string;
   factors: unknown;
+}
+
+export interface ReworkPreviewParams {
+  workItemId: string;
+  targetGate: string;
+  reasonCode: string;
+  note?: string;
+  requestedBy?: string;
+}
+
+export interface ReworkRequestParams {
+  workItemId: string;
+  targetGate: string;
+  reasonCode: string;
+  note?: string;
+  requestedBy?: string;
+}
+
+export interface ReworkDecideParams {
+  approvalId: string;
+  decision: string;
+  decidedBy: string;
+  reason?: string;
+}
+
+export interface ReworkGetParams {
+  operationId: string;
+}
+
+export interface ReworkListParams {
+  workItemId: string;
 }
 
 export interface StageAttemptsParams {

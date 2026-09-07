@@ -95,6 +95,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         45,
         include_str!("../migrations/0045_skill_market_sources.sql"),
     ),
+    (46, include_str!("../migrations/0046_rework_operations.sql")),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

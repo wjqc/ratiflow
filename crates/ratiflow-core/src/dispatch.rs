@@ -2546,6 +2546,55 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             .map_err(|e| shadow_err(&e))?;
             Ok(serde_json::to_value(suggestion).unwrap_or_default())
         }
+        // --- WP-9：A1 跨关返工五件套（flag=RATIFLOW_REWORK，默认 0）；
+        //     decide 走 approval.decide 的 rework 主体路由到同一实现 ---
+        "rework.preview" | "rework.request" | "rework.decide" | "rework.get" | "rework.list" => {
+            if std::env::var("RATIFLOW_REWORK").ok().as_deref() != Some("1") {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_REWORK 未开启",
+                ));
+            }
+            match method {
+                "rework.preview" => sg_workitem::rework::preview(
+                    store,
+                    &str_param(params, "workItemId")?,
+                    &str_param(params, "targetGate")?,
+                    &str_param(params, "reasonCode")?,
+                    &opt_str_param(params, "note").unwrap_or_default(),
+                    opt_str_param(params, "requestedBy")
+                        .unwrap_or_else(|| "local".into())
+                        .as_str(),
+                )
+                .map_err(store_err),
+                "rework.request" => sg_workitem::rework::request(
+                    store,
+                    &str_param(params, "workItemId")?,
+                    &str_param(params, "targetGate")?,
+                    &str_param(params, "reasonCode")?,
+                    &opt_str_param(params, "note").unwrap_or_default(),
+                    opt_str_param(params, "requestedBy")
+                        .unwrap_or_else(|| "local".into())
+                        .as_str(),
+                )
+                .map_err(store_err),
+                "rework.decide" => sg_workitem::rework::decide(
+                    store,
+                    &str_param(params, "approvalId")?,
+                    &str_param(params, "decision")?,
+                    &str_param(params, "decidedBy")?,
+                    &opt_str_param(params, "reason").unwrap_or_default(),
+                )
+                .map_err(store_err),
+                "rework.get" => sg_workitem::rework::get(store, &str_param(params, "operationId")?)
+                    .map_err(store_err),
+                _ => {
+                    let items = sg_workitem::rework::list(store, &str_param(params, "workItemId")?)
+                        .map_err(store_err)?;
+                    Ok(json!({ "items": items }))
+                }
+            }
+        }
         "stage.attempts" => {
             let workitem_id = str_param(params, "workItemId")?;
             let attempts = sg_workitem::attempt::list(store, &workitem_id).map_err(store_err)?;
@@ -3060,6 +3109,23 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     )
                     .map_err(store_err)?;
                     return Ok(json!({ "approval": appr }));
+                }
+                // WP-9：rework——decide 治理链（CAS 复查/两步执行）与 rework.decide 同实现。
+                "rework" => {
+                    if !matches!(decision.as_str(), "approved" | "rejected") {
+                        return Err(err(
+                            ErrorCode::InvalidParams,
+                            "decision must be approved|rejected for rework",
+                        ));
+                    }
+                    return sg_workitem::rework::decide(
+                        store,
+                        &approval_id,
+                        &decision,
+                        &decided_by,
+                        &reason,
+                    )
+                    .map_err(store_err);
                 }
                 // WP-7：manual_confirm 确认单落态（单向 requested → confirmed/rejected；
                 // evaluator 只读 confirmed 行 + acceptance_item_digest 精确匹配）。

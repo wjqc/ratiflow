@@ -254,9 +254,12 @@ pub fn issue_passport(
 }
 
 pub fn latest_passport(store: &Store, workitem_id: &str) -> Result<Option<Passport>, Error> {
+    // WP-9：被 rework 登记失效的护照不再返回（要求重签）；空登记表逐字等价。
     let row: Option<String> = store.with_conn(|conn| {
         let result: rusqlite::Result<String> = conn.query_row(
-            "SELECT id FROM passports WHERE workitem_id=?1 ORDER BY created_at DESC LIMIT 1",
+            "SELECT id FROM passports WHERE workitem_id=?1
+               AND id NOT IN (SELECT fact_id FROM rework_affected_facts WHERE fact_kind='passport')
+             ORDER BY created_at DESC LIMIT 1",
             [workitem_id],
             |r| r.get(0),
         );

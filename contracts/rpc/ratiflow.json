@@ -2383,6 +2383,116 @@
       "result": "value"
     },
     {
+      "name": "rework.preview",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "targetGate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reasonCode",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "requestedBy",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rework.request",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "targetGate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reasonCode",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "requestedBy",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rework.decide",
+      "params": [
+        {
+          "name": "approvalId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rework.get",
+      "params": [
+        {
+          "name": "operationId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "rework.list",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "stage.attempts",
       "params": [
         {

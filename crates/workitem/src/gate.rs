@@ -166,6 +166,33 @@ pub fn build_inputs(store: &Store, workitem_id: &str, gate: &str) -> Result<Eval
     Ok(inputs)
 }
 
+/// 最近一次有效计算行（WP-9：排除被 rework 登记失效的 gate_results；
+/// 空 affected 表时与既往查询逐字等价——回退读法）。
+/// 单连接内执行（调用方持有 with_conn/with_tx）。
+#[allow(clippy::type_complexity)]
+fn latest_valid_row_inner(
+    conn: &rusqlite::Connection,
+    workitem_id: &str,
+    gate: &str,
+) -> Option<(String, String, String, String)> {
+    conn.query_row(
+        "SELECT id, inputs, result, computed_at FROM gate_results
+         WHERE workitem_id=?1 AND gate=?2
+           AND id NOT IN (SELECT fact_id FROM rework_affected_facts WHERE fact_kind='gate_result')
+         ORDER BY computed_at DESC, rowid DESC LIMIT 1",
+        [workitem_id, gate],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        },
+    )
+    .ok()
+}
+
 /// 最近一次计算的完整行：行 id + 存储 inputs（canonical JSON）+ 结果。
 pub fn latest_full(
     store: &Store,
@@ -173,68 +200,42 @@ pub fn latest_full(
     gate: &str,
 ) -> Result<Option<(String, String, GateResult)>, Error> {
     store.with_conn(|conn| {
-        let row = conn
-            .query_row(
-                "SELECT id, inputs, result FROM gate_results
-                 WHERE workitem_id=?1 AND gate=?2
-                 ORDER BY computed_at DESC, rowid DESC LIMIT 1",
-                [workitem_id, gate],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .ok();
-        Ok(row.map(|(id, inputs, result)| {
-            let parsed: GateResult = serde_json::from_str(&result).unwrap_or(GateResult {
-                gate: gate.into(),
-                passed: false,
-                failed_inputs: vec![],
-                computed_at: String::new(),
-            });
-            (id, inputs, parsed)
-        }))
+        Ok(
+            latest_valid_row_inner(conn, workitem_id, gate).map(|(id, inputs, result, _)| {
+                let parsed: GateResult = serde_json::from_str(&result).unwrap_or(GateResult {
+                    gate: gate.into(),
+                    passed: false,
+                    failed_inputs: vec![],
+                    computed_at: String::new(),
+                });
+                (id, inputs, parsed)
+            }),
+        )
     })
 }
 
 /// 最近一次计算的 gate_results 行 id（放行事务绑定 GateEvaluation 用）。
 pub fn latest_id(store: &Store, workitem_id: &str, gate: &str) -> Result<Option<String>, Error> {
     store.with_conn(|conn| {
-        let id = conn
-            .query_row(
-                "SELECT id FROM gate_results WHERE workitem_id=?1 AND gate=?2
-                 ORDER BY computed_at DESC, rowid DESC LIMIT 1",
-                [workitem_id, gate],
-                |r| r.get::<_, String>(0),
-            )
-            .ok();
-        Ok(id)
+        Ok(latest_valid_row_inner(conn, workitem_id, gate).map(|(id, _, _, _)| id))
     })
 }
 
-/// 最近一次计算。
+/// 最近一次有效计算。
 pub fn latest(store: &Store, workitem_id: &str, gate: &str) -> Result<Option<GateResult>, Error> {
     store.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT result, computed_at FROM gate_results
-             WHERE workitem_id=?1 AND gate=?2
-             ORDER BY computed_at DESC, rowid DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query_map([workitem_id, gate], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        match rows.next() {
-            Some(Ok((body, computed_at))) => {
-                let mut result: GateResult =
-                    serde_json::from_str(&body).map_err(|e| Error::Message(e.to_string()))?;
-                result.computed_at = computed_at;
-                Ok(Some(result))
-            }
-            _ => Ok(None),
-        }
+        Ok(
+            latest_valid_row_inner(conn, workitem_id, gate).and_then(
+                |(_, _, body, computed_at)| {
+                    serde_json::from_str::<GateResult>(&body)
+                        .map(|mut r| {
+                            r.computed_at = computed_at;
+                            r
+                        })
+                        .ok()
+                },
+            ),
+        )
     })
 }
 

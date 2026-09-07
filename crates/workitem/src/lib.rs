@@ -11,6 +11,7 @@ pub mod progress;
 pub mod release;
 pub mod release_events;
 pub mod requirements;
+pub mod rework;
 pub mod rollback;
 pub mod snapshot;
 pub mod stages;
