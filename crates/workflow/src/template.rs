@@ -10,11 +10,14 @@ use sha2::{Digest, Sha256};
 /// 默认关闭 = 新模板管理 RPC 与非默认模板创建不可用；默认六关行为不变。
 /// 实例顺序解析对默认模板与 legacy 枚举逐字相同（parity 由单测断言），
 /// 因此关闭 flag 不影响已存在实例的一致性（§11.3 只读延续）。
+/// 模板域开关：**默认开启**（关卡/交付物配置化为产品能力，用户 2026-09-07 拍板）；
+/// `SIXGATES_WORKFLOW_TEMPLATE_V2=0` 为显式关闭（kill switch，回退 legacy 行为：
+/// 新模板 RPC feature_disabled，workitem.create 拒绝非默认 templateId）。
+/// 默认模板 six-gate-default 与 legacy 六关逐字同序（parity 单测），默认行为不变。
 pub fn template_v2_enabled() -> bool {
     std::env::var("SIXGATES_WORKFLOW_TEMPLATE_V2")
-        .ok()
-        .as_deref()
-        == Some("1")
+        .map(|v| v != "0")
+        .unwrap_or(true)
 }
 
 /// 内置默认模板 key（迁移 0032 创建，激活版本 v1）。

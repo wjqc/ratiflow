@@ -16,12 +16,12 @@
 - **外部集成**：GitLab 实例与 SSH 目标机在同一页配置；访问令牌/凭证直填即自动写入 Keychain（数据库只存引用 ID），GitLab 401 自动降级为 degraded，SSH 首次连接必须显式确认指纹。
 - **设置中心**：行式布局；使用统计页提供总 Token / 缓存命中 Token / 缓存命中率三项指标与近 30 天每日趋势折线图（兼容 OpenAI 与 DeepSeek 两种缓存命中字段形状）。
 - **备份与审计**：一键备份/恢复数据目录，审计导出全文不含任何秘密值。
-- **可配置工作流与计划 DAG（灰度）**：数据化工作流模板（3/2 关热修复流程与默认六关并存，WorkItem 冻结模板版本）、结构化计划（拓扑校验/环检测/确定性调度）、局部重规划（下游闭包重做、无关成功任务带证据复用）、任务级并行工作区（base HEAD 钉住、可归因可合并）。
+- **可配置工作流与计划 DAG**：数据化工作流模板**默认可用**——自定义关卡数量/顺序/标题、每关多交付物 kind 与验收策略（acceptance）随版本冻结；新建任务可选模板；`SIXGATES_WORKFLOW_TEMPLATE_V2=0` 可显式关闭。结构化计划（拓扑校验/环检测/确定性调度）、局部重规划（下游闭包重做、无关成功任务带证据复用）、任务级并行工作区（base HEAD 钉住、可归因可合并）。
 - **自治与授权（灰度）**：Ask/Agent/Plan 模式与执行隔离正交；PlanGuard 执行前硬门禁（规划阶段只读，未知副作用 fail-closed）；AutonomyGrant 限范围限时授权；Goal 后台长任务默认停在人工放行。
 - **Agent 团队与技能版本（灰度）**：Agent Team 版本化（role → profile version 选路，generic 回退带证据 / fail_closed 明确失败）；技能不可变版本生命周期（draft/active/deprecated/revoked）；Context Policy 服务端工具交集（客户端只可收紧）。
 - **可观测与自动化（灰度）**：durable trace span 调用链、驾驶舱 read model（真实进度无估算值，checkpoint 断线重建）、usage 缓存/成本未知时诚实显示 unknown；自动化调度（receipt 幂等去重、misfire/overlap 策略）；中文 Slash 指令 preview → execute 命中同一审批链；私有技能仓库 pin commit SHA 导入（仅读取 Markdown，不执行任何代码）。
 
-以上灰度能力由 feature flag 门控（`SIXGATES_WORKFLOW_TEMPLATE_V2` / `SIXGATES_PLAN_DAG` / `SIXGATES_CONTEXT_POLICY_V2` / `SIXGATES_AUTOMATIONS` 等十余个，全部默认关闭）；开启方法与验收矩阵见仓库内实施文档。
+工作流模板域默认开启（`SIXGATES_WORKFLOW_TEMPLATE_V2=0` 关闭）；其余灰度能力由 feature flag 门控（`SIXGATES_PLAN_DAG` / `SIXGATES_CONTEXT_POLICY_V2` / `SIXGATES_AUTOMATIONS` 等，默认关闭）；开启方法与验收矩阵见仓库内实施文档。
 
 ## 架构
 

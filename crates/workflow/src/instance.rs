@@ -24,6 +24,8 @@ pub struct InstanceGate {
     pub title: String,
     pub purpose: String,
     pub deliverables: Vec<String>,
+    /// 本关验收策略（模板声明，随版本冻结；空 = 通用六输入门禁基线）。
+    pub acceptance: Vec<String>,
     pub state: String,
 }
 
@@ -99,7 +101,8 @@ pub fn gates_for_workitem(
     };
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT gd.gate_id, gd.ordinal, gd.title, gd.purpose, gd.deliverables_json, ig.state
+            "SELECT gd.gate_id, gd.ordinal, gd.title, gd.purpose, gd.deliverables_json,
+                    COALESCE(gd.acceptance_json,'[]'), ig.state
              FROM workflow_instance_gates ig
              JOIN workflow_gate_definitions gd ON gd.id = ig.gate_definition_id
              WHERE ig.instance_id=?1 ORDER BY gd.ordinal",
@@ -111,7 +114,8 @@ pub fn gates_for_workitem(
                 title: r.get(2)?,
                 purpose: r.get(3)?,
                 deliverables: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-                state: r.get(5)?,
+                acceptance: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+                state: r.get(6)?,
             })
         })?;
         let mut out = Vec::new();

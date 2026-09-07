@@ -795,8 +795,11 @@ mod tests {
         let art = sg_artifact::create_artifact(
             store,
             workitem_id,
-            &crate::deliverable::required_kind_for(store, workitem_id, gate)
-                .unwrap_or_else(|_| "doc".into()),
+            &crate::deliverable::required_kinds_for(store, workitem_id, gate)
+                .unwrap_or_else(|_| vec!["doc".to_string()])
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "doc".into()),
             gate,
         )
         .unwrap();

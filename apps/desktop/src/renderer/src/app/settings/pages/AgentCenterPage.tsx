@@ -34,14 +34,27 @@ interface Binding {
   enabled: boolean;
 }
 
-const GATES = [
+type GateRow = { gate: string; label: string; purpose: string; activity: string };
+
+/// legacy 六关的默认活动映射（agentBinding.activityKey）；自定义关用通用活动。
+const ACTIVITY_BY_LEGACY_GATE: Record<string, string> = {
+  requirements: 'requirement_analysis',
+  design: 'technical_design',
+  development: 'frontend',
+  testing: 'e2e_testing',
+  deployment: 'release_planning',
+  verification: 'acceptance_verification',
+};
+
+/// 回退清单（workflowTemplate RPC 不可用时）：默认六关。
+const LEGACY_GATES: GateRow[] = [
   { gate: 'requirements', label: '需求关', purpose: '澄清需求并起草 PRD', activity: 'requirement_analysis' },
   { gate: 'design', label: '方案关', purpose: '形成产品与技术方案', activity: 'technical_design' },
   { gate: 'development', label: '开发关', purpose: '实现代码并完成自测', activity: 'frontend' },
   { gate: 'testing', label: '测试关', purpose: '执行端到端与质量验证', activity: 'e2e_testing' },
   { gate: 'deployment', label: '部署关', purpose: '准备发布并验证环境', activity: 'release_planning' },
   { gate: 'verification', label: '验证关', purpose: '完成验收与交付确认', activity: 'acceptance_verification' },
-] as const;
+];
 
 const ROLE_TEMPLATES = [
   { name: '产品需求 Agent', persona: '你是一名资深产品经理，负责澄清需求、定义范围并输出可验收的 PRD。', capabilities: '需求分析,PRD,验收标准' },
@@ -85,16 +98,57 @@ export function AgentCenterPage() {
     void reload();
   }, [reload]);
 
+  // 关卡清单配置化：全部 active 模板版本合并去重（默认模板在前）；
+  // RPC 不可用（显式关闭/老库）回退 legacy 六关。
+  const [gateRows, setGateRows] = useState<GateRow[]>(LEGACY_GATES);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await rpc<{
+          items: { key: string; versions: { id: string; status: string }[] }[];
+        }>('workflowTemplate.list', {});
+        const templates = [...(list.items ?? [])].sort((a, b) =>
+          a.key === 'six-gate-default' ? -1 : b.key === 'six-gate-default' ? 1 : 0,
+        );
+        const rows: GateRow[] = [];
+        const seen = new Set<string>();
+        for (const t of templates) {
+          if (!t.versions?.some((v) => v.status === 'active')) continue;
+          const detail = await rpc<{
+            activeVersion?: { gates?: { gate_id: string; title: string; purpose?: string }[] };
+          }>('workflowTemplate.get', { templateId: t.key });
+          for (const g of detail.activeVersion?.gates ?? []) {
+            if (seen.has(g.gate_id)) continue;
+            seen.add(g.gate_id);
+            rows.push({
+              gate: g.gate_id,
+              label: g.title || g.gate_id,
+              purpose: g.purpose || '',
+              activity: ACTIVITY_BY_LEGACY_GATE[g.gate_id] ?? 'general',
+            });
+          }
+        }
+        if (!cancelled && rows.length > 0) setGateRows(rows);
+      } catch {
+        // 回退 LEGACY_GATES。
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     const next: Record<string, string> = {};
-    for (const gate of GATES) {
+    for (const gate of gateRows) {
       const binding = bindings.find(
         (item) => item.gate === gate.gate && (!item.project_id || item.project_id === projectId),
       );
       if (binding) next[gate.gate] = binding.profile_version_id;
     }
     setAssignments(next);
-  }, [bindings, projectId]);
+  }, [bindings, projectId, gateRows]);
 
   const versions = useMemo(
     () => profiles.flatMap((profile) => (profile.versions ?? []).map((version) => ({ profile, version }))),
@@ -130,7 +184,7 @@ export function AgentCenterPage() {
     }
   };
 
-  const saveAssignment = async (gate: (typeof GATES)[number]) => {
+  const saveAssignment = async (gate: GateRow) => {
     const versionId = assignments[gate.gate];
     setSavingGate(gate.gate);
     setError('');
@@ -160,7 +214,7 @@ export function AgentCenterPage() {
     }
   };
 
-  const runPreview = async (gate: (typeof GATES)[number]) => {
+  const runPreview = async (gate: GateRow) => {
     setPreview('');
     try {
       if (!projectId) throw new Error('请先选择一个项目');
@@ -192,7 +246,7 @@ export function AgentCenterPage() {
       <SettingsPageHeader
         title="Agent 中心"
         scope="本地"
-        description="决定六关中的每一步由谁完成；没有特殊要求时使用内置通用 Agent。"
+        description="决定每一关由谁完成（关卡清单来自已激活的工作流模板）；没有特殊要求时使用内置通用 Agent。"
       />
 
       <div className="sg-agent-scroll">
@@ -257,11 +311,11 @@ export function AgentCenterPage() {
 
         <section className="sg-agent-assignments">
           <div className="sg-agent-section-head">
-            <div><h2>六关分工</h2><p>为项目的每一关选择负责人；保持“内置通用 Agent”即可零配置运行。</p></div>
+            <div><h2>关卡分工</h2><p>为模板里的每一关选择负责人；保持“内置通用 Agent”即可零配置运行。</p></div>
             <label className="sg-agent-project"><span>当前项目</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
           </div>
           <div className="sg-agent-gate-list">
-            {GATES.map((gate, index) => (
+            {gateRows.map((gate, index) => (
               <div className="sg-agent-gate-row" key={gate.gate}>
                 <span className="sg-agent-gate-number">{index + 1}</span>
                 <div><h3>{gate.label}</h3><p>{gate.purpose}</p></div>

@@ -64,6 +64,32 @@ export default function NewTaskPage({
   const [error, setError] = useState('');
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const modeMenuRef = useRef<HTMLDivElement>(null);
+  // 关卡模板（配置化）：有 active 版本的模板可选；默认 six-gate-default。
+  const [templates, setTemplates] = useState<{ key: string; name: string }[]>([]);
+  const [templateKey, setTemplateKey] = useState('six-gate-default');
+
+  useEffect(() => {
+    let cancelled = false;
+    rpc<{ items: { key: string; name: string; versions: { status: string }[] }[] }>(
+      'workflowTemplate.list',
+      {},
+    )
+      .then((r) => {
+        if (cancelled) return;
+        setTemplates(
+          (r.items ?? [])
+            .filter((t) => t.versions?.some((v) => v.status === 'active'))
+            .map((t) => ({ key: t.key, name: t.name })),
+        );
+      })
+      .catch(() => {
+        // 模板域不可用（显式关闭/老库）→ 隐藏选择器，默认模板照常。
+        if (!cancelled) setTemplates([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 点外部收起“+”来源菜单（与工作台输入器同一交互）。
   useEffect(() => {
@@ -93,9 +119,14 @@ export default function NewTaskPage({
           throw new Error('请先描述你的需求');
         }
         const wi = await rpc<{ id: string }>('workitem.create', {
-          projectId: workspaceId, title, description: description.trim(),
+          projectId: workspaceId, title, description: description.trim(), templateId: templateKey,
         });
-        await openWithAutomaticPrd(wi.id, description.trim());
+        if (templateKey === 'six-gate-default') {
+          await openWithAutomaticPrd(wi.id, description.trim());
+        } else {
+          // 自定义模板首关未必是需求关：不自动起草 PRD，直接进工作台按模板关卡推进。
+          onCreated(wi.id, workspaceId);
+        }
       } else if (mode === 'document') {
         if (!file?.content) {
           throw new Error('请先选择文档');
@@ -121,11 +152,16 @@ export default function NewTaskPage({
           projectId: workspaceId,
           title: deriveTitle(description) || file.filename,
           description: description.trim(),
+          templateId: templateKey,
         });
         await rpc('attachment.import', {
           workItemId: wi.id, filename: file.filename, contentBase64: file.contentBase64,
         });
-        await openWithAutomaticPrd(wi.id, description.trim());
+        if (templateKey === 'six-gate-default') {
+          await openWithAutomaticPrd(wi.id, description.trim());
+        } else {
+          onCreated(wi.id, workspaceId);
+        }
       }
     } catch (reason) {
       setError(rpcErrorMessage(reason));
@@ -222,6 +258,29 @@ export default function NewTaskPage({
             />
             <span className="sg-muted">PRD 将结合此工作区的代码与知识库起草</span>
           </div>
+
+          {templates.length > 0 && (mode === 'text' || mode === 'image') ? (
+            <div className="sg-nt-context-row">
+              <span>关卡模板</span>
+              <select
+                className="sg-select"
+                style={{ width: 'auto' }}
+                value={templateKey}
+                onChange={(e) => setTemplateKey(e.target.value)}
+                aria-label="关卡模板"
+                title="决定任务的关卡数量、顺序与每关交付物要求（创建后冻结该版本）"
+              >
+                {templates.map((t) => (
+                  <option key={t.key} value={t.key}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+              {templateKey !== 'six-gate-default' ? (
+                <span className="sg-muted">使用自定义关卡模板，创建时冻结当前激活版本</span>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="sg-composer-main sg-nt-composer">
             <textarea

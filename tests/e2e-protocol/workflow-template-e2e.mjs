@@ -68,10 +68,10 @@ const THREE_GATES = (a, b, c) => [
 ];
 
 async function main() {
-  // ============ 场景一：Flag 关闭（默认）============
+  // ============ 场景一：Flag 显式关闭（默认开，=0 为 kill switch）============
   {
     const dataDir = mkdtempSync(join(tmpdir(), 'sg-wftpl-off-'));
-    const c = new CoreClient(dataDir);
+    const c = new CoreClient(dataDir, { SIXGATES_WORKFLOW_TEMPLATE_V2: '0' });
     try {
       await c.call('project.create', { gitlabInstance: 'local', namespace: 'e2e', project: 'flagoff', name: 'FlagOff' });
       const wi = await c.call('workitem.create', { projectId: (await c.call('project.list', {})).items[0].id, title: '默认六关' });
@@ -203,6 +203,49 @@ async function main() {
       const instDefault = await c.call('workflow.getInstance', { workItemId: wiDefault.id });
       assert(instDefault.gates.length === 6, '未指定模板 → 默认六关实例');
       assert(instDefault.gates.map((g) => g.gate_id).join(',') === 'requirements,design,development,testing,deployment,verification', '默认顺序逐字一致');
+
+      // 7) 多交付物配置化：一关声明两个 kind，缺一不放行、全冻才过（deliverableStatus 全量透出）。
+      const multi = await c.call('workflowTemplate.create', {
+        key: 'multi-dlv',
+        name: '多交付物模板',
+        gates: [{ gateId: 'build', title: '构建关', purpose: '', deliverables: ['spec', 'patch'] }],
+        idempotencyKey: 'e2e-md-1',
+      });
+      await c.call('workflowTemplate.activate', { versionId: multi.version.id, idempotencyKey: 'e2e-act-4' });
+      const wiM = await c.call('workitem.create', { projectId: pj, title: '多交付物任务', templateId: 'multi-dlv' });
+      const keysM = await activeKeys(c, wiM.id);
+      // deliverableStatus：requiredKinds 全量 + entries 逐 kind。
+      const st0 = await c.call('gate.deliverableStatus', { workItemId: wiM.id, gate: 'build' });
+      assert(JSON.stringify(st0.requiredKinds) === JSON.stringify(['spec', 'patch']), 'requiredKinds 全量透出');
+      assert(st0.entries.length === 2 && st0.entries.every((e) => e.missing === 'artifact_absent'), '逐 kind 明细：均缺工件');
+      // 只备 spec → 放行拒绝并指名 patch。
+      const mkFrozen = async (kind, content) => {
+        const art = await c.call('artifact.create', { workItemId: wiM.id, kind, title: kind });
+        const rev = await c.call('artifact.createDraft', { artifactId: art.id, content, requirementKeys: keysM });
+        await c.call('artifact.addReview', { revisionId: rev.id, reviewer: 't', verdict: 'approved' });
+        return rev;
+      };
+      const specRev = await mkFrozen('spec', `# spec\n- [${keysM[0]}] x`);
+      await c.call('artifact.freezeBaseline', { workItemId: wiM.id, gate: 'build', revisionIds: [specRev.id] });
+      const st1 = await c.call('gate.deliverableStatus', { workItemId: wiM.id, gate: 'build' });
+      assert(st1.satisfied === false, 'patch 缺失 → 整体不满足');
+      const patchEntry = st1.entries.find((e) => e.kind === 'patch');
+      assert(patchEntry.missing === 'artifact_absent', '缺失指向 patch（按名指明）');
+      // 技术评估先过（放行前置顺序：评估 → 交付物），再验证交付物缺一不放行。
+      const evM = await c.call('evidence.record', { workItemId: wiM.id, gate: 'build', kind: 'manual', title: '构建核验', source: 'local', requirementKeys: keysM });
+      await c.call('evidence.verify', { evidenceId: evM.id, verifiedBy: 'qa' });
+      await c.call('gate.evaluate', { workItemId: wiM.id, gate: 'build' });
+      await expectErrorContains(
+        () => c.call('gate.requestRelease', { workItemId: wiM.id, gate: 'build' }),
+        'patch',
+        '多交付物缺一 → 放行拒绝（指名缺失 kind）',
+      );
+      // patch 补齐；spec 旧修订已冻结不可复用 → spec 出 v2 新修订，两 kind 同基线冻结 → 放行。
+      const patchRev = await mkFrozen('patch', `# patch\n- [${keysM[0]}] x`);
+      const specRev2 = await mkFrozen('spec', `# spec v2\n- [${keysM[0]}] x`);
+      await c.call('artifact.freezeBaseline', { workItemId: wiM.id, gate: 'build', revisionIds: [specRev2.id, patchRev.id] });
+      const st2 = await c.call('gate.deliverableStatus', { workItemId: wiM.id, gate: 'build' });
+      assert(st2.satisfied === true, '全部 kind 冻结 → 满足');
 
       console.log('场景二（Flag 开启完整生命周期）通过');
     } finally {

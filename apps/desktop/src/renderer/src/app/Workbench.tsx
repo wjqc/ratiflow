@@ -1600,7 +1600,7 @@ function gateIconContent(v: StageVisual): ReactNode {
 
 /* ---------------- 当前关工作区 ---------------- */
 
-/** 交付物门禁状态：本关要求类型的工件存在且已冻结基线才放行（与 core request_release 前置一致）。 */
+/** 交付物门禁状态：本关要求的所有 deliverable kind 均已冻结基线才放行（与 core request_release 前置一致）。 */
 function DeliverableChip({
   gate,
   workItemId,
@@ -1612,8 +1612,10 @@ function DeliverableChip({
 }) {
   const [status, setStatus] = useState<{
     requiredKind: string;
+    requiredKinds?: string[];
     satisfied: boolean;
     missing: string | null;
+    entries?: { kind: string; satisfied: boolean; missing: string | null }[];
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -1622,8 +1624,10 @@ function DeliverableChip({
     try {
       const s = await rpc<{
         requiredKind: string;
+        requiredKinds?: string[];
         satisfied: boolean;
         missing: string | null;
+        entries?: { kind: string; satisfied: boolean; missing: string | null }[];
       }>('gate.deliverableStatus', { workItemId, gate });
       setStatus(s);
     } catch {
@@ -1642,7 +1646,9 @@ function DeliverableChip({
     setError('');
     try {
       const content = new TextDecoder().decode(Uint8Array.from(atob(picked.contentBase64), (c) => c.charCodeAt(0)));
-      const requiredKind = status?.requiredKind ?? '';
+      // 导入目标 = 第一个未满足的 kind（多交付物按缺口顺序补齐）。
+      const requiredKind =
+        status?.entries?.find((e) => !e.satisfied)?.kind ?? status?.requiredKind ?? '';
       const existing = await rpc<{ items: Array<{ id: string; kind: string; title: string }> }>(
         'artifact.list',
         { workItemId },
@@ -1677,20 +1683,40 @@ function DeliverableChip({
   };
 
   if (!status) return null;
+  const MISSING_LABELS: Record<string, string> = {
+    artifact_absent: '缺工件',
+    revision_absent: '无修订',
+    not_frozen: '未冻结',
+    empty_content: '空内容',
+  };
+  const entries =
+    status.entries && status.entries.length > 0
+      ? status.entries
+      : [
+          {
+            kind: status.requiredKind,
+            satisfied: status.satisfied,
+            missing: status.missing,
+          },
+        ];
+  const allSatisfied = entries.every((e) => e.satisfied);
   return (
     <>
-      <div
-        className={`sg-gate-req${status.satisfied ? '' : ' sg-gate-req--missing'}`}
-        title={
-          status.satisfied
-            ? '交付物已冻结基线，可进入审批'
-            : '无冻结交付物不可进入审批'
-        }
-      >
-        {status.satisfied ? <IconCheck size={12} /> : '✗'} 交付物（{status.requiredKind}）
-        {status.satisfied ? '已冻结' : '未就绪'}
-      </div>
-      {!status.satisfied ? (
+      {entries.map((e) => (
+        <div
+          key={e.kind}
+          className={`sg-gate-req${e.satisfied ? '' : ' sg-gate-req--missing'}`}
+          title={
+            e.satisfied
+              ? '交付物已冻结基线，可进入审批'
+              : '该交付物未就绪：无冻结交付物不可进入审批'
+          }
+        >
+          {e.satisfied ? <IconCheck size={12} /> : '✗'} 交付物（{e.kind}）
+          {e.satisfied ? '已冻结' : MISSING_LABELS[e.missing ?? ''] ?? '未就绪'}
+        </div>
+      ))}
+      {!allSatisfied ? (
         <div>
           <button className="sg-button" disabled={busy} onClick={() => void importFile()}>
             {busy ? '导入中…' : '导入交付物文件'}
@@ -1718,6 +1744,34 @@ function GitStatusChip({ projectId }: { projectId: string }) {
       分支 {info.branch} · {info.dirty ?? 0} 处未提交
     </span>
   );
+}
+
+/// 实例关信息（模板配置面）：acceptance 验收策略 + deliverables kind 清单。
+/// workflow.getInstance 失败（老库/无实例）→ null，UI 回退 legacy 展示。
+function useInstanceGateInfo(workItemId: string, gate: string) {
+  const [info, setInfo] = useState<{ acceptance: string[]; deliverables: string[] } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    rpc<{
+      gates: { gate_id: string; acceptance?: string[]; deliverables: string[] }[];
+    }>('workflow.getInstance', { workItemId })
+      .then((r) => {
+        if (cancelled) return;
+        const g = (r.gates ?? []).find((x) => x.gate_id === gate);
+        setInfo(
+          g
+            ? { acceptance: g.acceptance ?? [], deliverables: g.deliverables ?? [] }
+            : null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workItemId, gate]);
+  return info;
 }
 
 function GateWorkspace({
@@ -1753,6 +1807,11 @@ function GateWorkspace({
 }) {
   // 仅当最新一次 Run 失败时才显示错误卡（历史失败不追溯展示）。
   const failedRun = runs[0]?.status === 'failed' ? runs[0] : undefined;
+  // 本关要求：模板声明的 acceptance 优先（配置化），无则回退 legacy 文案。
+  const instanceGate = useInstanceGateInfo(workItemId, gate);
+  const gateReqs = instanceGate?.acceptance?.length
+    ? instanceGate.acceptance
+    : (GATE_REQUIREMENTS[gate] ?? ['完成本关交付物并通过放行审批']);
   return (
     <div className="sg-workbench-center">
       <div className="sg-gate-head">
@@ -1778,7 +1837,7 @@ function GateWorkspace({
         </div>
         <div className="sg-gate-summary-reqs">
           <div className="sg-gate-summary-label">本关要求</div>
-          {(GATE_REQUIREMENTS[gate] ?? ['完成本关交付物并通过放行审批']).map((req) => (
+          {gateReqs.map((req) => (
             <div className="sg-gate-req" key={req}>
               <IconCheck size={12} />
               {req}
