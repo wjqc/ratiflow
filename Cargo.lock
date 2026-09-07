@@ -1086,6 +1086,7 @@ dependencies = [
  "sg-executor",
  "sg-integrations",
  "sg-policy",
+ "sg-provenance",
  "sg-settings",
  "sg-store",
  "sha2",

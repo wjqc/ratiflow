@@ -600,6 +600,8 @@ pub fn execute_run(
                             action: tc.name.clone(),
                             arguments: tc.arguments.clone(),
                             summary: String::new(),
+                            rationale: String::new(),
+                            confidence: None,
                         }),
                         Some(tc.clone()),
                     )
@@ -609,6 +611,8 @@ pub fn execute_run(
                         action: "final".into(),
                         arguments: String::new(),
                         summary: response.content.clone(),
+                        rationale: String::new(),
+                        confidence: None,
                     }),
                     None,
                 ),
@@ -985,6 +989,9 @@ struct Decision {
     action: String,
     arguments: String,
     summary: String,
+    /// WP-6：模型自报（untrusted_display；空 = 未提供）。
+    rationale: String,
+    confidence: Option<f64>,
 }
 
 fn parse_decision(content: &str) -> Option<Decision> {
@@ -1000,6 +1007,10 @@ fn parse_decision(content: &str) -> Option<Decision> {
         action: action.into(),
         arguments: arguments.to_string(),
         summary: summary.into(),
+        // WP-6（RDWS v1.4 A3）：模型自报依据——untrusted_display，仅面板展示，
+        // 不进判定链与任何 digest（B12：自动化阈值不用模型自评）。
+        rationale: value["rationale"].as_str().unwrap_or_default().into(),
+        confidence: value["confidence"].as_f64(),
     })
 }
 
@@ -1028,11 +1039,14 @@ fn propose_and_execute(
     // WP-2（RDWS v1.4）：tool 列写侧一律 canonical（builtin:/mcp: 前缀）+ tool_provider
     // 区分列；执行/治理链经 ToolId::parse 双形态等价消费（legacy 行为不变）。
     let tool_id = crate::provider::ToolId::parse(&decision.action);
+    let confidence_json = decision
+        .confidence
+        .map(|c| serde_json::json!({"source": "model_self_report", "value": c}).to_string());
     store.with_conn(|conn| {
         conn.execute(
             "INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
-                 requires_approval, decision, created_at, tool_provider)
-             VALUES (?1,?2,?3,?4,?5,?6,0,'proposed',?7,?8)",
+                 requires_approval, decision, created_at, tool_provider, rationale, confidence_json)
+             VALUES (?1,?2,?3,?4,?5,?6,0,'proposed',?7,?8,?9,COALESCE(?10,''))",
             rusqlite::params![
                 proposal.id,
                 proposal.run_id,
@@ -1041,7 +1055,9 @@ fn propose_and_execute(
                 proposal.risk,
                 proposal.action_digest,
                 proposal.created_at,
-                tool_id.provider()
+                tool_id.provider(),
+                decision.rationale,
+                confidence_json
             ],
         )?;
         Ok(())
@@ -1112,7 +1128,18 @@ fn propose_and_execute(
     if needs_approval
         && sg_policy::validate_for(store, "tool_proposal", &proposal.id, &digest).is_err()
     {
-        sg_policy::request_approval(
+        // WP-6（RDWS v1.4 A3）：审批依据 = ActionDigest + impact_digest 双绑定；
+        // incomplete/unknown 追加 workitem 全图 facts digest（等待期漂移 decide 拦截）。
+        let binding = sg_provenance::impact::for_proposal(store, &proposal.id).ok();
+        let (impact_digest, completeness, scope) = match &binding {
+            Some(r) => (
+                r.impact_digest.clone(),
+                r.completeness.as_str().to_string(),
+                r.workitem_facts_digest.clone(),
+            ),
+            None => (String::new(), "complete".into(), String::new()),
+        };
+        sg_policy::request_approval_binding(
             store,
             "tool_proposal",
             &proposal.id,
@@ -1122,6 +1149,11 @@ fn propose_and_execute(
             3600,
             Some(&run.workitem_id),
             None,
+            &sg_policy::ImpactBinding {
+                impact_digest: &impact_digest,
+                completeness: &completeness,
+                scope_facts_digest: &scope,
+            },
         )?;
         // M1/F03：提案保持 proposed（不再记 rejected/approval_required），Run 挂起等待审批。
         log_rollout(

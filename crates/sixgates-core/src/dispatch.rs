@@ -551,6 +551,47 @@ where
     }
 }
 
+/// WP-6（RDWS v1.4 A3）：tool_proposal 审批 decide 前重算双 digest。
+/// - digest_schema_version 未知 → fail-closed（不猜测公式）；
+/// - impact_digest 漂移 → expire + impact_digest_changed；
+/// - scope_facts_digest（incomplete/unknown 审批的全图摘要）漂移 → expire。
+///
+/// legacy（impact_digest 空）跳过比对，行为与 WP-6 前一致。
+fn verify_tool_proposal_binding(
+    store: &Store,
+    subject: &sg_policy::Approval,
+) -> Result<(), RpcError> {
+    if subject.digest_schema_version != sg_policy::DIGEST_SCHEMA_VERSION {
+        return Err(err(
+            ErrorCode::ApprovalInvalid,
+            format!(
+                "approval_digest_version_unknown: digest_schema_version={} 不受支持（fail-closed）",
+                subject.digest_schema_version
+            ),
+        ));
+    }
+    let current =
+        sg_provenance::impact::for_proposal(store, &subject.subject_id).map_err(store_err)?;
+    if current.impact_digest != subject.impact_digest {
+        sg_policy::expire_drifted(store, &subject.id, "impact_digest_changed")
+            .map_err(store_err)?;
+        return Err(err(
+            ErrorCode::Conflict,
+            "impact_digest_changed: 影响面在审批等待期间漂移，待审已失效（请重新发起）",
+        ));
+    }
+    if !subject.scope_facts_digest.is_empty()
+        && current.workitem_facts_digest != subject.scope_facts_digest
+    {
+        sg_policy::expire_drifted(store, &subject.id, "scope_facts_changed").map_err(store_err)?;
+        return Err(err(
+            ErrorCode::Conflict,
+            "scope_facts_changed: workitem 全图 facts 在审批等待期间漂移，待审已失效",
+        ));
+    }
+    Ok(())
+}
+
 /// 统一取消服务（agent.cancel 与 Slash /取消 共用，EvoFlow 评审 P0 修复）：
 /// 活跃任务置位取消令牌——阻塞中的模型 HTTP/SSE 在 select 点即时中止
 /// （放弃 future 即关闭 socket，目标 <1s），Run 循环以 cancelled 终态收尾并
@@ -2587,6 +2628,12 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             match subject.subject_type.as_str() {
                 "gate_release" => {
                     return gate_decide_release_rpc(store, params);
+                }
+                // WP-6（RDWS v1.4 A3）：tool_proposal 双 digest 重算——impact 漂移/
+                // 全图 facts 漂移使待审失效（legacy 空列跳过=回退语义；未知版本
+                // fail-closed）。
+                "tool_proposal" if !subject.impact_digest.is_empty() => {
+                    verify_tool_proposal_binding(store, &subject)?;
                 }
                 "plan_revision" => {
                     if !matches!(decision.as_str(), "approved" | "rejected") {
@@ -4684,5 +4731,161 @@ mod receipt_tests {
         let e2 = call().unwrap_err();
         assert_eq!(e2.message, "invalid_params", "envelope 重放");
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "重放不重执行");
+    }
+}
+
+#[cfg(test)]
+mod approval_binding_tests {
+    use super::*;
+
+    fn setup() -> Store {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-apbind-{}-{}",
+            std::process::id(),
+            sg_store::ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Store::open(&dir, "test").unwrap()
+    }
+
+    fn seed(store: &Store) {
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main','t');
+                     INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi','pj','t','','[]','requirements','t','t');
+                     INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('ctx1','wi','{}','standard','t');
+                     INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                         tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+                     VALUES ('run1','wi','','g','sha','ctx1','[]','{}','default','ik','queued','t','t');
+                     INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
+                         requires_approval, decision, created_at)
+                     VALUES ('tp1','run1','builtin:apply_patch','{}','high','d',1,'proposed','t');
+                     INSERT INTO provenance_nodes(id, workitem_id, node_type, entity_id, content_digest, verification_state, created_at)
+                     VALUES ('n1','wi','tool_proposal','tp1','cd1','verified','t');
+                     INSERT INTO provenance_nodes(id, workitem_id, node_type, entity_id, content_digest, verification_state, created_at)
+                     VALUES ('n2','wi','artifact_revision','ar1','cd2','verified','t');
+                     INSERT INTO provenance_edges(id, workitem_id, from_node_id, relation, to_node_id, stage_attempt_id, created_by_run_id, edge_digest, created_at)
+                     VALUES ('e1','wi','n1','produced_by','n2','','','ed1','t');",
+                )
+                .map_err(Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// RDWS-010：双 digest 重算——命中通过；edge_digest 漂移 → 失效+过期；
+    /// frontier 外 provenance 写入 → scope 漂移拦截（incomplete 审批）。
+    #[test]
+    fn tool_proposal_binding_drift_rejection() {
+        let store = setup();
+        seed(&store);
+        let impact = sg_provenance::impact::for_proposal(&store, "tp1").unwrap();
+        // complete 审批（无 scope 绑定）。
+        let a = sg_policy::request_approval_binding(
+            &store,
+            "tool_proposal",
+            "tp1",
+            "d",
+            sg_policy::Risk::High,
+            "r",
+            60,
+            Some("wi"),
+            None,
+            &sg_policy::ImpactBinding {
+                impact_digest: &impact.impact_digest,
+                completeness: impact.completeness.as_str(),
+                scope_facts_digest: &impact.workitem_facts_digest,
+            },
+        )
+        .unwrap();
+        verify_tool_proposal_binding(&store, &sg_policy::get(&store, &a.id).unwrap()).unwrap();
+        // 行内漂移：edge_digest 篡改 → impact_digest_changed + 审批过期。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE provenance_edges SET edge_digest='tampered' WHERE id='e1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let subject = sg_policy::get(&store, &a.id).unwrap();
+        let err = verify_tool_proposal_binding(&store, &subject).unwrap_err();
+        assert!(
+            err.message.contains("impact_digest_changed")
+                || err.to_string().contains("impact_digest_changed"),
+            "{err}"
+        );
+        let after = sg_policy::get(&store, &a.id).unwrap();
+        assert_eq!(after.status, "expired", "漂移审批已失效");
+        // scope 漂移：incomplete 审批 + frontier 外写入 → scope_facts_changed。
+        store
+            .with_conn(|c| {
+                c.execute("UPDATE provenance_edges SET edge_digest='ed1' WHERE id='e1'", [])?;
+                c.execute_batch(
+                    "INSERT INTO provenance_nodes(id, workitem_id, node_type, entity_id, content_digest, verification_state, created_at)
+                     VALUES ('n9','wi','evidence','ev9','cd9','verified','t');",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let impact2 = sg_provenance::impact::for_proposal(&store, "tp1").unwrap();
+        let b = sg_policy::request_approval_binding(
+            &store,
+            "tool_proposal",
+            "tp1",
+            "d2",
+            sg_policy::Risk::High,
+            "r",
+            60,
+            Some("wi"),
+            None,
+            &sg_policy::ImpactBinding {
+                impact_digest: &impact2.impact_digest,
+                completeness: "incomplete",
+                scope_facts_digest: &impact2.workitem_facts_digest,
+            },
+        )
+        .unwrap();
+        verify_tool_proposal_binding(&store, &sg_policy::get(&store, &b.id).unwrap()).unwrap();
+        // frontier 外再写入（不影响 impact 子图）→ 仅 scope 拦截。
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO provenance_nodes(id, workitem_id, node_type, entity_id, content_digest, verification_state, created_at)
+                     VALUES ('n10','wi','evidence','ev10','cd10','verified','t');
+                     INSERT INTO provenance_edges(id, workitem_id, from_node_id, relation, to_node_id, stage_attempt_id, created_by_run_id, edge_digest, created_at)
+                     VALUES ('e10','wi','n10','verifies','n10','','','ed10','t');",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let subject_b = sg_policy::get(&store, &b.id).unwrap();
+        let err = verify_tool_proposal_binding(&store, &subject_b).unwrap_err();
+        assert!(
+            err.to_string().contains("scope_facts_changed"),
+            "{}",
+            err.to_string()
+        );
+        // 未知版本 fail-closed。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE approvals SET digest_schema_version=99 WHERE id=?1",
+                    [&b.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let err = verify_tool_proposal_binding(&store, &sg_policy::get(&store, &b.id).unwrap())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("approval_digest_version_unknown"),
+            "{err}"
+        );
     }
 }

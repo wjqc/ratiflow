@@ -137,6 +137,15 @@ pub struct Approval {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage_attempt_id: Option<String>,
     pub action_digest: String,
+    /// WP-6（RDWS v1.4）：影响面绑定（legacy 空串 = 跳过比对，行为不变）。
+    #[serde(default)]
+    pub impact_digest: String,
+    /// incomplete/unknown 审批的全图 facts 摘要（等待期漂移在 decide 拦截）。
+    #[serde(default)]
+    pub scope_facts_digest: String,
+    /// digest 公式版本（0=legacy；decide 时未知版本 fail-closed）。
+    #[serde(default)]
+    pub digest_schema_version: i64,
     pub risk: String,
     pub status: String,
     pub requested_by: String,
@@ -202,12 +211,108 @@ pub fn request_approval(
         workitem_id: workitem_id.map(String::from),
         stage_attempt_id: stage_attempt_id.map(String::from),
         action_digest: digest.into(),
+        impact_digest: String::new(),
+        scope_facts_digest: String::new(),
+        digest_schema_version: 0,
         risk: risk.as_str().into(),
         status: "requested".into(),
         requested_by: "local".into(),
         expires_at: expires,
         reason: reason.into(),
         created_at: now,
+    })
+}
+
+/// 当前 digest 公式版本（impact v1 = WP-5 facts 全列算法）。
+pub const DIGEST_SCHEMA_VERSION: i64 = 1;
+
+/// 影响面绑定（WP-6 / RDWS v1.4）：tool_proposal 审批 request 时服务端写入
+/// impact_digest + scope_facts_digest + 版本号。incomplete/unknown 审批缺
+/// scope_facts_digest 一律拒绝（等待期漂移盲区必须闭环）。
+/// 绑定参数（request_approval 之上追加的 WP-6 字段）。
+pub struct ImpactBinding<'a> {
+    pub impact_digest: &'a str,
+    pub completeness: &'a str,
+    pub scope_facts_digest: &'a str,
+}
+
+#[allow(clippy::too_many_arguments)] // 与 request_approval 同形（多一个绑定参数组）
+pub fn request_approval_binding(
+    store: &Store,
+    subject_type: &str,
+    subject_id: &str,
+    digest: &str,
+    risk: Risk,
+    reason: &str,
+    ttl_secs: i64,
+    workitem_id: Option<&str>,
+    stage_attempt_id: Option<&str>,
+    binding: &ImpactBinding<'_>,
+) -> Result<Approval, Error> {
+    let (impact_digest, completeness, scope_facts_digest) = (
+        binding.impact_digest,
+        binding.completeness,
+        binding.scope_facts_digest,
+    );
+    if matches!(completeness, "incomplete" | "unknown") && scope_facts_digest.is_empty() {
+        return Err(Error::Message(
+            "approval_scope_required: incomplete/unknown 审批必须绑定 workitem 全图 facts digest"
+                .into(),
+        ));
+    }
+    let approval = request_approval(
+        store,
+        subject_type,
+        subject_id,
+        digest,
+        risk,
+        reason,
+        ttl_secs,
+        workitem_id,
+        stage_attempt_id,
+    )?;
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE approvals SET impact_digest=?2, scope_facts_digest=?3, digest_schema_version=?4
+             WHERE id=?1",
+            rusqlite::params![
+                approval.id,
+                impact_digest,
+                if completeness == "complete" {
+                    ""
+                } else {
+                    scope_facts_digest
+                },
+                DIGEST_SCHEMA_VERSION
+            ],
+        )?;
+        Ok(())
+    })?;
+    Ok(Approval {
+        impact_digest: impact_digest.into(),
+        scope_facts_digest: if completeness == "complete" {
+            String::new()
+        } else {
+            scope_facts_digest.into()
+        },
+        digest_schema_version: DIGEST_SCHEMA_VERSION,
+        ..approval
+    })
+}
+
+/// 漂移失效（decide 时重算比对不符 → expire + 调用方返回明确错误）。
+pub fn expire_drifted(store: &Store, approval_id: &str, cause: &str) -> Result<(), Error> {
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE approvals SET status='expired', reason=?2, decided_at=?3
+             WHERE id=?1 AND status='requested'",
+            rusqlite::params![
+                approval_id,
+                format!("approval_drift: {cause}"),
+                timefmt::now()
+            ],
+        )?;
+        Ok(())
     })
 }
 
@@ -248,7 +353,7 @@ pub fn decide(
     get(store, approval_id)
 }
 
-const APPROVAL_COLUMNS: &str = "id, subject_type, subject_id, workitem_id, stage_attempt_id, action_digest, risk, status, requested_by, expires_at, reason, created_at";
+const APPROVAL_COLUMNS: &str = "id, subject_type, subject_id, workitem_id, stage_attempt_id, action_digest, COALESCE(impact_digest,''), COALESCE(scope_facts_digest,''), COALESCE(digest_schema_version,0), risk, status, requested_by, expires_at, reason, created_at";
 
 fn row_approval(r: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
     Ok(Approval {
@@ -258,12 +363,15 @@ fn row_approval(r: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
         workitem_id: r.get(3)?,
         stage_attempt_id: r.get(4)?,
         action_digest: r.get(5)?,
-        risk: r.get(6)?,
-        status: r.get(7)?,
-        requested_by: r.get(8)?,
-        expires_at: r.get(9)?,
-        reason: r.get(10)?,
-        created_at: r.get(11)?,
+        impact_digest: r.get(6)?,
+        scope_facts_digest: r.get(7)?,
+        digest_schema_version: r.get(8)?,
+        risk: r.get(9)?,
+        status: r.get(10)?,
+        requested_by: r.get(11)?,
+        expires_at: r.get(12)?,
+        reason: r.get(13)?,
+        created_at: r.get(14)?,
     })
 }
 
@@ -483,5 +591,101 @@ mod tests {
             decide(&s, &appr.id, "rejected", "o", "").is_err(),
             "双重决定必须拒绝"
         );
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    fn setup() -> Store {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-bind-{}-{}",
+            std::process::id(),
+            ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Store::open(&dir, "test").unwrap()
+    }
+
+    /// WP-6：incomplete/unknown 缺 scope 拒绝；complete 不写 scope；legacy 跳过。
+    #[test]
+    fn binding_scope_rules() {
+        let store = setup();
+        for completeness in ["incomplete", "unknown"] {
+            let err = request_approval_binding(
+                &store,
+                "tool_proposal",
+                "tp1",
+                "d",
+                Risk::High,
+                "r",
+                60,
+                None,
+                None,
+                &ImpactBinding {
+                    impact_digest: "imp",
+                    completeness,
+                    scope_facts_digest: "",
+                },
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("approval_scope_required"), "{err}");
+        }
+        let a = request_approval_binding(
+            &store,
+            "tool_proposal",
+            "tp1",
+            "d",
+            Risk::High,
+            "r",
+            60,
+            None,
+            None,
+            &ImpactBinding {
+                impact_digest: "imp",
+                completeness: "complete",
+                scope_facts_digest: "scope",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                a.impact_digest.as_str(),
+                a.scope_facts_digest.as_str(),
+                a.digest_schema_version
+            ),
+            ("imp", "", 1)
+        );
+        let b = request_approval_binding(
+            &store,
+            "tool_proposal",
+            "tp2",
+            "d",
+            Risk::High,
+            "r",
+            60,
+            None,
+            None,
+            &ImpactBinding {
+                impact_digest: "imp2",
+                completeness: "incomplete",
+                scope_facts_digest: "scope2",
+            },
+        )
+        .unwrap();
+        assert_eq!(b.scope_facts_digest, "scope2", "incomplete 绑定全图摘要");
+        let stored: (String, String, i64) = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COALESCE(impact_digest,''), COALESCE(scope_facts_digest,''), COALESCE(digest_schema_version,0)
+                     FROM approvals WHERE id=?1",
+                    [&b.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(stored, ("imp2".into(), "scope2".into(), 1));
     }
 }
