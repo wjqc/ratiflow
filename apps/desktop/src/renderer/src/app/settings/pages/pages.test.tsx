@@ -180,6 +180,38 @@ describe('设置页接线', () => {
     );
   });
 
+  it('S25 技能页：市场 tab 显示市场源与安装开关（开=安装）', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'skill.list') {
+        return ok({ items: [
+          { id: 'skill_1', name: 'deploy-check', description: '', bodyBytes: 1, enabled: true, source: 'manual', agentProfileId: null, agentName: null, revision: 1, createdAt: '', updatedAt: '' },
+        ] });
+      }
+      if (method === 'skill.marketList') {
+        return ok({ items: [
+          { id: 'mkt_1', name: '远端技能库', kind: 'remote_git', rootPath: 'https://example.com/r.git', marketplaceId: '', enabled: true, revision: 1, resolvedRoot: 'https://example.com/r.git', marketplaceName: 'r', description: '', pluginCount: 0, skills: [
+            { name: 'remote-alpha', dirName: 'remote-alpha', description: '远程技能', plugin: '', version: 'abcd1234' },
+          ], plugins: [], error: '' },
+        ] });
+      }
+      return ok({});
+    });
+    render(<SkillsPage />);
+    await waitFor(() => expect(screen.getByText('deploy-check')).toBeInTheDocument());
+    // 切到市场 tab：懒加载市场源。
+    fireEvent.click(screen.getByRole('tab', { name: /市场/ }));
+    await waitFor(() => expect(screen.getByText('远端技能库')).toBeInTheDocument());
+    expect(screen.getByText(/1 个可安装技能/)).toBeInTheDocument();
+    // 展开源 → 技能行开关未安装 → 打开开关 = marketImport。
+    fireEvent.click(screen.getByText('远端技能库'));
+    const sw = screen.getByRole('switch', { name: '安装技能 remote-alpha' });
+    expect(sw).not.toBeChecked();
+    fireEvent.click(sw);
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith('skill.marketImport', expect.objectContaining({ sourceId: 'mkt_1', skillName: 'remote-alpha' })),
+    );
+  });
+
   it('工具页策略行来自 tool.list', async () => {
     rpcMock.mockImplementation((method: string) => {
       if (method === 'tool.list') {

@@ -4676,7 +4676,7 @@
       "name": "skill.marketList",
       "params": [],
       "result": "value",
-      "description": "浏览技能市场源：返回可编辑源列表+每源可导入技能清单（远程 git 源浏览拉取市场仓库清单；本机源只读本地目录）"
+      "description": "浏览技能市场源：返回可编辑源列表+每源可导入技能清单（只读本地插件市场目录，不联网不执行）"
     },
     {
       "name": "skill.marketImport",

@@ -1,6 +1,7 @@
 //! 技能（Skills）管理域：Agent 指令包。元数据入库，正文存 objects（内容寻址，秘密扫描总闸）。
 //! 启用的技能由 Run 装配（spawn_run_task）拼为「技能段」注入提示词——启用即注入，无全局门禁。
-//! 来源：manual（新建表单）/ import（Markdown 文件导入）；frontmatter 中的 description 由前端解析后传入。
+//! 来源：manual（新建表单）/ import（Markdown 文件导入）/ market（市场源 SKILL.md 导入）；
+//! frontmatter 中的 description 由前端解析后传入。
 
 use serde::Serialize;
 
@@ -89,7 +90,7 @@ pub fn create(
     agent_profile_id: Option<&str>,
 ) -> SettingsResult<Skill> {
     validate_name(name)?;
-    if !matches!(source, "manual" | "import") {
+    if !matches!(source, "manual" | "import" | "market") {
         return Err(SettingsError::new("INVALID_PARAMS", "非法来源"));
     }
     if let Some(existing) = skill_by_name(store, name)? {

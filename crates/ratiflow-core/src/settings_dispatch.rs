@@ -764,6 +764,58 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             })?;
             Ok(serde_json::to_value(out).unwrap_or_default())
         }
+        // --- 技能市场源（可配置；只读本地插件市场目录，不联网不执行）---
+        "skill.marketList" => {
+            let items = settings::skill_market::browse(store).map_err(serr)?;
+            Ok(json!({ "items": items }))
+        }
+        "skill.marketImport" => {
+            let out = settings::skill_market::import_from_source(
+                store,
+                s(p, "sourceId")?,
+                s(p, "plugin")?,
+                s(p, "version")?,
+                s(p, "skillName")?,
+                p.get("createdBy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local"),
+            )
+            .map_err(serr)?;
+            changed(store, "skill", &out.skill.id);
+            Ok(serde_json::to_value(out).unwrap_or_default())
+        }
+        "skill.marketSourceSave" => {
+            let v = settings::skill_market::source_save(
+                store,
+                p.get("sourceId").and_then(|v| v.as_str()),
+                s(p, "kind")?,
+                s(p, "name")?,
+                s(p, "rootPath")?,
+                p.get("marketplaceId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                p.get("enabled").and_then(|v| v.as_bool()),
+                p.get("expectedRevision").and_then(|v| v.as_i64()),
+            )
+            .map_err(serr)?;
+            changed(store, "skill", &v.id);
+            Ok(serde_json::to_value(v).unwrap_or_default())
+        }
+        "skill.marketSourceRemove" => {
+            settings::skill_market::source_remove(
+                store,
+                s(p, "sourceId")?,
+                n(p, "expectedRevision")?,
+            )
+            .map_err(serr)?;
+            Ok(json!({ "status": "removed" }))
+        }
+        "skill.marketPluginSkills" => {
+            let out =
+                settings::skill_market::plugin_skills(store, s(p, "sourceId")?, s(p, "plugin")?)
+                    .map_err(serr)?;
+            Ok(serde_json::to_value(out).unwrap_or_default())
+        }
         "backup.create" => {
             let op = settings::operations::begin(store, "backup.create", false).map_err(serr)?;
             let _ = settings::operations::progress(
