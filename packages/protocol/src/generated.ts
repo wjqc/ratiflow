@@ -267,7 +267,8 @@ export type RpcMethodName =
   | 'mcp.importResume'
   | 'mcp.importRevoke'
   | 'mcp.importList'
-  | 'mcp.importGet';
+  | 'mcp.importGet'
+  | 'impact.forProposal';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -535,6 +536,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'mcp.importRevoke',
   'mcp.importList',
   'mcp.importGet',
+  'impact.forProposal',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -2047,4 +2049,8 @@ export type McpImportListParams = Record<string, never>;
 
 export interface McpImportGetParams {
   importId: string;
+}
+
+export interface ImpactForProposalParams {
+  proposalId: string;
 }

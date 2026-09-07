@@ -1286,6 +1286,13 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             sg_provenance::gaps(store, &str_param(params, "workItemId")?).map_err(store_err)
         }
 
+        // --- B8 影响面（RDWS v1.4 WP-5，纯读；WP-6 审批绑定消费）---
+        "impact.forProposal" => {
+            let r = sg_provenance::impact::for_proposal(store, &str_param(params, "proposalId")?)
+                .map_err(store_err)?;
+            Ok(sg_provenance::impact::to_json(&r))
+        }
+
         // --- 快照 / 回滚（ADR-030 M3）---
         "snapshot.get" => {
             let snap = sg_workitem::snapshot::get(store, &str_param(params, "snapshotId")?)

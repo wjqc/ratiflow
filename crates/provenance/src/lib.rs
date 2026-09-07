@@ -3,6 +3,7 @@
 //! digest 为确定性拼接哈希（可对账防篡改）。lineage/coverage/gaps 为只读查询。
 //! 本 crate 不依赖具体领域 crate（蓝图 §3.1，防循环依赖）：领域侧经
 //! `node_type`/`entity_id` 字符串引用实体。
+pub mod impact;
 
 use serde::Serialize;
 use sg_store::{ids, outbox, timefmt, Error, Store};

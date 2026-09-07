@@ -4673,6 +4673,17 @@
         }
       ],
       "description": "导入详情（entrypoint/候选/冻结五元组/cursor/server）"
+    },
+    {
+      "name": "impact.forProposal",
+      "params": [
+        {
+          "name": "proposalId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "description": "影响面（纯读）：双向遍历+facts 全列 digest；complete|incomplete|unknown 三态"
     }
   ],
   "events": [

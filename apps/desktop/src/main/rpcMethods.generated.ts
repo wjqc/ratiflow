@@ -265,4 +265,5 @@ export const RPC_METHODS: readonly string[] = [
   'mcp.importRevoke',
   'mcp.importList',
   'mcp.importGet',
+  'impact.forProposal',
 ];
