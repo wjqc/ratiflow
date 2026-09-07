@@ -14,6 +14,7 @@ pub mod plan;
 pub mod read_model;
 pub mod replan;
 pub mod scheduler;
+pub mod shadow;
 pub mod template;
 pub mod trace;
 

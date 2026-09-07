@@ -4521,6 +4521,74 @@
       "result": "value"
     },
     {
+      "name": "automation.decideSuggestion",
+      "params": [
+        {
+          "name": "suggestionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "automation.reviewSuggestion",
+      "params": [
+        {
+          "name": "suggestionId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "falsePositive",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "reviewer",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "automation.observations",
+      "params": [
+        {
+          "name": "source",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "automationId",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "goal.autoReleaseCheck",
       "params": [
         {

@@ -730,6 +730,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             | "automation.resume"
             | "automation.runNow"
             | "automation.history"
+            | "automation.decideSuggestion"
+            | "automation.reviewSuggestion"
+            | "automation.observations"
             | "goal.autoReleaseCheck"
             | "autonomy.createGrant"
             | "autonomy.revokeGrant"
@@ -4270,6 +4273,24 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             .map(String::from)
             .ok_or_else(|| invalid(format!("missing param: {k}")))
     };
+    // WP-8a：shadow 域错误分类（确定性码，不落 InternalError=Transient 面）。
+    let shadow_err = |e: &sg_store::Error| {
+        let msg = e.to_string();
+        let code = if msg.contains("shadow_decision_conflict") {
+            ErrorCode::Conflict
+        } else if msg.contains("shadow_suggestion_missing")
+            || msg.contains("shadow_decision_missing")
+        {
+            ErrorCode::NotFound
+        } else if msg.contains("shadow_decision_invalid")
+            || msg.contains("shadow_suggestion_invalid")
+        {
+            ErrorCode::InvalidParams
+        } else {
+            ErrorCode::InternalError
+        };
+        RpcError::new(code, msg.as_str())
+    };
     match method {
         "automation.create" => {
             if !automation_flag {
@@ -4554,6 +4575,57 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                 })
                 .map_err(store_err)?;
             Ok(json!({ "items": items }))
+        }
+        // --- WP-8a：suggestion/observation 基础设施（写侧由领域路径生成：
+        //     WP-8 fast-track 判定 / WP-12 automation tick；此处只暴露决定/复核/观察面）---
+        "automation.decideSuggestion" => {
+            if !automation_flag {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
+                ));
+            }
+            let out = sg_workflow::shadow::decide(
+                store,
+                &str_param("suggestionId")?,
+                &str_param("decision")?,
+                &str_param("decidedBy")?,
+                &str_param("note")?,
+            )
+            .map_err(|e| shadow_err(&e))?;
+            Ok(serde_json::to_value(out).unwrap_or_default())
+        }
+        "automation.reviewSuggestion" => {
+            if !automation_flag {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
+                ));
+            }
+            let false_positive = params
+                .get("falsePositive")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| invalid("missing param: falsePositive".into()))?;
+            let out = sg_workflow::shadow::review(
+                store,
+                &str_param("suggestionId")?,
+                false_positive,
+                &str_param("reviewer")?,
+                &str_param("note")?,
+            )
+            .map_err(|e| shadow_err(&e))?;
+            Ok(serde_json::to_value(out).unwrap_or_default())
+        }
+        "automation.observations" => {
+            let source = opt_str_param(params, "source");
+            let automation_id = opt_str_param(params, "automationId");
+            let out = sg_workflow::shadow::observations(
+                store,
+                source.as_deref().filter(|s| !s.is_empty()),
+                automation_id.as_deref().filter(|s| !s.is_empty()),
+            )
+            .map_err(|e| shadow_err(&e))?;
+            Ok(serde_json::to_value(out).unwrap_or_default())
         }
         _ => Err(invalid(format!("unknown automation method: {method}"))),
     }

@@ -259,6 +259,9 @@ export type RpcMethodName =
   | 'automation.resume'
   | 'automation.runNow'
   | 'automation.history'
+  | 'automation.decideSuggestion'
+  | 'automation.reviewSuggestion'
+  | 'automation.observations'
   | 'goal.autoReleaseCheck'
   | 'notification.list'
   | 'skill.importFromRegistry'
@@ -529,6 +532,9 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'automation.resume',
   'automation.runNow',
   'automation.history',
+  'automation.decideSuggestion',
+  'automation.reviewSuggestion',
+  'automation.observations',
   'goal.autoReleaseCheck',
   'notification.list',
   'skill.importFromRegistry',
@@ -2008,6 +2014,25 @@ export interface AutomationRunNowParams {
 
 export interface AutomationHistoryParams {
   automationId: string;
+}
+
+export interface AutomationDecideSuggestionParams {
+  suggestionId: string;
+  decision: string;
+  decidedBy: string;
+  note: string;
+}
+
+export interface AutomationReviewSuggestionParams {
+  suggestionId: string;
+  falsePositive: boolean;
+  reviewer: string;
+  note: string;
+}
+
+export interface AutomationObservationsParams {
+  source?: string;
+  automationId?: string;
 }
 
 export interface GoalAutoReleaseCheckParams {

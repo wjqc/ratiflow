@@ -172,6 +172,55 @@ async function main() {
       'pin 必须为 commit SHA（防注入）',
     );
 
+    // --- 7. WP-8a：suggestion/observation 基础设施（RPC 面；写侧随 WP-8 fast-track /
+    //     WP-12 automation tick 领域路径落地，其全链 e2e 由 WP-8 的 gate-skip-e2e 承接）---
+    {
+      // 空观察面：items/stats 形状。
+      const empty = await c.call('automation.observations', {});
+      assert(Array.isArray(empty.items) && empty.items.length === 0, '空观察面返回空 items');
+      assert(empty.stats && empty.stats.total === 0 && empty.stats.decided === 0, 'stats 零值形状');
+      const bySource = await c.call('automation.observations', { source: 'automation' });
+      assert(Array.isArray(bySource.items), '按 source 过滤可用');
+      await expectErrorContains(
+        () => c.call('automation.observations', { source: 'magic' }),
+        'shadow_suggestion_invalid',
+        '非法 source 拒绝',
+      );
+      // 不存在建议 → NotFound 族。
+      await expectErrorContains(
+        () => c.call('automation.decideSuggestion', { suggestionId: 'shs_ghost', decision: 'accepted', decidedBy: 'owner', note: '' }),
+        'shadow_suggestion_missing',
+        '不存在建议决定拒绝',
+      );
+      // 非法 decision 枚举。
+      await expectErrorContains(
+        () => c.call('automation.decideSuggestion', { suggestionId: 'shs_ghost', decision: 'maybe', decidedBy: 'owner', note: '' }),
+        'shadow_decision_invalid',
+        '非法 decision 枚举拒绝',
+      );
+      // 复核前置：建议须已决定（不存在 → shadow_suggestion_missing）。
+      await expectErrorContains(
+        () => c.call('automation.reviewSuggestion', { suggestionId: 'shs_ghost', falsePositive: true, reviewer: 'qa', note: '' }),
+        'shadow_suggestion_missing',
+        '复核不存在建议拒绝',
+      );
+      // Flag 关闭：决定拒绝、观察面照常可读。
+      {
+        const cOff = new CoreClient(dataDir);
+        try {
+          await expectErrorContains(
+            () => cOff.call('automation.decideSuggestion', { suggestionId: 'shs_x', decision: 'accepted', decidedBy: 'o', note: '' }),
+            'feature_disabled',
+            'Flag 关闭：decideSuggestion 拒绝',
+          );
+          const obsOff = await cOff.call('automation.observations', {});
+          assert(Array.isArray(obsOff.items), 'Flag 关闭：observations 读面可用');
+        } finally {
+          cOff.kill();
+        }
+      }
+    }
+
     console.log('自动化调度/Goal/私有技能仓库 协议 E2E 通过。');
   } finally {
     c.kill();
