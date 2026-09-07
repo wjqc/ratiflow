@@ -175,15 +175,21 @@ pub fn reschedule(store: &Store, automation_id: &str, from: &str) -> Result<(), 
     })
 }
 
-/// misfire 处理（§6.13）：到期时 now 已越过 next_fire 一个周期以上。
-/// skip → 标记 skipped_misfire；run_once/catch_up_one → 触发一次（上限 1，禁止无限补跑）。
+/// misfire 处理（§6.13）：now 越过 next_fire 一个整周期以上才算 misfire
+/// （评审 P1 修复：正常调度器有毫秒级抖动，只越过 next_fire 不算过期——
+/// 否则 skip 策略几乎每次都误判放弃）。skip → 标记 skipped_misfire；
+/// run_once/catch_up_one → 触发一次（上限 1，禁止无限补跑）。
 /// 返回是否应触发。
 pub fn misfire_decision(
     misfire_policy: &str,
     next_fire_at: &str,
     now: &str,
+    interval_secs: i64,
 ) -> Result<bool, Error> {
-    let overdue = now > next_fire_at;
+    let overdue = match (timefmt::parse(now), timefmt::parse(next_fire_at)) {
+        (Some(n), Some(f)) => n > f + TimeDuration::seconds(interval_secs.max(1)),
+        _ => now > next_fire_at,
+    };
     match misfire_policy {
         "skip" => Ok(!overdue),
         "run_once" | "catch_up_one" => Ok(true), // 补跑一次，重调度向前（reschedule 已钳 now）
@@ -192,15 +198,35 @@ pub fn misfire_decision(
 }
 
 /// overlap 闸：上一触发尚无终态（fired 未推进）时按策略 skip/queue_one。
+/// 排除本次 scheduled_for 自身的 receipt 行（评审 P1 修复：认领先行后，
+/// 当前触发的 fired 行不得计入 overlap，否则首轮即被误判上一轮在途）。
 pub fn overlap_allowed(store: &Store, automation_id: &str, policy: &str) -> Result<bool, Error> {
+    overlap_allowed_for(store, automation_id, policy, None)
+}
+
+/// 带排除项的 overlap 闸（fire_one 认领后传当前 scheduled_for）。
+pub fn overlap_allowed_for(
+    store: &Store,
+    automation_id: &str,
+    policy: &str,
+    exclude_scheduled_for: Option<&str>,
+) -> Result<bool, Error> {
     let pending: i64 = store.with_conn(|conn| {
-        conn.query_row(
-            "SELECT COUNT(*) FROM automation_runs
-             WHERE automation_id=?1 AND status='fired'",
-            [automation_id],
-            |r| r.get(0),
-        )
-        .map_err(Error::from)
+        let n = match exclude_scheduled_for {
+            Some(sf) => conn.query_row(
+                "SELECT COUNT(*) FROM automation_runs
+                 WHERE automation_id=?1 AND status='fired' AND scheduled_for<>?2",
+                rusqlite::params![automation_id, sf],
+                |r| r.get(0),
+            ),
+            None => conn.query_row(
+                "SELECT COUNT(*) FROM automation_runs
+                 WHERE automation_id=?1 AND status='fired'",
+                [automation_id],
+                |r| r.get(0),
+            ),
+        };
+        n.map_err(Error::from)
     })?;
     match policy {
         "queue_one" => Ok(pending == 0 || pending < 2),
@@ -377,21 +403,38 @@ mod tests {
             "a",
         )
         .unwrap();
-        // 未过期（now=当前，next_fire=now+60s）→ 触发。
-        assert!(
-            misfire_decision(&skip.misfire_policy, &skip.next_fire_at, &timefmt::now()).unwrap()
-        );
-        // 已过期（now=2099 远超 next_fire）→ skip 不触发，run_once 补一次。
+        // 未过期（now=当前，next_fire=now+60s，未越过整周期）→ 触发。
+        assert!(misfire_decision(
+            &skip.misfire_policy,
+            &skip.next_fire_at,
+            &timefmt::now(),
+            skip.interval_secs
+        )
+        .unwrap());
+        // 已过期（now=2099 远超 next_fire+interval）→ skip 不触发，run_once 补一次。
         assert!(!misfire_decision(
             &skip.misfire_policy,
             &skip.next_fire_at,
-            "2099-01-01T00:00:00.000Z"
+            "2099-01-01T00:00:00.000Z",
+            skip.interval_secs
+        )
+        .unwrap());
+        // 毫秒级抖动（now=next_fire+1s < next_fire+interval）→ 不算 misfire（评审 P1）。
+        let jittered = timefmt::parse(&skip.next_fire_at)
+            .map(|t| timefmt::format_now(t + TimeDuration::seconds(1)))
+            .unwrap_or_default();
+        assert!(misfire_decision(
+            &skip.misfire_policy,
+            &skip.next_fire_at,
+            &jittered,
+            skip.interval_secs
         )
         .unwrap());
         assert!(misfire_decision(
             &once.misfire_policy,
             &once.next_fire_at,
-            "2099-01-01T00:00:00.000Z"
+            "2099-01-01T00:00:00.000Z",
+            once.interval_secs
         )
         .unwrap());
         // overlap：skip 策略下存在未推进 fired → 拒绝；queue_one 允许一单排队。

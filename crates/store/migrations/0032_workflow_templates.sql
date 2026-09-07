@@ -108,14 +108,15 @@ CREATE TABLE workflow_instance_gates (
 CREATE INDEX idx_wi_gates_definition ON workflow_instance_gates(gate_definition_id);
 
 -- 4) 内置 six-gate-default@1：激活版本，gate 定义与既有六关语义逐一对齐。
---    content_digest 常量 = sha256("v1|" + 六定义行按序拼接)，行格式见 sg-workflow template.rs。
+--    content_digest 常量 = sha256("v2|" + 六定义行按序拼接)，行格式见 sg-workflow template.rs
+--    （v2 = v1 基础上追加 acceptance_csv 与三个 policy ref；内置模板 acceptance 空、ref 空）。
 INSERT INTO workflow_templates (id, key, name, created_at, updated_at)
 VALUES ('wtpl_six_gate_default', 'six-gate-default', '默认六关',
         strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 
 INSERT INTO workflow_template_versions (id, template_id, version_no, status, content_digest, created_by, created_at, updated_at)
 VALUES ('wfv_six_gate_default_1', 'wtpl_six_gate_default', 1, 'active',
-        'f22824eedeb16b28f748b14842fef443604cb4ab5b42a87d2fabdf02422c9e81',
+        'fc7b91cdbb7d7c8274fc8712900fa26941e992d012737474e4588558375a44e6',
         'migration', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 
 INSERT INTO workflow_gate_definitions

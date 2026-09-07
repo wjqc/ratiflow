@@ -130,7 +130,14 @@ pub fn preview(store: &Store, text: &str, workitem_id: &str) -> Result<Value, Er
 }
 
 /// execute：token 比对（重算 canonical sha256），命中同一领域服务。
-pub fn execute(store: &Store, text: &str, workitem_id: &str, token: &str) -> Result<Value, Error> {
+/// state 仅用于 /取消 的统一取消服务（CancelToken 置位，禁止绕过）。
+pub fn execute(
+    state: &crate::state::AppState,
+    store: &Store,
+    text: &str,
+    workitem_id: &str,
+    token: &str,
+) -> Result<Value, Error> {
     let parsed = parse(text, workitem_id)?;
     if preview_token(&parsed) != token {
         return Err(Error::Message(
@@ -210,7 +217,9 @@ pub fn execute(store: &Store, text: &str, workitem_id: &str, token: &str) -> Res
                 .run_id
                 .clone()
                 .ok_or_else(|| Error::Message("command_target_missing: /取消 需要 runId".into()))?;
-            sg_agent::cancel(store, &run_id)?;
+            // 统一取消服务：活跃 Run 置位 CancelToken（模型 HTTP/SSE 即时中止），
+            // 与 agent.cancel 完全同链；禁止直调领域库只改库不中止在途调用。
+            crate::dispatch::cancel_run_shared(state, store, &run_id).map_err(Error::Message)?;
             Ok(json!({"executed": "agent.cancel", "runId": run_id}))
         }
         SlashIntent::Migrate => {

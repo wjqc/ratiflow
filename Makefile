@@ -45,6 +45,7 @@ e2e: ## Protocol E2E golden flow + agent lifecycle + settings + trace + gate rel
 	node tests/e2e-protocol/mcp-e2e.mjs
 	node tests/e2e-protocol/workflow-template-e2e.mjs
 	node tests/e2e-protocol/plan-dag-e2e.mjs
+	node tests/e2e-protocol/plan-execution-e2e.mjs
 	node tests/e2e-protocol/partial-replan-e2e.mjs
 	node tests/e2e-protocol/team-context-e2e.mjs
 	node tests/e2e-protocol/trace-command-e2e.mjs

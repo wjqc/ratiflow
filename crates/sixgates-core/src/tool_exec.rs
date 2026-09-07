@@ -248,6 +248,71 @@ fn plan_guard_check(
     }
 }
 
+/// effect → grant 风险档（validate_grant 的 allowed_risks 语义）。
+/// unknown effect 保守按 high 处理（与 PlanGuard fail-closed 同向）。
+fn effect_risk(effect: Option<sg_policy::plan_guard::EffectClass>) -> &'static str {
+    use sg_policy::plan_guard::EffectClass;
+    match effect {
+        Some(EffectClass::None) | Some(EffectClass::Read) => "low",
+        Some(EffectClass::LocalWrite) => "medium",
+        Some(EffectClass::ExternalWrite) | Some(EffectClass::Irreversible) => "high",
+        None => "high",
+    }
+}
+
+/// Autonomy 运行时不变量（EvoFlow 评审 P0-1 修复，ADR-037 §6.5）：
+/// - Ask 模式：写副作用/unknown effect 一律拒绝（validate_tool_for_mode）——
+///   "Ask 只读" 从声明变为执行链逐动作校验的不变量；
+/// - autonomyGrantId：状态/时限/工具白名单/风险白名单逐动作校验（validate_grant），
+///   且 grant.workitem_id 限定 scope（防跨工作项借用授权）。
+/// - 快照无 autonomyMode → Agent（legacy 默认）；无 grant → 不做 grant 判定。
+fn autonomy_check(
+    store: &Store,
+    run_id: &str,
+    tool: &str,
+    effect: Option<sg_policy::plan_guard::EffectClass>,
+) -> Result<(), String> {
+    // 行缺失容忍（与 run_phase_of 同风格）：executor 直调的测试/遗留路径无行时
+    // 视为 legacy Agent 无 grant；生产 Run 任务恒有行，不变量照常生效。
+    let (workitem_id, snapshot): (String, String) = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT workitem_id, COALESCE(policy_snapshot,'') FROM agent_runs WHERE id=?1",
+                    [run_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .unwrap_or_default())
+        })
+        .unwrap_or_default();
+    let mode = sg_policy::autonomy::mode_of_snapshot(&snapshot);
+    if let Err(token) = sg_policy::autonomy::validate_tool_for_mode(mode, effect) {
+        return Err(token.to_string());
+    }
+    let grant_id = serde_json::from_str::<serde_json::Value>(&snapshot)
+        .ok()
+        .and_then(|v| {
+            v.get("autonomyGrantId")
+                .and_then(|g| g.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+    if !grant_id.is_empty() {
+        let now = sg_store::timefmt::now();
+        let grant =
+            sg_policy::autonomy::validate_grant(store, &grant_id, tool, effect_risk(effect), &now)
+                .map_err(|e| e.to_string())?;
+        if let Some(w) = &grant.workitem_id {
+            if !w.is_empty() && w != &workitem_id {
+                return Err(format!(
+                    "autonomy_grant_scope_denied: grant {grant_id} 未授权工作项 {workitem_id}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 构建注入 execute_run 的工具执行器（Run 任务内使用，经 run_store 访问库）。
 pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> SharedToolExecutor {
     Arc::new(move |p: &sg_agent::Proposal| -> Result<String, String> {
@@ -269,6 +334,8 @@ pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> Sha
                 &format!("mcp__{server_name}__{tool_name}"),
                 Some(effect),
             )?;
+            // Autonomy 步（评审 P0-1）：Ask 只读边界 + Grant 白名单/scope。
+            autonomy_check(&store, &p.run_id, &p.tool, Some(effect))?;
             let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
             let out = mcp_invoke(&ctx, &store, p, rest, &args)?;
             return Ok(tools::truncate_output(&out, 64 * 1024));
@@ -276,6 +343,8 @@ pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> Sha
         let def = tools::find(&p.tool).ok_or_else(|| format!("unknown tool: {}", p.tool))?;
         // PlanGuard 步（M2-08）：注册表 effect_class 分类 → phase 判定。
         plan_guard_check(&store, &p.run_id, &p.tool, parse_effect(def.effect_class))?;
+        // Autonomy 步（评审 P0-1）：Ask 只读边界 + Grant 白名单/scope。
+        autonomy_check(&store, &p.run_id, &p.tool, parse_effect(def.effect_class))?;
         let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
         let out = match p.tool.as_str() {
             "write_file" => tools::write_draft(&ctx, &args)?,
@@ -469,6 +538,96 @@ mod plan_guard_tests {
         let executor = make_executor(ctx_for(&repo), store, "pj".into());
         let err = executor(&proposal(&run_id, "not_a_tool")).unwrap_err();
         assert!(err.contains("unknown tool"), "{err}");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Autonomy 执行层不变量（评审 P0-1）：快照冻结 autonomyMode/GrantId，
+    /// 工具执行逐动作校验——Ask 只读边界 + Grant 白名单/scope。
+    fn store_with_snapshot(snapshot: &str) -> (Arc<Store>, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-autx-{}-{}",
+            std::process::id(),
+            sg_store::ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(&dir, "test").unwrap());
+        let run_id = sg_store::ids::new_id("run");
+        store
+            .with_conn(|c| {
+                let now = sg_store::timefmt::now();
+                c.execute_batch(&format!(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main','{now}');
+                    INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi','pj','t','','[]','requirements','{now}','{now}');
+                    INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi-other','pj','t2','','[]','requirements','{now}','{now}');
+                    INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('ctx1','wi','{{}}','standard','{now}');
+                    INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                        tool_allowlist, budget, policy_snapshot, idempotency_key, status, phase, created_at, updated_at)
+                     VALUES ('{run_id}','wi','','g','sha','ctx1','[]','{{}}','{snapshot}','idm','running','execution','{now}','{now}');"
+                ))
+                .map_err(sg_store::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+        (store, run_id)
+    }
+
+    fn seed_grant(store: &Store, id: &str, workitem: &str, tools: &[&str]) {
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO autonomy_grants(id, workitem_id, allowed_tools_json, allowed_risks_json, status, granted_at, created_at, updated_at)
+                     VALUES (?1,?2,?3,'[\"low\",\"medium\",\"high\"]','active','t','t','t')",
+                    rusqlite::params![
+                        id,
+                        workitem,
+                        serde_json::to_string(tools).unwrap(),
+                    ],
+                )
+                .map_err(sg_store::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn ask_mode_denies_write_tools_at_execution_layer() {
+        let repo = git_repo();
+        let (store, run_id) = store_with_snapshot(r#"{"autonomyMode":"ask"}"#);
+        let executor = make_executor(ctx_for(&repo), store.clone(), "pj".into());
+        // 写工具在执行层被拒（不只是声明）。
+        let err = executor(&proposal(&run_id, "write_file")).unwrap_err();
+        assert!(err.contains("autonomy_mode_denied"), "{err}");
+        // 只读工具不受影响（参数缺失的工具级错误 ≠ autonomy 拒绝）。
+        let err2 = executor(&proposal(&run_id, "read_file")).unwrap_err();
+        assert!(!err2.contains("autonomy_mode_denied"), "{err2}");
+        let _ = store;
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn grant_tool_whitelist_and_scope_enforced_at_execution_layer() {
+        let repo = git_repo();
+        // grant 白名单不含 write_file → 逐动作拒绝。
+        let (store, run_id) = store_with_snapshot(r#"{"autonomyGrantId":"g-tools"}"#);
+        seed_grant(&store, "g-tools", "wi", &["read_file"]);
+        let executor = make_executor(ctx_for(&repo), store.clone(), "pj".into());
+        let err = executor(&proposal(&run_id, "write_file")).unwrap_err();
+        assert!(err.contains("autonomy_grant_tool_denied"), "{err}");
+        // 白名单内的读工具放行（风险档 low 在名单）。
+        let mut p = proposal(&run_id, "read_file");
+        p.arguments = serde_json::json!({"path":"app.txt"}).to_string();
+        let out = executor(&p).unwrap();
+        assert!(out.contains("line1"), "白名单内工具放行: {out}");
+        // scope 不匹配（grant 绑定其他工作项）→ 拒绝。
+        let (store2, run2) = store_with_snapshot(r#"{"autonomyGrantId":"g-scope"}"#);
+        seed_grant(&store2, "g-scope", "wi-other", &[]);
+        let executor2 = make_executor(ctx_for(&repo), store2, "pj".into());
+        let err2 = executor2(&proposal(&run2, "read_file")).unwrap_err();
+        assert!(err2.contains("autonomy_grant_scope_denied"), "{err2}");
         let _ = std::fs::remove_dir_all(&repo);
     }
 }

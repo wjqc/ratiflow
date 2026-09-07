@@ -8,7 +8,8 @@
   "properties": {
     "id": { "type": "string" },
     "workItemId": { "type": "string" },
-    "gate": { "enum": ["requirements", "design", "development", "testing", "deployment", "verification"] },
+    "gate": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+      "description": "关 id：legacy 六关或模板自定义关（M1 门禁数据化，评审 P0-4）" },
     "kind": {
       "enum": ["ci_pipeline", "test_report", "review", "deployment", "smoke", "metrics", "log_scan", "manual"]
     },

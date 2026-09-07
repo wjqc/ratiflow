@@ -186,22 +186,37 @@ pub fn save_checkpoint(store: &Store, workitem_id: &str) -> Result<String, Error
 }
 
 /// 从 checkpoint 重建（UI 断线恢复面）。
+/// 新鲜度校验（评审 P1 修复）：重算当前 durable facts digest，与 checkpoint
+/// 记录的 facts_sha256 比对——事实已漂移的 checkpoint 拒绝恢复（返回 Ok(None)，
+/// 调用方应重新 build），防止把陈旧驾驶舱当作当前状态。
 pub fn load_checkpoint(store: &Store, workitem_id: &str) -> Result<Option<TaskReadModel>, Error> {
-    store.with_conn(|conn| {
-        let row: Option<String> = conn
-            .query_row(
-                "SELECT checkpoint_json FROM read_model_checkpoints WHERE workitem_id=?1",
-                [workitem_id],
-                |r| r.get(0),
-            )
-            .ok();
-        match row {
-            Some(body) => serde_json::from_str(&body)
-                .map(Some)
-                .map_err(|e| Error::Message(format!("read_model_checkpoint_corrupt: {e}"))),
-            None => Ok(None),
-        }
-    })
+    let row: Option<(String, String)> = store
+        .with_conn(|conn| {
+            let row: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT checkpoint_json, facts_sha256 FROM read_model_checkpoints WHERE workitem_id=?1",
+                    [workitem_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .ok();
+            Ok(row)
+        })?;
+    let Some((body, stored_sha)) = row else {
+        return Ok(None);
+    };
+    // 当前事实重算：build 失败（实例缺失等）视为不可恢复，诚实上报。
+    let current = build(store, workitem_id)?;
+    let current_sha = sg_store::ids::hex(&Sha256::digest(
+        serde_json::to_string(&current)
+            .unwrap_or_default()
+            .as_bytes(),
+    ));
+    if current_sha != stored_sha {
+        return Ok(None);
+    }
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|e| Error::Message(format!("read_model_checkpoint_corrupt: {e}")))
 }
 
 #[cfg(test)]

@@ -154,13 +154,30 @@ fn revision_view(store: &Store, id: &str) -> Result<Value, RpcError> {
     }))
 }
 
-/// 解析 stage_attempt：显式传入优先；否则取 WorkItem 当前关活跃 attempt。
+/// 解析 stage_attempt：显式传入优先（须属同一工作项——评审 P1 修复，
+/// 防跨 WorkItem 拼接计划）；否则取 WorkItem 当前关活跃 attempt。
 fn resolve_stage_attempt(
     store: &Store,
     workitem_id: &str,
     explicit: Option<&str>,
 ) -> Result<String, RpcError> {
     if let Some(id) = explicit.filter(|s| !s.is_empty()) {
+        let owned: i64 = store
+            .with_conn(|conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM stage_attempts WHERE id=?1 AND workitem_id=?2",
+                        rusqlite::params![id, workitem_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0))
+            })
+            .unwrap_or(0);
+        if owned == 0 {
+            return Err(invalid(format!(
+                "stage_attempt_scope_denied: stageAttemptId {id} 不属于工作项 {workitem_id}"
+            )));
+        }
         return Ok(id.to_string());
     }
     let wi = sg_workitem::get(store, workitem_id).map_err(store_err)?;
@@ -187,19 +204,26 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 params.get("stageAttemptId").and_then(|v| v.as_str()),
             )?;
             let tasks = parse_tasks(params)?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let rev = plan::create_draft(
-                store,
-                &workitem_id,
-                &stage_attempt_id,
-                &tasks,
-                "local",
-                None,
-            )
-            .map_err(store_err)?;
-            Ok(
-                json!({"planRevisionId": rev.id, "revision": serde_json::to_value(&rev).unwrap_or_default()}),
-            )
+            let idem = params
+                .get("idempotencyKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 幂等回执（评审 P1）：同 key 重放返回首次 revision，不重复建草稿。
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.createDraft", || {
+                let rev = plan::create_draft(
+                    store,
+                    &workitem_id,
+                    &stage_attempt_id,
+                    &tasks,
+                    "local",
+                    None,
+                )
+                .map_err(store_err)?;
+                Ok(
+                    json!({"planRevisionId": rev.id, "revision": serde_json::to_value(&rev).unwrap_or_default()}),
+                )
+            })
         }
         "plan.updateDraft" => {
             let revision_id = str_param(params, "planRevisionId")?;
@@ -346,10 +370,17 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 })
                 .ok_or_else(|| invalid("missing param: roots"))?;
             let tasks = parse_tasks(params)?;
-            let _ = str_param(params, "idempotencyKey")?;
-            let out = sg_workflow::replan::replan(store, &revision_id, &roots, &tasks, "local")
-                .map_err(store_err)?;
-            Ok(serde_json::to_value(&out).unwrap_or_default())
+            let idem = params
+                .get("idempotencyKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 幂等回执（评审 P1）：重放不重复生成新 revision。
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.replan", || {
+                let out = sg_workflow::replan::replan(store, &revision_id, &roots, &tasks, "local")
+                    .map_err(store_err)?;
+                Ok(serde_json::to_value(&out).unwrap_or_default())
+            })
         }
         "planTask.list" => {
             let revision_id = str_param(params, "planRevisionId")?;
@@ -375,6 +406,42 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 "succeeded" | "failed" | "unknown" | "cancelled"
             ) {
                 return Err(invalid("outcome 须为 succeeded|failed|unknown|cancelled"));
+            }
+            // 执行证明（EvoFlow 评审 P0-2 修复）：succeeded 不接受客户端自报——
+            // 必须存在绑定本 attempt 的 Agent Run 且终态 completed_execution；
+            // failed/unknown/cancelled 保留人工申报通道（对账/取消语义）。
+            if outcome == "succeeded" {
+                if digest.is_empty() {
+                    return Err(invalid(
+                        "output_digest_required: succeeded 须携带非空 outputDigest",
+                    ));
+                }
+                let proof: Option<(String, String)> = store
+                    .with_conn(|conn| {
+                        Ok(conn
+                            .query_row(
+                                "SELECT id, status FROM agent_runs
+                                 WHERE plan_task_attempt_id=?1
+                                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                                [&attempt_id],
+                                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                            )
+                            .ok())
+                    })
+                    .unwrap_or(None);
+                match proof {
+                    Some((_, status)) if status == "completed_execution" => {}
+                    Some((_, status)) => {
+                        return Err(invalid(format!(
+                            "task_execution_proof_required: 绑定 Run 终态为 {status}，不得申报 succeeded"
+                        )));
+                    }
+                    None => {
+                        return Err(invalid(
+                            "task_execution_proof_required: succeeded 须先经 agent.start(planTaskAttemptId) 绑定本 attempt 并完成执行",
+                        ));
+                    }
+                }
             }
             let info = crate::plan_runtime::complete_task(store, &attempt_id, &outcome, digest)
                 .map_err(store_err)?;

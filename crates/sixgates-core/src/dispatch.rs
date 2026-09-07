@@ -97,6 +97,76 @@ pub(crate) fn trace_writes_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// 显式幂等回执（评审 P1 修复）：带 idempotencyKey 的 mutation 首次执行后落
+/// rpc_receipts（迁移 0040）；重放直接返回首次响应——不再重复建版本/重复变更状态。
+/// key 缺省（空）保持旧行为（立即执行，不落回执）。
+pub(crate) fn with_rpc_receipt<F>(
+    store: &Store,
+    idem_key: &str,
+    method: &str,
+    f: F,
+) -> Result<Value, RpcError>
+where
+    F: FnOnce() -> Result<Value, RpcError>,
+{
+    if idem_key.is_empty() {
+        return f();
+    }
+    let existing: Option<String> = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT response_json FROM rpc_receipts WHERE idem_key=?1",
+                    [idem_key],
+                    |r| r.get(0),
+                )
+                .ok())
+        })
+        .unwrap_or(None);
+    if let Some(body) = existing {
+        return serde_json::from_str(&body)
+            .map_err(|_| RpcError::new(ErrorCode::InternalError, "rpc_receipt_corrupt"));
+    }
+    let out = f()?;
+    let _ = store.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO rpc_receipts(idem_key, method, response_json, created_at)
+             VALUES (?1,?2,?3,?4)",
+            rusqlite::params![idem_key, method, out.to_string(), sg_store::timefmt::now()],
+        )
+        .map_err(sg_store::Error::from)?;
+        Ok(())
+    });
+    Ok(out)
+}
+
+/// 统一取消服务（agent.cancel 与 Slash /取消 共用，EvoFlow 评审 P0 修复）：
+/// 活跃任务置位取消令牌——阻塞中的模型 HTTP/SSE 在 select 点即时中止
+/// （放弃 future 即关闭 socket，目标 <1s），Run 循环以 cancelled 终态收尾并
+/// 发恰好一条 run.cancelled；无活跃任务（遗留 running/paused 行，如进程崩溃
+/// 后）才直接置库收尾。禁止绕过令牌直调领域库取消。
+pub(crate) fn cancel_run_shared(
+    state: &crate::state::AppState,
+    store: &Store,
+    run_id: &str,
+) -> Result<Value, String> {
+    let run = sg_agent::get_run(store, run_id).map_err(|e| e.to_string())?;
+    let terminal = matches!(
+        run.status.as_str(),
+        "completed_execution" | "failed" | "cancelled"
+    );
+    if terminal {
+        return Ok(json!({"runId": run_id, "status": run.status}));
+    }
+    if let Some(token) = state.runs.get(run_id) {
+        token.cancel();
+        Ok(json!({"runId": run_id, "status": "cancelling"}))
+    } else {
+        sg_agent::cancel(store, run_id).map_err(|e| e.to_string())?;
+        Ok(json!({"runId": run_id, "status": "cancelled"}))
+    }
+}
+
 fn workitem_gate(store: &Store, workitem_id: &str) -> String {
     store
         .with_conn(|conn| {
@@ -238,7 +308,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         .get("previewToken")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    crate::commands::execute(store, text, workitem_id, token).map_err(|e| {
+                    crate::commands::execute(state, store, text, workitem_id, token).map_err(|e| {
                         RpcError::new(ErrorCode::InvalidParams, e.to_string().as_str())
                     })
                 }
@@ -1372,6 +1442,33 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             };
             let (run, created) = sg_agent::create_run(store, &config).map_err(store_err)?;
             if created {
+                // EvoFlow M3 评审修复：自治模式与 Grant 冻结进 Run（Ask 只读边界与
+                // Grant 白名单在工具执行链逐动作校验）；任务级 attempt 绑定 =
+                // 真实执行链入口（transition succeeded 需绑定 Run 终态证明）。
+                let autonomy_mode = opt_str_param(params, "autonomyMode");
+                if let Some(m) = &autonomy_mode {
+                    if sg_policy::autonomy::AutonomyMode::parse(m).is_none() {
+                        return Err(err(
+                            ErrorCode::InvalidParams,
+                            format!("autonomyMode 须为 ask|agent|plan，得到 {m}"),
+                        ));
+                    }
+                }
+                let autonomy_grant = opt_str_param(params, "autonomyGrantId");
+                if let Some(g) = &autonomy_grant {
+                    sg_policy::autonomy::validate_grant_status(store, g, &sg_store::timefmt::now())
+                        .map_err(|e| {
+                            err(
+                                ErrorCode::InvalidParams,
+                                format!("autonomyGrant 不可用: {e}"),
+                            )
+                        })?;
+                }
+                let plan_attempt = opt_str_param(params, "planTaskAttemptId");
+                if let Some(pa) = &plan_attempt {
+                    bind_plan_task_attempt(store, &run.id, &workitem_id, pa)
+                        .map_err(|e| err(ErrorCode::InvalidParams, e))?;
+                }
                 // M4-08：冻结 context policy（可回查 digest 链，§3 不变量 8）。
                 if let Some(pid) = &ctx_policy_frozen {
                     let _ = store.with_conn(|conn| {
@@ -1405,7 +1502,13 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     )
                     .map_err(store_err)?;
                 }
-                let instructions = spawn_run_task(state, store, &run.id)?;
+                let instructions = spawn_run_task(
+                    state,
+                    store,
+                    &run.id,
+                    autonomy_mode.as_deref(),
+                    autonomy_grant.as_deref(),
+                )?;
                 return Ok(
                     json!({"runId": run.id, "status": run.status, "instructions": instructions}),
                 );
@@ -1529,25 +1632,8 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
         "agent.cancel" => {
             let run_id = str_param(params, "runId")?;
-            let run = sg_agent::get_run(store, &run_id).map_err(store_err)?;
-            let terminal = matches!(
-                run.status.as_str(),
-                "completed_execution" | "failed" | "cancelled"
-            );
-            if terminal {
-                return Ok(json!({"runId": run_id, "status": run.status}));
-            }
-            if let Some(token) = state.runs.get(&run_id) {
-                // 活跃任务：置位取消令牌——阻塞中的模型 HTTP/SSE 在 select 点即时
-                // 中止（放弃 future 即关闭 socket，目标 <1s），Run 循环以 cancelled
-                // 终态收尾并发恰好一条 run.cancelled。
-                token.cancel();
-                Ok(json!({"runId": run_id, "status": "cancelling"}))
-            } else {
-                // 无活跃任务（遗留 running/paused 行，如进程崩溃后）：直接置库收尾。
-                sg_agent::cancel(store, &run_id).map_err(store_err)?;
-                Ok(json!({"runId": run_id, "status": "cancelled"}))
-            }
+            cancel_run_shared(state, store, &run_id)
+                .map_err(|e| RpcError::new(ErrorCode::InvalidParams, e.as_str()))
         }
         // --- M6：受控 MCP ToolProvider（ADR-035）---
         "mcp.serverAdd" => {
@@ -1889,7 +1975,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     )
                     .map_err(store_err)?;
                 }
-                let instructions = spawn_run_task(state, store, &run.id)?;
+                let instructions = spawn_run_task(state, store, &run.id, None, None)?;
                 return Ok(json!({
                     "runId": run.id, "status": run.status, "instructions": instructions,
                     "attemptId": attempt.id, "activityKey": activity_key,
@@ -2055,7 +2141,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     if linked.status == "paused" {
                         match decision.as_str() {
                             "approved" => {
-                                spawn_run_task(state, store, &linked.id)?;
+                                spawn_run_task(state, store, &linked.id, None, None)?;
                                 run_link = json!({"runId": linked.id, "status": "resuming"});
                             }
                             _ => {
@@ -2649,9 +2735,91 @@ pub(crate) fn effective_executor_mode(
     }
 }
 
+/// 任务级绑定（EvoFlow 评审 P0-3 修复）：agent.start(planTaskAttemptId) 把 Run
+/// 绑定到 TaskAttempt——真实执行链入口（planTask.transition succeeded 需绑定 Run
+/// 终态证明）。约束：attempt 须属同一工作项（防跨任务拼接）、无其他活跃 Run 占用、
+/// 状态 ready（此处经派发闸推进 running）或 running（崩溃遗留可重绑）。
+fn bind_plan_task_attempt(
+    store: &Store,
+    run_id: &str,
+    workitem_id: &str,
+    attempt_id: &str,
+) -> Result<(), String> {
+    let (owner_wi, state): (String, String) = store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT pr.workitem_id, pa.state FROM plan_task_attempts pa
+                 JOIN plan_tasks pt ON pt.id = pa.task_id
+                 JOIN plan_revisions pr ON pr.id = pt.plan_revision_id
+                 WHERE pa.id=?1",
+                [attempt_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| sg_store::Error::Message("task_attempt_not_found".into()))
+        })
+        .map_err(|e| e.to_string())?;
+    if owner_wi != workitem_id {
+        return Err(format!(
+            "task_attempt_scope_denied: attempt {attempt_id} 不属于工作项 {workitem_id}"
+        ));
+    }
+    let busy: i64 = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_runs
+                     WHERE plan_task_attempt_id=?1 AND status IN ('queued','running') AND id<>?2",
+                    rusqlite::params![attempt_id, run_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0))
+        })
+        .unwrap_or(0);
+    if busy > 0 {
+        return Err("task_attempt_already_bound: 已有活跃 Run 绑定该 attempt".into());
+    }
+    match state.as_str() {
+        "ready" => {
+            crate::plan_runtime::start_running(store, attempt_id).map_err(|e| e.to_string())?;
+        }
+        "running" => {}
+        other => {
+            return Err(format!(
+                "task_state_invalid: attempt 状态 {other} 不可绑定（须 ready/running）"
+            ))
+        }
+    }
+    store
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_runs SET plan_task_attempt_id=?1 WHERE id=?2",
+                rusqlite::params![attempt_id, run_id],
+            )
+            .map_err(sg_store::Error::from)?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    sg_store::outbox::emit(
+        store,
+        "workitem",
+        workitem_id,
+        "plan.task_bound",
+        serde_json::json!({"runId": run_id, "taskAttemptId": attempt_id}),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 派发 Run 任务（agent.start 与审批恢复共用，M1/F03）：
 /// 行配置重建 → ToolCtx/executor → rollout → tokio 任务（spawn_blocking 驱动循环，run_store 专属连接）。
-fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value, RpcError> {
+/// autonomy_*：仅 agent.start 显式传入（None=恢复/派生路径沿用已存快照）。
+fn spawn_run_task(
+    state: &AppState,
+    store: &Store,
+    run_id: &str,
+    autonomy_mode: Option<&str>,
+    autonomy_grant_id: Option<&str>,
+) -> Result<Value, RpcError> {
     let run = sg_agent::get_run(store, run_id).map_err(store_err)?;
     let (workitem_id, goal, manifest_id, allowlist, budget) =
         sg_agent::row_config(store, run_id).map_err(store_err)?;
@@ -2670,10 +2838,34 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         .map_err(store_err)?;
     // M3+：Agent 工具执行在 SixGates 隔离 worktree（SG-RBK-005）；不可用时诚实回退 local_root。
     let worktree_info = sg_workitem::worktree::ensure(store, &workitem_id).ok();
-    let work_dir = match &worktree_info {
+    let mut work_dir = match &worktree_info {
         Some(info) => Some(std::path::PathBuf::from(&info.path)),
         None if !local_root.is_empty() => Some(std::path::PathBuf::from(&local_root)),
         _ => None,
+    };
+    // 任务级工作区优先（EvoFlow 评审 P0-3 修复）：Run 绑定 TaskAttempt 且工作区
+    // 处于 ready/in_use 时，可写工作目录用 TaskWorkspace（attempt 级可归因可合并）。
+    let plan_attempt_id: String = store
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT COALESCE(plan_task_attempt_id,'') FROM agent_runs WHERE id=?1",
+                    [run_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap_or_default())
+        })
+        .unwrap_or_default();
+    let task_workspace_used = if plan_attempt_id.is_empty() {
+        false
+    } else {
+        match sg_executor::workspace::get(store, &plan_attempt_id) {
+            Ok(Some(w)) if matches!(w.state.as_str(), "ready" | "in_use") && !w.path.is_empty() => {
+                work_dir = Some(std::path::PathBuf::from(&w.path));
+                true
+            }
+            _ => false,
+        }
     };
     // F10：权限快照与生效执行模式——已存快照（暂停恢复）原样复用（运行中不受设置变更影响），
     // 否则装配（注册表+toolPolicy 覆盖）并落库 policy_snapshot 列。
@@ -2745,7 +2937,7 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
             ],
             network_off: true,
         };
-        let envelope = json!({
+        let mut envelope = json!({
             "snapshot": serde_json::to_value(&snap).unwrap_or_default(),
             "sources": sources["sources"],
             "mode": mode_str(m),
@@ -2757,6 +2949,13 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
                 "blockedReason": sandbox_probe.blocked_reason,
             },
         });
+        // 自治面冻结（评审 P0-1）：Ask 只读边界与 Grant 校验在工具执行链消费这两个字段。
+        if let Some(m) = autonomy_mode {
+            envelope["autonomyMode"] = json!(m);
+        }
+        if let Some(g) = autonomy_grant_id {
+            envelope["autonomyGrantId"] = json!(g);
+        }
         let _ = store.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_runs SET policy_snapshot=?1 WHERE id=?2",
@@ -2770,8 +2969,9 @@ fn spawn_run_task(state: &AppState, store: &Store, run_id: &str) -> Result<Value
         mode,
         work_dir: work_dir.clone(),
         artifacts_dir: store.data_dir.join("artifacts").join(run_id),
-        // P0-4：回退到主工作区 = 只读模式（run_command 被拒绝），可写执行必须发生在受管 worktree。
-        read_only: worktree_info.is_none() && !local_root.is_empty(),
+        // P0-4：回退到主工作区 = 只读模式（run_command 被拒绝），可写执行必须发生在
+        // 受管 worktree（workitem 级或任务级 TaskWorkspace）。
+        read_only: worktree_info.is_none() && !task_workspace_used && !local_root.is_empty(),
     };
     let executor =
         crate::tool_exec::make_executor(ctx, state.run_store.clone(), project_id.clone());

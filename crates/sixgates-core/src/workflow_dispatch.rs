@@ -32,7 +32,16 @@ fn str_param(params: &Value, key: &str) -> Result<String, RpcError> {
         .ok_or_else(|| err_invalid(format!("missing param: {key}")))
 }
 
+fn opt_str(params: &Value, key: &str) -> String {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 /// 契约 gates 数组 → 模板定义输入（camelCase → GateDefInput）。
+/// acceptance 与 policyRefs = 门禁数据化输入面（评审 P0-4）。
 fn parse_gates(params: &Value) -> Result<Vec<sg_workflow::template::GateDefInput>, RpcError> {
     let arr = params
         .get("gates")
@@ -40,6 +49,22 @@ fn parse_gates(params: &Value) -> Result<Vec<sg_workflow::template::GateDefInput
         .ok_or_else(|| err_invalid("missing param: gates"))?;
     let mut out = Vec::new();
     for g in arr {
+        let str_list = |key: &str| -> Vec<String> {
+            g.get(key)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let opt_ref = |key: &str| -> Option<String> {
+            g.get(key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
         out.push(sg_workflow::template::GateDefInput {
             gate_id: g
                 .get("gateId")
@@ -56,15 +81,11 @@ fn parse_gates(params: &Value) -> Result<Vec<sg_workflow::template::GateDefInput
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            deliverables: g
-                .get("deliverables")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| s.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            deliverables: str_list("deliverables"),
+            acceptance: str_list("acceptance"),
+            context_policy_ref: opt_ref("contextPolicyRef"),
+            team_policy_ref: opt_ref("teamPolicyRef"),
+            workspace_policy_ref: opt_ref("workspacePolicyRef"),
         });
     }
     Ok(out)
@@ -124,35 +145,38 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
             let key = str_param(params, "key")?;
             let name = str_param(params, "name")?;
             let gates = parse_gates(params)?;
-            let _ = str_param(params, "idempotencyKey")?;
-            // 语义：key 不存在 → 建模板 + draft v1；已存在 → 追加下一个 draft 版本
-            // （版本只追加，active 不可原地编辑——ADR-036 决策 3）。
-            let existing = sg_workflow::template::list_templates(store)
-                .map_err(store_err)?
-                .into_iter()
-                .find(|(t, _)| t.key == key);
-            match existing {
-                None => {
-                    let t = sg_workflow::template::create_template(store, &key, &name)
-                        .map_err(store_err)?;
-                    let version =
-                        sg_workflow::template::create_version(store, &t.id, &gates, "local")
+            let idem = opt_str(params, "idempotencyKey");
+            // 幂等回执（评审 P1）：同 key 重放返回首次响应，不追加新版本。
+            crate::dispatch::with_rpc_receipt(store, &idem, "workflowTemplate.create", || {
+                // 语义：key 不存在 → 建模板 + draft v1；已存在 → 追加下一个 draft 版本
+                // （版本只追加，active 不可原地编辑——ADR-036 决策 3）。
+                let existing = sg_workflow::template::list_templates(store)
+                    .map_err(store_err)?
+                    .into_iter()
+                    .find(|(t, _)| t.key == key);
+                match existing {
+                    None => {
+                        let t = sg_workflow::template::create_template(store, &key, &name)
                             .map_err(store_err)?;
-                    Ok(
-                        json!({"template": serde_json::to_value(t).unwrap_or_default(),
-                              "version": version_json(&version)}),
-                    )
+                        let version =
+                            sg_workflow::template::create_version(store, &t.id, &gates, "local")
+                                .map_err(store_err)?;
+                        Ok(
+                            json!({"template": serde_json::to_value(t).unwrap_or_default(),
+                                  "version": version_json(&version)}),
+                        )
+                    }
+                    Some((t, _)) => {
+                        let version =
+                            sg_workflow::template::create_version(store, &t.id, &gates, "local")
+                                .map_err(store_err)?;
+                        Ok(
+                            json!({"template": serde_json::to_value(t).unwrap_or_default(),
+                                  "version": version_json(&version)}),
+                        )
+                    }
                 }
-                Some((t, _)) => {
-                    let version =
-                        sg_workflow::template::create_version(store, &t.id, &gates, "local")
-                            .map_err(store_err)?;
-                    Ok(
-                        json!({"template": serde_json::to_value(t).unwrap_or_default(),
-                              "version": version_json(&version)}),
-                    )
-                }
-            }
+            })
         }
         "workflowTemplate.updateDraft" => {
             let version_id = str_param(params, "versionId")?;

@@ -62,6 +62,8 @@ pub struct GateDefinition {
     pub title: String,
     pub purpose: String,
     pub deliverables: Vec<String>,
+    /// 本关验收策略（逐条可判定的 acceptance 说明；空 = 沿用通用六输入门禁基线）。
+    pub acceptance: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_policy_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,6 +73,8 @@ pub struct GateDefinition {
 }
 
 /// 版本内容的输入形状（ordinal 由数组位置隐含：1..n 连续）。
+/// acceptance 与 policy refs = 门禁数据化输入面（评审 P0-4）：每关可声明
+/// 验收策略与 Context/Team/Workspace 策略引用，随版本冻结、参与 digest。
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct GateDefInput {
     pub gate_id: String,
@@ -79,27 +83,44 @@ pub struct GateDefInput {
     pub purpose: String,
     #[serde(default)]
     pub deliverables: Vec<String>,
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub context_policy_ref: Option<String>,
+    #[serde(default)]
+    pub team_policy_ref: Option<String>,
+    #[serde(default)]
+    pub workspace_policy_ref: Option<String>,
 }
 
-/// 版本内容 digest（迁移 0032 内置模板常量同公式）：
-/// sha256("v1|" + join("ordinal|gate_id|title|purpose|deliverables_csv", "\n"))。
+fn ref_str(r: &Option<String>) -> &str {
+    r.as_deref().unwrap_or("-")
+}
+
+/// 版本内容 digest：
+/// sha256("v2|" + join("ordinal|gate_id|title|purpose|deliverables_csv|acceptance_csv|ctx_ref|team_ref|ws_ref", "\n"))。
+/// v1（迁移 0032 历史常量）不含 acceptance 与 refs；存量激活版本不重算，仅新版本生效。
 pub fn content_digest(defs: &[GateDefInput]) -> String {
     let lines: Vec<String> = defs
         .iter()
         .enumerate()
         .map(|(i, d)| {
             format!(
-                "{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}",
                 i + 1,
                 d.gate_id,
                 d.title,
                 d.purpose,
-                d.deliverables.join(",")
+                d.deliverables.join(","),
+                d.acceptance.join(","),
+                ref_str(&d.context_policy_ref),
+                ref_str(&d.team_policy_ref),
+                ref_str(&d.workspace_policy_ref),
             )
         })
         .collect();
     let mut hasher = Sha256::new();
-    hasher.update(format!("v1|{}", lines.join("\n")).as_bytes());
+    hasher.update(format!("v2|{}", lines.join("\n")).as_bytes());
     sg_store::ids::hex(&hasher.finalize())
 }
 
@@ -244,8 +265,8 @@ fn insert_defs(
     let now = timefmt::now();
     for (i, d) in defs.iter().enumerate() {
         conn.execute(
-            "INSERT INTO workflow_gate_definitions(id, version_id, gate_id, ordinal, title, purpose, deliverables_json, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            "INSERT INTO workflow_gate_definitions(id, version_id, gate_id, ordinal, title, purpose, deliverables_json, acceptance_json, context_policy_ref, team_policy_ref, workspace_policy_ref, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             rusqlite::params![
                 ids::new_id("wgd"),
                 version_id,
@@ -254,6 +275,10 @@ fn insert_defs(
                 d.title.trim(),
                 d.purpose.trim(),
                 serde_json::to_string(&d.deliverables).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(&d.acceptance).unwrap_or_else(|_| "[]".into()),
+                d.context_policy_ref,
+                d.team_policy_ref,
+                d.workspace_policy_ref,
                 now
             ],
         )?;
@@ -308,6 +333,10 @@ pub fn activate(store: &Store, version_id: &str) -> Result<VersionRecord, Error>
                 title: d.title.clone(),
                 purpose: d.purpose.clone(),
                 deliverables: d.deliverables.clone(),
+                acceptance: d.acceptance.clone(),
+                context_policy_ref: d.context_policy_ref.clone(),
+                team_policy_ref: d.team_policy_ref.clone(),
+                workspace_policy_ref: d.workspace_policy_ref.clone(),
             })
             .collect();
         validate_defs(&inputs)?;
@@ -391,7 +420,7 @@ pub fn definitions(
 ) -> Result<Vec<GateDefinition>, Error> {
     let mut stmt = conn.prepare(
         "SELECT id, version_id, gate_id, ordinal, title, purpose, deliverables_json,
-                context_policy_ref, team_policy_ref, workspace_policy_ref
+                COALESCE(acceptance_json,'[]'), context_policy_ref, team_policy_ref, workspace_policy_ref
          FROM workflow_gate_definitions WHERE version_id=?1 ORDER BY ordinal",
     )?;
     let rows = stmt.query_map([version_id], |r| {
@@ -403,9 +432,10 @@ pub fn definitions(
             title: r.get(4)?,
             purpose: r.get(5)?,
             deliverables: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
-            context_policy_ref: r.get(7)?,
-            team_policy_ref: r.get(8)?,
-            workspace_policy_ref: r.get(9)?,
+            acceptance: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+            context_policy_ref: r.get(8)?,
+            team_policy_ref: r.get(9)?,
+            workspace_policy_ref: r.get(10)?,
         })
     })?;
     let mut out = Vec::new();
@@ -492,18 +522,30 @@ mod tests {
                 title: "分诊关".into(),
                 purpose: "快速分诊".into(),
                 deliverables: vec!["doc".into()],
+                acceptance: vec!["分诊结论落档".into()],
+                context_policy_ref: None,
+                team_policy_ref: None,
+                workspace_policy_ref: None,
             },
             GateDefInput {
                 gate_id: "fix".into(),
                 title: "修复关".into(),
                 purpose: "实施热修复".into(),
                 deliverables: vec!["code".into()],
+                acceptance: vec![],
+                context_policy_ref: None,
+                team_policy_ref: None,
+                workspace_policy_ref: None,
             },
             GateDefInput {
                 gate_id: "confirm".into(),
                 title: "确认关".into(),
                 purpose: "确认恢复".into(),
                 deliverables: vec!["verification".into()],
+                acceptance: vec![],
+                context_policy_ref: None,
+                team_policy_ref: None,
+                workspace_policy_ref: None,
             },
         ]
     }
@@ -525,6 +567,10 @@ mod tests {
                 title: d.title.clone(),
                 purpose: d.purpose.clone(),
                 deliverables: d.deliverables.clone(),
+                acceptance: d.acceptance.clone(),
+                context_policy_ref: d.context_policy_ref.clone(),
+                team_policy_ref: d.team_policy_ref.clone(),
+                workspace_policy_ref: d.workspace_policy_ref.clone(),
             })
             .collect();
         assert_eq!(content_digest(&inputs), version.content_digest);
@@ -544,12 +590,20 @@ mod tests {
                 title: "a".into(),
                 purpose: String::new(),
                 deliverables: vec!["code".into()],
+                acceptance: vec![],
+                context_policy_ref: None,
+                team_policy_ref: None,
+                workspace_policy_ref: None,
             },
             GateDefInput {
                 gate_id: "fix".into(),
                 title: "b".into(),
                 purpose: String::new(),
                 deliverables: vec!["code".into()],
+                acceptance: vec![],
+                context_policy_ref: None,
+                team_policy_ref: None,
+                workspace_policy_ref: None,
             },
         ];
         assert!(create_version(&store, &t.id, &bad, "tester").is_err());

@@ -31,8 +31,21 @@ pub fn fire_one(
         .map_err(Error::from)
     })?;
     let (intent_json, grant_id, overlap_policy, _misfire_policy) = a;
-    // overlap 闸（fired 未推进即视为上一轮在途）。
-    if !sg_workflow::automation::overlap_allowed(store, automation_id, &overlap_policy)? {
+    // receipt 认领先行（幂等：重复启动/时钟跳变）——本 scheduled_for 已被处理登记，
+    // 后续 overlap/misfire 决策都在"已认领"前提下进行（评审 P1 修复：原先 overlap
+    // 分支先 record_intent 后认领，UPDATE 不到行却返回成功）。
+    let Some(_receipt) =
+        sg_workflow::automation::claim_receipt(store, automation_id, scheduled_for)?
+    else {
+        return Ok(("deduped".into(), "receipt exists".into()));
+    };
+    // overlap 闸（fired 未推进即视为上一轮在途）；排除本次认领的 receipt 行。
+    if !sg_workflow::automation::overlap_allowed_for(
+        store,
+        automation_id,
+        &overlap_policy,
+        Some(scheduled_for),
+    )? {
         sg_workflow::automation::record_intent(
             store,
             automation_id,
@@ -41,25 +54,26 @@ pub fn fire_one(
             None,
             "上一触发未推进（overlap skip）",
         )?;
+        sg_workflow::automation::reschedule(store, automation_id, &sg_store::timefmt::now())?;
         return Ok(("skipped_overlap".into(), "overlap".into()));
     }
-    // receipt 认领（幂等：重复启动/时钟跳变）。
-    let Some(_receipt) =
-        sg_workflow::automation::claim_receipt(store, automation_id, scheduled_for)?
-    else {
-        return Ok(("deduped".into(), "receipt exists".into()));
-    };
-    // misfire 决策（skip 策略下过期即放弃）。
+    // misfire 决策（skip 策略下越过整周期才算过期——毫秒级抖动不放弃）。
     let now = sg_store::timefmt::now();
     let probe = store.with_conn(|conn| {
         conn.query_row(
-            "SELECT misfire_policy, next_fire_at FROM automations WHERE id=?1",
+            "SELECT misfire_policy, next_fire_at, interval_secs FROM automations WHERE id=?1",
             [automation_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )
         .map_err(Error::from)
     })?;
-    let decision = sg_workflow::automation::misfire_decision(&probe.0, &probe.1, &now)?;
+    let decision = sg_workflow::automation::misfire_decision(&probe.0, &probe.1, &now, probe.2)?;
     if !decision {
         sg_workflow::automation::record_intent(
             store,

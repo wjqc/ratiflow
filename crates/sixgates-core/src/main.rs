@@ -277,10 +277,7 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
-                let result = app_timer
-                    .db
-                    .call(automation_dispatch::fire_due)
-                    .await;
+                let result = app_timer.db.call(automation_dispatch::fire_due).await;
                 match result {
                     Ok(Ok(fired)) if !fired.is_empty() => {
                         for (id, status, note) in &fired {

@@ -5,7 +5,7 @@
 // Slash preview→execute 命中同一放行链（EV-018 不旁路审批），token 不一致拒绝。
 // 前置：cargo build --release -p sixgates-core。
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
@@ -71,7 +71,33 @@ const W = (key, deps = []) => ({
 
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-tcmd-e2e-'));
-  const c = new CoreClient(dataDir, { SIXGATES_PLAN_DAG: '1' });
+  // w1 的 succeeded 经绑定 Run 终态证明后回填（评审 P0-2）。
+  const fakeScript = dataDir + '-fake.json';
+  writeFileSync(fakeScript, JSON.stringify([
+    { content: JSON.stringify({ action: 'final', summary: 'done' }), tokensIn: 1, tokensOut: 1 },
+  ]));
+  const c = new CoreClient(dataDir, {
+    SIXGATES_PLAN_DAG: '1',
+    SIXGATES_FAKE_MODEL_SCRIPT: fakeScript,
+    SIXGATES_EXEC_MODE: 'safe_restricted',
+  });
+  // 绑定真实 Agent Run 驱动 attempt 至 completed_execution。
+  async function runBound(wiId, attemptId, idem) {
+    const s = await c.call('agent.start', {
+      workItemId: wiId, goal: `执行 ${attemptId}`, planTaskAttemptId: attemptId,
+      toolAllowlist: ['read_file'], idempotencyKey: idem,
+    });
+    const deadline = Date.now() + 30000;
+    for (;;) {
+      const run = await c.call('agent.get', { runId: s.runId });
+      if (['completed_execution', 'failed', 'cancelled'].includes(run.status)) {
+        if (run.status !== 'completed_execution') throw new Error(`绑定 Run 终态 ${run.status}`);
+        return run;
+      }
+      if (Date.now() > deadline) throw new Error(`绑定 Run 超时：${run.status}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
   try {
     const repoDir = join(tmpdir(), `sg-tcmd-repo-${Date.now()}`);
     import('node:fs').then((fs) => {
@@ -113,7 +139,7 @@ async function main() {
     await c.call('plan.start', { planRevisionId: plan.planRevisionId, idempotencyKey: 'tc-s1' });
     const disp = await c.call('plan.dispatchReady', { planRevisionId: plan.planRevisionId, maxParallel: 3 });
     await c.call('planTask.prepare', { taskAttemptId: disp.dispatched[0].id });
-    await c.call('plan.startRunning', { taskAttemptId: disp.dispatched[0].id });
+    await runBound(wi.id, disp.dispatched[0].id, 'tc-run-w1');
     await c.call('planTask.transition', { taskAttemptId: disp.dispatched[0].id, outcome: 'succeeded', outputDigest: 'od', idempotencyKey: 'tc-t1' });
 
     // --- 1. trace.taskReadModel：真实状态 + checkpoint ---

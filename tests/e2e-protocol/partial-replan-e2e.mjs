@@ -71,7 +71,37 @@ const W = (key, deps = [], effect = 'local_write') => ({
 
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-replan-e2e-'));
-  const c = new CoreClient(dataDir, { SIXGATES_PLAN_DAG: '1' });
+  // FakeModel：3 个真实绑定 Run（w1/w2r/v）各消费一条 final；succeeded 一律
+  // 经 agent.start(planTaskAttemptId) 绑定 + Run 终态证明后回填（评审 P0-2）。
+  const fakeScript = dataDir + '-fake.json';
+  writeFileSync(fakeScript, JSON.stringify([
+    { content: JSON.stringify({ action: 'final', summary: 'done' }), tokensIn: 1, tokensOut: 1 },
+    { content: JSON.stringify({ action: 'final', summary: 'done' }), tokensIn: 1, tokensOut: 1 },
+    { content: JSON.stringify({ action: 'final', summary: 'done' }), tokensIn: 1, tokensOut: 1 },
+  ]));
+  const c = new CoreClient(dataDir, {
+    SIXGATES_PLAN_DAG: '1',
+    SIXGATES_FAKE_MODEL_SCRIPT: fakeScript,
+    SIXGATES_EXEC_MODE: 'safe_restricted',
+  });
+
+  // 绑定真实 Agent Run 驱动 attempt 至终态（执行证明的正当来源）。
+  async function runBound(wiId, attemptId, idem) {
+    const s = await c.call('agent.start', {
+      workItemId: wiId, goal: `执行 ${attemptId}`, planTaskAttemptId: attemptId,
+      toolAllowlist: ['read_file'], idempotencyKey: idem,
+    });
+    const deadline = Date.now() + 30000;
+    for (;;) {
+      const run = await c.call('agent.get', { runId: s.runId });
+      if (['completed_execution', 'failed', 'cancelled'].includes(run.status)) {
+        if (run.status !== 'completed_execution') throw new Error(`绑定 Run 终态 ${run.status}`);
+        return run;
+      }
+      if (Date.now() > deadline) throw new Error(`绑定 Run 超时：${run.status}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
   try {
     const repoDir = join(tmpdir(), `sg-replan-repo-${Date.now()}`);
     mkdirSync(repoDir, { recursive: true });
@@ -112,9 +142,13 @@ async function main() {
     assert(disp1.dispatched.length === 2, '调度闸放行两个写任务');
     const byKey = Object.fromEntries(disp1.dispatched.map((a) => [a.task_key, a]));
 
-    // w1 成功（工作区准备→运行→回填），w2 失败。
-    await c.call('planTask.prepare', { taskAttemptId: byKey.w1.id });
-    await c.call('plan.startRunning', { taskAttemptId: byKey.w1.id });
+    // w1 成功（绑定 Run 终态证明后回填），w2 失败（人工申报通道保留）。
+    await expectErrorContains(
+      () => c.call('planTask.transition', { taskAttemptId: byKey.w1.id, outcome: 'succeeded', outputDigest: 'od-w1', idempotencyKey: 't-w1-x' }),
+      'task_execution_proof_required',
+      '无绑定 Run 自报 succeeded 被拒（评审 P0-2）',
+    );
+    await runBound(wi.id, byKey.w1.id, 'rp-run-w1');
     await c.call('planTask.transition', { taskAttemptId: byKey.w1.id, outcome: 'succeeded', outputDigest: 'od-w1', idempotencyKey: 't-w1' });
     await c.call('planTask.prepare', { taskAttemptId: byKey.w2.id });
     await c.call('plan.startRunning', { taskAttemptId: byKey.w2.id });
@@ -141,13 +175,14 @@ async function main() {
     const s2 = await c.call('plan.start', { planRevisionId: v2Id, idempotencyKey: 'rp-s2' });
     assert(s2.readyAttempts.length === 1 && s2.readyAttempts[0].task_key === 'w2', '仅 w2 重做');
     await c.call('plan.dispatchReady', { planRevisionId: v2Id, maxParallel: 3 });
-    // w2 修复成功 → v 排队位出现。
+    // w2 修复成功（绑定 Run）→ v 排队位出现。
     await c.call('planTask.prepare', { taskAttemptId: s2.readyAttempts[0].id });
-    await c.call('plan.startRunning', { taskAttemptId: s2.readyAttempts[0].id });
+    await runBound(wi.id, s2.readyAttempts[0].id, 'rp-run-w2r');
     await c.call('planTask.transition', { taskAttemptId: s2.readyAttempts[0].id, outcome: 'succeeded', outputDigest: 'od-w2r', idempotencyKey: 't-w2r' });
     const vAttempts = await c.call('plan.dispatchReady', { planRevisionId: v2Id, maxParallel: 3 });
     assert(vAttempts.dispatched.length === 1 && vAttempts.dispatched[0].task_key === 'v', 'v 提升派发');
-    await c.call('planTask.transition', { taskAttemptId: vAttempts.dispatched[0].id, outcome: 'succeeded', idempotencyKey: 't-v' });
+    await runBound(wi.id, vAttempts.dispatched[0].id, 'rp-run-v');
+    await c.call('planTask.transition', { taskAttemptId: vAttempts.dispatched[0].id, outcome: 'succeeded', outputDigest: 'od-v', idempotencyKey: 't-v' });
 
     // unknown 路径：新计划 w1(external_write 升级) 重批 + unknown 先对账。
     const rp2 = await c.call('plan.replan', {

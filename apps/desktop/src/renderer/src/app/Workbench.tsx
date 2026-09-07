@@ -89,10 +89,11 @@ interface EvidenceInfo {
 
 /* ---------------- 常量 ---------------- */
 
-const GATES = ['requirements', 'design', 'development', 'testing', 'deployment', 'verification'] as const;
-type Gate = (typeof GATES)[number];
+// M1 门禁数据化（评审 P0-4）：Gate 放宽为 string——自定义模板关 id 原样贯穿 UI，
+// 不再静默回退 requirements；六关映射仅作 legacy 展示兜底。
+type Gate = string;
 
-const GATE_SUBS: Record<Gate, string> = {
+const GATE_SUBS: Record<string, string> = {
   requirements: '需求澄清与 PRD',
   design: '产品与技术方案',
   development: '编码实现与自测',
@@ -140,7 +141,7 @@ interface RunTrace {
 }
 
 /** 各关的本关要求（展示用清单，与门禁就绪检查互补）。 */
-const GATE_REQUIREMENTS: Record<Gate, string[]> = {
+const GATE_REQUIREMENTS: Record<string, string[]> = {
   requirements: ['完成需求澄清与确认', '完成 PRD 并存储到知识库', '通过评审并放行'],
   design: ['完成技术方案设计', '方案评审通过并冻结基线', '通过评审并放行'],
   development: ['完成编码实现与自测', '通过代码评审', '通过评审并放行'],
@@ -150,7 +151,7 @@ const GATE_REQUIREMENTS: Record<Gate, string[]> = {
 };
 
 /** 各关默认执行 Agent 名称（展示用）。 */
-const GATE_AGENT: Record<Gate, string> = {
+const GATE_AGENT: Record<string, string> = {
   requirements: '需求分析 Agent',
   design: '方案设计 Agent',
   development: '开发实施 Agent',
@@ -328,9 +329,8 @@ export function Workbench({
   }, [runs]);
 
   const stagesByGate = new Map((progress?.stages ?? []).map((s) => [s.gate, s]));
-  const currentGate: Gate = GATES.includes(progress?.currentGate as Gate)
-    ? (progress?.currentGate as Gate)
-    : 'requirements';
+  // 评审 P0-4：自定义关 id 原样使用（gateLabel 原样展示），仅在缺失时回退首关。
+  const currentGate: Gate = progress?.currentGate || 'requirements';
   const currentStage = stagesByGate.get(currentGate);
   const gateEvidences = evidences.filter((e) => e.gate === currentGate);
 
@@ -550,6 +550,7 @@ function formatElapsed(fromIso: string, toIso?: string): string {
 }
 
 function ExecutionProcessView({
+  workItemId,
   gate,
   stage,
   progress,
@@ -559,6 +560,7 @@ function ExecutionProcessView({
   docs,
   knowledgeCount,
 }: {
+  workItemId: string;
   gate: Gate;
   stage?: StageInfo;
   progress: ProgressInfo | null;
@@ -914,7 +916,7 @@ function GateDetailFloat({
         </div>
       ))}
       <div className="sg-gate-detail-label">执行 Agent</div>
-      <div className="sg-gate-detail-agent">{GATE_AGENT[gate]}</div>
+      <div className="sg-gate-detail-agent">{GATE_AGENT[gate] ?? '执行 Agent'}</div>
       <div className="sg-gate-detail-label">下一步行动</div>
       <div className="sg-gate-detail-next">{nextAction}</div>
       <div className={`sg-detail-float-note ${gateOpen ? '' : 'sg-detail-float-note--action'}`}>
@@ -1759,7 +1761,7 @@ function GateWorkspace({
             <IconArrowLeft size={15} />
           </button>
           <span>
-            当前关：{gateLabel(gate)} · {GATE_SUBS[gate]}
+            当前关：{gateLabel(gate)}{GATE_SUBS[gate] ? ` · ${GATE_SUBS[gate]}` : ''}
           </span>
           <GitStatusChip projectId={projectId} />
         </div>
@@ -1772,11 +1774,11 @@ function GateWorkspace({
         </span>
         <div className="sg-gate-summary-name">
           <strong>{gateLabel(gate)}</strong>
-          <span>{GATE_SUBS[gate]}</span>
+          <span>{GATE_SUBS[gate] ?? '自定义关卡'}</span>
         </div>
         <div className="sg-gate-summary-reqs">
           <div className="sg-gate-summary-label">本关要求</div>
-          {GATE_REQUIREMENTS[gate].map((req) => (
+          {(GATE_REQUIREMENTS[gate] ?? ['完成本关交付物并通过放行审批']).map((req) => (
             <div className="sg-gate-req" key={req}>
               <IconCheck size={12} />
               {req}
@@ -1819,7 +1821,7 @@ function GateWorkspace({
               <span className="sg-agent-avatar">
                 <IconCpu size={14} />
               </span>
-              <span className="sg-agent-card-name">{GATE_AGENT[gate]}</span>
+              <span className="sg-agent-card-name">{GATE_AGENT[gate] ?? "执行 Agent"}</span>
               <span className="sg-agent-card-status">尚未启动</span>
               <span className="sg-agent-card-goal">在下方输入补充说明即可启动本关 Agent</span>
             </div>
@@ -1840,7 +1842,7 @@ function GateWorkspace({
                   <span className="sg-agent-avatar">
                     <IconCpu size={14} />
                   </span>
-                  <span className="sg-agent-card-name">{GATE_AGENT[gate]}</span>
+                  <span className="sg-agent-card-name">{GATE_AGENT[gate] ?? "执行 Agent"}</span>
                   <span className={`sg-agent-card-status sg-agent-status--${st.cls}`}>{st.label}</span>
                   {durationMin !== null ? (
                     <span className="sg-agent-card-goal">{durationMin} 分钟</span>
@@ -1859,6 +1861,7 @@ function GateWorkspace({
       {/* 执行过程（输入 → Agent 执行 → 输出 → 证据） */}
       <div className="sg-gate-workspace">
         <ExecutionProcessView
+          workItemId={workItemId}
           gate={gate}
           stage={stage}
           progress={progress}

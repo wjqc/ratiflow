@@ -108,7 +108,7 @@ pub fn import_from_git(
 
     // 收集 *.md（跳过 .git；单文件 ≤512KiB）。
     let mut md_files: Vec<std::path::PathBuf> = Vec::new();
-    for entry in walk_md(&tmp, 0)? {
+    for entry in walk_md(&tmp, &tmp, 0)? {
         md_files.push(entry);
     }
     md_files.sort();
@@ -205,20 +205,37 @@ pub fn drift_check(
     Ok(valid_sha(new_pin))
 }
 
-fn walk_md(dir: &std::path::Path, depth: usize) -> Result<Vec<std::path::PathBuf>, Error> {
+/// 遍历 clone 内 *.md（≤512KiB 读取由调用方裁剪）。安全边界（EvoFlow 评审 P0 修复）：
+/// - symlink 一律跳过（`entry.file_type()` 不跟随链接）：目录链接防止逃出 clone 根，
+///   文件链接防止把宿主任意文件（如 ~/.ssh、数据库）以 .md 名义导入为技能内容；
+/// - 收集时 canonical 复核仍必须在 clone 根内（防 TOCTOU 与绑定挂载绕过）。
+fn walk_md(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    depth: usize,
+) -> Result<Vec<std::path::PathBuf>, Error> {
     if depth > 6 {
         return Ok(vec![]);
     }
+    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             if path.file_name().map(|n| n == ".git").unwrap_or(false) {
                 continue;
             }
-            out.extend(walk_md(&path, depth + 1)?);
+            out.extend(walk_md(root, &path, depth + 1)?);
         } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !canonical.starts_with(&root_canonical) {
+                continue;
+            }
             out.push(path);
         }
     }
