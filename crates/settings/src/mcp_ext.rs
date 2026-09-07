@@ -409,6 +409,7 @@ pub fn server_refresh(store: &Store, id: &str) -> SettingsResult<Value> {
 }
 
 /// 活跃 server 的活跃工具（policy 快照与调用路径消费）。
+#[derive(Clone)]
 pub struct ActiveMcpTool {
     pub server_id: String,
     pub server_name: String,

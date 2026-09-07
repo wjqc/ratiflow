@@ -13,6 +13,7 @@ pub mod modelgw;
 pub mod patch;
 pub mod profile;
 pub mod prompt;
+pub mod provider;
 pub mod reasoning_state;
 pub mod rollout;
 pub mod router;
@@ -954,11 +955,24 @@ fn propose_and_execute(
         result: String::new(),
         created_at: timefmt::now(),
     };
+    // WP-2（RDWS v1.4）：tool 列写侧一律 canonical（builtin:/mcp: 前缀）+ tool_provider
+    // 区分列；执行/治理链经 ToolId::parse 双形态等价消费（legacy 行为不变）。
+    let tool_id = crate::provider::ToolId::parse(&decision.action);
     store.with_conn(|conn| {
         conn.execute(
-            "INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest, requires_approval, decision, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,0,'proposed',?7)",
-            rusqlite::params![proposal.id, proposal.run_id, proposal.tool, proposal.arguments, proposal.risk, proposal.action_digest, proposal.created_at],
+            "INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
+                 requires_approval, decision, created_at, tool_provider)
+             VALUES (?1,?2,?3,?4,?5,?6,0,'proposed',?7,?8)",
+            rusqlite::params![
+                proposal.id,
+                proposal.run_id,
+                tool_id.canonical(),
+                proposal.arguments,
+                proposal.risk,
+                proposal.action_digest,
+                proposal.created_at,
+                tool_id.provider()
+            ],
         )?;
         Ok(())
     })?;
@@ -1601,7 +1615,7 @@ pub fn get_proposal(store: &Store, id: &str) -> Result<Proposal, Error> {
                 Ok(Proposal {
                     id: r.get(0)?,
                     run_id: r.get(1)?,
-                    tool: r.get(2)?,
+                    tool: crate::provider::ToolId::parse(&r.get::<_, String>(2)?).short_name(),
                     arguments: r.get(3)?,
                     risk: r.get(4)?,
                     action_digest: r.get(5)?,
@@ -1770,7 +1784,9 @@ pub fn proposals(store: &Store, run_id: &str) -> Result<Vec<Proposal>, Error> {
         )?;
         let rows = stmt.query_map([run_id], |r| {
             Ok(Proposal {
-                id: r.get(0)?, run_id: r.get(1)?, tool: r.get(2)?, arguments: r.get(3)?,
+                id: r.get(0)?, run_id: r.get(1)?,
+                tool: crate::provider::ToolId::parse(&r.get::<_, String>(2)?).short_name(),
+                arguments: r.get(3)?,
                 risk: r.get(4)?, action_digest: r.get(5)?, decision: r.get(6)?,
                 result: r.get(7)?, created_at: r.get(8)?,
             })
@@ -1949,7 +1965,19 @@ mod tests {
         assert_eq!(out.output, "native done");
         let props = proposals(&store, &out.run.id).unwrap();
         assert_eq!(props.len(), 1);
+        // WP-2：tool 列写侧 canonical，读侧（RPC/执行链）映射回短名 = legacy 等价。
         assert_eq!(props[0].tool, "read_file");
+        let raw_tool: String = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT tool FROM tool_proposals WHERE id=?1",
+                    [&props[0].id],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(raw_tool, "builtin:read_file", "持久化列为 canonical 形态");
         assert_eq!(props[0].decision, "executed");
 
         // transcript：M4 checkpoint v2 —— schemaVersion=2 + ModelInputItem[]，
