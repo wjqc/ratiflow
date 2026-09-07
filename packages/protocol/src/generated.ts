@@ -188,6 +188,7 @@ export type RpcMethodName =
   | 'mcp.serverList'
   | 'mcp.serverRemove'
   | 'mcp.serverRefresh'
+  | 'mcp.serverToggle'
   | 'mcp.toolsList'
   | 'gate.deliverableStatus'
   | 'skill.list'
@@ -259,7 +260,8 @@ export type RpcMethodName =
   | 'goal.autoReleaseCheck'
   | 'notification.list'
   | 'skill.importFromRegistry'
-  | 'autonomy.createGrant';
+  | 'autonomy.createGrant'
+  | 'autonomy.revokeGrant';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -447,6 +449,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'mcp.serverList',
   'mcp.serverRemove',
   'mcp.serverRefresh',
+  'mcp.serverToggle',
   'mcp.toolsList',
   'gate.deliverableStatus',
   'skill.list',
@@ -519,6 +522,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'notification.list',
   'skill.importFromRegistry',
   'autonomy.createGrant',
+  'autonomy.revokeGrant',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -1634,6 +1638,11 @@ export interface McpServerRefreshParams {
   serverId: string;
 }
 
+export interface McpServerToggleParams {
+  serverId: string;
+  enabled: boolean;
+}
+
 export interface McpToolsListParams {
   serverId?: string;
 }
@@ -1987,4 +1996,9 @@ export interface AutonomyCreateGrantParams {
   allowedTools?: unknown[];
   allowedRisks?: unknown[];
   expiresAt?: string;
+}
+
+export interface AutonomyRevokeGrantParams {
+  grantId: string;
+  reason?: string;
 }

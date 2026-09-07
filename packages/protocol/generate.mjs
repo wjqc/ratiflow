@@ -63,6 +63,17 @@ function ifaceName(method) {
 mkdirSync('packages/protocol/src', { recursive: true });
 writeFileSync('packages/protocol/src/generated.ts', code);
 
+// Electron 主进程的 RPC 白名单（渲染层透传面收口，随契约自动同步）。
+mkdirSync('apps/desktop/src/main', { recursive: true });
+writeFileSync(
+  'apps/desktop/src/main/rpcMethods.generated.ts',
+  `// 本文件由 generate.mjs 从 contracts/rpc/sixgates.json 生成；不要手写修改。
+export const RPC_METHODS: readonly string[] = [
+${contract.methods.map((m) => `  '${m.name}',`).join('\n')}
+];
+`,
+);
+
 // 方法 ↔ dispatch 实现对齐检查（契约测试数据）。
 const rustDispatch = readFileSync('crates/sixgates-core/src/dispatch.rs', 'utf8') + readFileSync('crates/sixgates-core/src/settings_dispatch.rs', 'utf8');
 const missing = contract.methods.filter((m) => !rustDispatch.includes(`"${m.name}"`));

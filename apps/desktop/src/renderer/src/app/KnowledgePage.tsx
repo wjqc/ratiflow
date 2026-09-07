@@ -1,15 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { marked } from 'marked';
 import { rpc, rpcErrorMessage } from '../rpc/client';
 import { relativeTime } from '../lib/format';
+import { renderMarkdown } from '../lib/markdown';
 import { IconBook, IconDoc, IconFolder, IconIssue, IconPlus, IconSearch, IconX } from '../components/Icons';
-
-// 渲染前转义原生 HTML（产物内容来自 Agent 输出，不信任内嵌标签），再交 marked 解析。
-marked.setOptions({ gfm: true, breaks: true });
-function renderMarkdown(content: string): string {
-  const escaped = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return marked.parse(escaped, { async: false }) as string;
-}
 
 interface ArtifactRow {
   id: string;

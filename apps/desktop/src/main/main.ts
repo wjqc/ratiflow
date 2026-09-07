@@ -1,17 +1,36 @@
 // Electron main：窗口/菜单/sidecar 生命周期与 JSON-RPC 转发。
-// 安全红线：renderer sandbox + contextIsolation，preload 只暴露确定方法。
+// 安全红线：renderer sandbox + contextIsolation，preload 只暴露确定方法；
+// sg:rpc 只放行契约方法（rpcMethods.generated.ts 由 codegen 从 contracts 生成）。
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from 'electron';
 import { ChildProcess, spawn } from 'node:child_process';
 import { join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { readFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, appendFileSync, statSync, renameSync, realpathSync } from 'node:fs';
 import * as readline from 'node:readline';
+import { RPC_METHODS } from './rpcMethods.generated';
+
+const RPC_METHOD_SET = new Set<string>(RPC_METHODS);
+// 与 core 的 MAX_MESSAGE_BYTES 一致（attachment.import 等大载荷走同一上限）。
+const MAX_RPC_PARAMS_BYTES = 8 * 1024 * 1024;
 
 interface HelloInfo {
   protocolVersion: string;
   coreVersion: string;
   schemaVersion: number;
   capabilities: string[];
+}
+
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+/// 追加 core 日志，超 5MB 轮转（缺陷审计：崩溃刷屏曾无上限且逐块同步写满盘）。
+function appendLog(path: string, text: string): void {
+  try {
+    if (existsSync(path) && statSync(path).size > LOG_MAX_BYTES) {
+      renameSync(path, `${path}.old`);
+    }
+  } catch {}
+  try {
+    appendFileSync(path, text);
+  } catch {}
 }
 
 interface PendingRequest {
@@ -29,6 +48,7 @@ class CoreClient {
   private restarts = 0;
   private restartWindowStart = Date.now();
   private shutdownRequested = false;
+  private protocolIncompatibleFlag = false;
   coreUnavailable = false;
 
   constructor(private binaryPath: string, private dataDir: string, private logPath: string) {}
@@ -56,8 +76,17 @@ class CoreClient {
       return;
     }
 
+    // spawn 异步失败（ENOENT 等）：无监听会以未捕获 error 击穿主进程。
+    this.proc.on('error', (err) => {
+      appendLog(this.logPath, `[main] core spawn error: ${err.message}\n`);
+      if (!helloResolved) {
+        onHelloError(new Error(`core 启动失败: ${err.message}`));
+      }
+    });
+
     const rl = readline.createInterface({ input: stdout });
     let helloResolved = false;
+    let protocolIncompatible = false;
     rl.on('line', (line: string) => {
       if (!line.trim()) {
         return;
@@ -66,7 +95,7 @@ class CoreClient {
       try {
         message = JSON.parse(line);
       } catch {
-        appendFileSync(this.logPath, `[stdout-nonjson] ${line}\n`);
+        appendLog(this.logPath, `[stdout-nonjson] ${line}\n`);
         return;
       }
       if (message.jsonrpc === undefined && message.protocolVersion !== undefined) {
@@ -74,6 +103,8 @@ class CoreClient {
         if (message.protocolVersion !== '1') {
           onHelloError(new Error(`core 协议 ${message.protocolVersion} 不兼容（需要 1）；请同时更新应用与 core`));
           helloResolved = true;
+          protocolIncompatible = true;
+          this.protocolIncompatibleFlag = true;
           return;
         }
         helloResolved = true;
@@ -103,15 +134,27 @@ class CoreClient {
 
     this.proc.stderr.setEncoding('utf8');
     this.proc.stderr.on('data', (chunk: string) => {
-      appendFileSync(this.logPath, chunk);
+      appendLog(this.logPath, chunk);
     });
 
     this.proc.on('exit', (code, signal) => {
-      appendFileSync(this.logPath, `[main] core exited code=${code} signal=${signal}\n`);
+      appendLog(this.logPath, `[main] core exited code=${code} signal=${signal}\n`);
       this.proc = null;
+      // 缺陷审计：core 死亡时在途 RPC 曾挂满 120s 超时——立即以明确错误回收。
+      for (const [id, p] of this.pending) {
+        clearTimeout(p.timer);
+        p.reject(Object.assign(new Error('core 已退出，请求未完成'), { code: 'core_exited' }));
+        this.pending.delete(id);
+      }
       // P0：requested shutdown 不重启；只有意外退出才进入退避重启。
       if (this.shutdownRequested) {
-        appendFileSync(this.logPath, '[main] shutdown requested; no restart\n');
+        appendLog(this.logPath, '[main] shutdown requested; no restart\n');
+        return;
+      }
+      // 协议不兼容的 core：重启只会循环撞墙（缺陷审计），进入诊断模式。
+      if (protocolIncompatible || this.protocolIncompatibleFlag) {
+        this.coreUnavailable = true;
+        appendLog(this.logPath, '[main] protocol incompatible; diagnostic mode\n');
         return;
       }
       if (!helloResolved) {
@@ -127,12 +170,12 @@ class CoreClient {
       this.restarts += 1;
       if (this.restarts > 3) {
         this.coreUnavailable = true;
-        appendFileSync(this.logPath, '[main] core restart limit reached; diagnostic mode\n');
+        appendLog(this.logPath, '[main] core restart limit reached; diagnostic mode\n');
         return;
       }
       // 指数退避：500ms * 2^(n-1)
       const backoff = 500 * Math.pow(2, this.restarts - 1);
-      appendFileSync(this.logPath, `[main] restarting core (${this.restarts}/3) in ${backoff}ms\n`);
+      appendLog(this.logPath, `[main] restarting core (${this.restarts}/3) in ${backoff}ms\n`);
       setTimeout(() => {
         if (this.shutdownRequested) {
           return;
@@ -153,6 +196,10 @@ class CoreClient {
         this.eventListeners.splice(index, 1);
       }
     };
+  }
+
+  get protocolIncompatible(): boolean {
+    return this.protocolIncompatibleFlag;
   }
 
   async call(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -198,8 +245,15 @@ function resolveCoreBinary(): string {
   if (existsSync(packagedPath)) {
     return packagedPath;
   }
-  // 回退 PATH。
-  return 'sixgates-core';
+  // PATH 回退（缺陷审计：资源缺失时静默执行 PATH 上任意同名程序，属劫持面）
+  // 仅在显式环境开关下启用；否则明确失败并给可操作指引。
+  if (process.env.SG_CORE_FROM_PATH === '1') {
+    return 'sixgates-core';
+  }
+  throw new Error(
+    'sixgates-core 二进制缺失（开发：cargo build --release -p sixgates-core；打包：resources/sixgates-core）。' +
+      '确要用 PATH 回退请设 SG_CORE_FROM_PATH=1',
+  );
 }
 
 function createWindow(): void {
@@ -275,6 +329,16 @@ function createWindow(): void {
 
 function registerIpc(): void {
   ipcMain.handle('sg:rpc', async (_event, method: string, params: Record<string, unknown>) => {
+    // 白名单 + 结构校验：渲染层被攻破时也无法调用契约之外的方法或注入非对象载荷。
+    if (typeof method !== 'string' || !RPC_METHOD_SET.has(method)) {
+      throw new Error(`rpc 方法不在契约白名单内: ${String(method).slice(0, 100)}`);
+    }
+    if (params === null || typeof params !== 'object' || Array.isArray(params)) {
+      throw new Error('rpc params 必须是对象');
+    }
+    if (JSON.stringify(params).length > MAX_RPC_PARAMS_BYTES) {
+      throw new Error('rpc params 超过大小上限');
+    }
     if (!client) {
       throw new Error('core 未初始化');
     }
@@ -359,7 +423,20 @@ function registerIpc(): void {
     if (!existsSync(resolvedIndex)) {
       return false;
     }
-    shell.showItemInFolder(resolvedIndex);
+    // symlink 围栏（缺陷审计）：词法 resolve 不跟随符号链接，existsSync 跟随——
+    // 目录被替换为指向外部的 symlink 时按真实路径复核。
+    let realIndex: string;
+    let realRoot: string;
+    try {
+      realIndex = realpathSync(resolvedIndex);
+      realRoot = realpathSync(resolvedRoot);
+    } catch {
+      return false;
+    }
+    if (!realIndex.startsWith(realRoot + sep)) {
+      return false;
+    }
+    shell.showItemInFolder(realIndex);
     return true;
   });
 }
@@ -432,7 +509,14 @@ function bootstrap(): void {
   const userData = process.env.SIXGATES_E2E_DATA_DIR || app.getPath('userData');
   const logPath = join(userData, 'logs', 'core.log');
   mkdirSync(join(userData, 'logs'), { recursive: true });
-  client = new CoreClient(resolveCoreBinary(), join(userData, 'data'), logPath);
+  try {
+    client = new CoreClient(resolveCoreBinary(), join(userData, 'data'), logPath);
+  } catch (error) {
+    dialog.showErrorBox('SixGates core 启动失败', `${error}\n\n日志：${logPath}`);
+    registerIpc();
+    createWindow();
+    return;
+  }
   // F02 事件通道端到端：core 通知转发到所有渲染窗口（renderer 经 preload onEvent 订阅）。
   client.onEvent((event) => {
     for (const win of BrowserWindow.getAllWindows()) {
@@ -456,7 +540,8 @@ function bootstrap(): void {
 }
 
 app.on('window-all-closed', () => {
-  void client?.shutdown();
+  // darwin：仅关窗口不杀 core（审计修复：此前无条件 shutdown 且 darwin 不 quit，
+  // activate 重建窗口后 core 已死不可恢复，全应用瘫痪）。shutdown 交由 before-quit。
   if (process.platform !== 'darwin') {
     app.quit();
   }

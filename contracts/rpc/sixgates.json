@@ -3372,6 +3372,23 @@
       "desc": "M6:重新探针;Schema digest 漂移→新候选,不热更新活跃集(refreshDrift 标注)"
     },
     {
+      "name": "mcp.serverToggle",
+      "params": [
+        {
+          "name": "serverId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": true
+        }
+      ],
+      "result": "value",
+      "desc": "M6:启停 server(不改状态,仅摘出/加入活跃集;revoked 拒绝)"
+    },
+    {
       "name": "mcp.toolsList",
       "params": [
         {
@@ -4518,6 +4535,23 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "autonomy.revokeGrant",
+      "params": [
+        {
+          "name": "grantId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value",
+      "desc": "撤销自治授权(即时生效;重放幂等;审计)"
     }
   ],
   "events": [

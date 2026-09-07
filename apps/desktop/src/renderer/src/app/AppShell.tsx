@@ -371,6 +371,7 @@ export default function AppShell() {
             )}
             {route.page === 'task' && (
               <Workbench
+                key={route.workItemId}
                 projectId={route.projectId}
                 projectName={
                   projects.find((p) => p.id === route.projectId)?.name ??
