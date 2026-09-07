@@ -18,7 +18,7 @@ test.afterEach(async () => {
 });
 
 test('D1 401 → degraded → 轮换 → 验证 → ready；审计无 token', async () => {
-  e2e = await launchApp({ env: { SIXGATES_GITLAB_URL: gitlab.url(), SIXGATES_GITLAB_TOKEN: '' } });
+  e2e = await launchApp({ env: { RATIFLOW_GITLAB_URL: gitlab.url(), RATIFLOW_GITLAB_TOKEN: '' } });
 
   // 1. 创建凭据（真实 Keychain 写入）。
   const cred = await e2e.rpc<{ id: string; revision: number; name: string }>('credentialRef.create', {
@@ -81,7 +81,7 @@ test('D1 401 → degraded → 轮换 → 验证 → ready；审计无 token', as
 });
 
 test('D2 GitLab/SSH 直填秘密自动落 Keychain（凭据引用页已删）', async () => {
-  e2e = await launchApp({ env: { SIXGATES_GITLAB_URL: gitlab.url(), SIXGATES_GITLAB_TOKEN: '' } });
+  e2e = await launchApp({ env: { RATIFLOW_GITLAB_URL: gitlab.url(), RATIFLOW_GITLAB_TOKEN: '' } });
 
   // 1. GitLab 直填 token 创建 → 自动生成凭据引用，列表不回显秘密。
   const profile = await e2e.rpc<{ id: string }>('gitlabProfile.create', {

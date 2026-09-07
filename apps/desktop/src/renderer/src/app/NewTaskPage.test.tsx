@@ -20,7 +20,7 @@ describe('新建任务', () => {
         default: return Promise.resolve({});
       }
     });
-    (window as unknown as { sixgates: unknown }).sixgates = {
+    (window as unknown as { ratiflow: unknown }).ratiflow = {
       rpc: (method: string, params: Record<string, unknown>) => rpcMock(method, params),
       hello: () => Promise.resolve({ ok: true }),
       selectFile: () => Promise.resolve(null),
@@ -33,14 +33,14 @@ describe('新建任务', () => {
   });
 
   afterEach(() => {
-    delete (window as unknown as { sixgates?: unknown }).sixgates;
+    delete (window as unknown as { ratiflow?: unknown }).ratiflow;
   });
 
   it('提交文字需求后立即启动 PRD 起草并进入任务', async () => {
     render(
       <NewTaskPage
         projectId="pj_1"
-        projects={[{ id: 'pj_1', name: 'SixGates' }]}
+        projects={[{ id: 'pj_1', name: 'Ratiflow' }]}
         onCreated={onCreated}
         onWorkspaceChanged={() => undefined}
         onOpenRemote={() => undefined}

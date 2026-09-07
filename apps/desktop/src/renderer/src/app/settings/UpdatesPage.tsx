@@ -26,7 +26,7 @@ export function UpdatesPage() {
     rpc<CoreVersionInfo>('core.version')
       .then(setVersion)
       .catch((e) => setLoadError(e instanceof Error ? e.message : 'core 版本读取失败'));
-    void window.sixgates
+    void window.ratiflow
       .appInfo()
       .then(setAppInfo)
       .catch(() => setAppInfo(null));

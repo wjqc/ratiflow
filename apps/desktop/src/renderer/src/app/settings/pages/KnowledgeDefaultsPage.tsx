@@ -30,7 +30,7 @@ const EMPTY: Required<Omit<KnowledgeSettings, 'revision'>> = {
   defaultResultLimit: 20,
   includeTestsByDefault: false,
   contextBudgetBytes: 65536,
-  instructionFileNames: ['SixGates.md', 'AGENTS.md'],
+  instructionFileNames: ['Ratiflow.md', 'AGENTS.md'],
   maxInstructionBytes: 32768,
   autoCompactThresholdTokens: 24000,
   compactionKeepTurns: 2,

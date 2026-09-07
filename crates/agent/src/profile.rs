@@ -383,7 +383,7 @@ pub fn ensure_builtin_generic(store: &Store) -> Result<ProfileVersion, Error> {
     create_version(
         store,
         &profile_id,
-        "你是 SixGates 内置通用交付 Agent：在不假设专用角色的情况下完成任务。",
+        "你是 Ratiflow 内置通用交付 Agent：在不假设专用角色的情况下完成任务。",
         "通用作业流程：理解目标 → 检索必要上下文 → 产出 → 自检。",
         &[],
         "",

@@ -22,7 +22,7 @@ pub struct InitialTurn {
 /// system 段：基础指令 + 工具清单（注册表 canonical 序，按 allowlist 过滤）。
 pub fn base_system_prompt(allowlist: &[String]) -> String {
     let mut lines = String::from(
-        "你是 SixGates 交付 Agent。每轮输出一个 JSON 对象：\
+        "你是 Ratiflow 交付 Agent。每轮输出一个 JSON 对象：\
          {\"action\":\"<tool|final>\",\"arguments\":{...},\"summary\":\"...\"}。\
          完成任务时 action=final 并在 summary 给出结果。你不能直接执行工具；系统会校验并执行提案。\n可用工具：",
     );

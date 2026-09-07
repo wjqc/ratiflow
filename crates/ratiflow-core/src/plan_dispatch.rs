@@ -1,5 +1,5 @@
 //! 结构化计划 RPC（EvoFlow 方案 M2-09 / ADR-036 §6.2 / §8.1）。
-//! 全域受 `SIXGATES_PLAN_DAG` 门控（默认 feature_disabled = 零行为变化）。
+//! 全域受 `RATIFLOW_PLAN_DAG` 门控（默认 feature_disabled = 零行为变化）。
 //! 计划批准走既有 approvals 链（subject_type=plan_revision，0034 扩作用域），不旁路。
 
 use serde_json::{json, Value};
@@ -12,13 +12,13 @@ use sg_store::Store;
 use sg_workflow::plan::{self, PlanAcceptance, PlanTaskInput};
 
 fn plan_dag_enabled() -> bool {
-    std::env::var("SIXGATES_PLAN_DAG").ok().as_deref() == Some("1")
+    std::env::var("RATIFLOW_PLAN_DAG").ok().as_deref() == Some("1")
 }
 
 fn disabled() -> RpcError {
     RpcError::new(
         ErrorCode::InvalidRequest,
-        "feature_disabled: SIXGATES_PLAN_DAG 未开启",
+        "feature_disabled: RATIFLOW_PLAN_DAG 未开启",
     )
 }
 

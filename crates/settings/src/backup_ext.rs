@@ -195,12 +195,12 @@ pub fn restore(store: &Store, id: &str) -> SettingsResult<RestoreOutcome> {
         })
         .map_err(store_err)?;
 
-    // 活动数据库为 sixgates-v3.db（v3 纪元，见 store::open；EvoFlow M0-05）；勿用旧纪元 sixgates-v2.db / sixgates.db。
-    let db_path = store.data_dir.join("sixgates-v3.db");
+    // 活动数据库为 ratiflow-v3.db（v3 纪元，见 store::open；EvoFlow M0-05）；勿用旧纪元 ratiflow-v2.db / ratiflow.db。
+    let db_path = store.data_dir.join("ratiflow-v3.db");
     // 先 checkpoint 并截断 WAL，保证磁盘快照自洽。
     let _ = store.with_conn(|conn| Ok(conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?));
     // WAL 文件一并替换，避免旧 WAL 污染。
-    for wal in ["sixgates-v3.db-wal", "sixgates-v3.db-shm"] {
+    for wal in ["ratiflow-v3.db-wal", "ratiflow-v3.db-shm"] {
         let _ = std::fs::remove_file(store.data_dir.join(wal));
     }
     if let Err(e) = std::fs::copy(&rec.path, &db_path) {
@@ -314,7 +314,7 @@ pub fn export_diagnostic_bundle(store: &Store) -> SettingsResult<Value> {
 }
 
 fn dirs_log_dir() -> Option<std::path::PathBuf> {
-    std::env::var("SIXGATES_LOG_DIR")
+    std::env::var("RATIFLOW_LOG_DIR")
         .ok()
         .map(std::path::PathBuf::from)
 }

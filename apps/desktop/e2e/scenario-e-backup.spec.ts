@@ -71,14 +71,14 @@ test('E1 create→verify→restore→requiresRestart；快照文件含备份', a
   const electron = await import('@playwright/test').then((m) => m._electron);
   const app = await electron.launch({
     args: ['.'], cwd: process.cwd(),
-    env: { ...process.env, SIXGATES_E2E_DATA_DIR: dataDir },
+    env: { ...process.env, RATIFLOW_E2E_DATA_DIR: dataDir },
   });
   const window = await app.firstWindow();
   await window.waitForLoadState('domcontentloaded');
   const rpc = <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
     window.evaluate(([m, p]: [string, Record<string, unknown>]) =>
-      (window as unknown as { sixgates: { rpc(m: string, p: Record<string, unknown>): Promise<unknown> } })
-        .sixgates.rpc(m, p), [method, params] as [string, Record<string, unknown>]) as Promise<T>;
+      (window as unknown as { ratiflow: { rpc(m: string, p: Record<string, unknown>): Promise<unknown> } })
+        .ratiflow.rpc(m, p), [method, params] as [string, Record<string, unknown>]) as Promise<T>;
 
   // 7. schema 恢复 + 设置回到备份时点。
   const meta = await rpc<{ schemaVersion: number }>('core.version');

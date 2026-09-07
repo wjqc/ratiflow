@@ -285,7 +285,7 @@ pub fn execute_run(
         + std::time::Duration::from_secs(budget.max_duration_sec.max(1) as u64);
 
     // WP-1（RDWS v1.4）：Grant 计量归属——Run 快照中的 autonomyGrantId。
-    // 空 = 无 grant（默认人工路径）或 SIXGATES_UNIFIED_RISK=0（回退 = WP-1 前行为，
+    // 空 = 无 grant（默认人工路径）或 RATIFLOW_UNIFIED_RISK=0（回退 = WP-1 前行为，
     // 不做限额校验；已落 ledger 行仍由 settle/启动对账照实收尾）。
     let grant_ledger_id = {
         let snap: String = store
@@ -1084,7 +1084,7 @@ fn propose_and_execute(
         }
     };
 
-    // WP-1（RDWS v1.4 A4）：统一风险评估——SIXGATES_UNIFIED_RISK 开启时服务端派生、
+    // WP-1（RDWS v1.4 A4）：统一风险评估——RATIFLOW_UNIFIED_RISK 开启时服务端派生、
     // 审计 risk.assessment，且 auto_approvable=false 强制人工审批（只收紧：硬规则命中的
     // irreversible/manual/无键链外部写不得因 ToolRule 低档被自动放行）。
     // MCP 在 WP-2 ToolProvider adapter 证据落地前按外部写保守评估（只升不降）。

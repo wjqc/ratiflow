@@ -155,7 +155,7 @@ pub fn validate_grant(
     }
     // WP-1（RDWS v1.4）：ledger 耗尽闭合——任一限额维度的累计占用已达上限 →
     // 状态位写实为 exhausted（治理可见）并拒绝。逐消费行的零消耗校验在 reserve。
-    // P2-2（评审修复）：与 reserve 同受 SIXGATES_UNIFIED_RISK 门控——flag=0 时
+    // P2-2（评审修复）：与 reserve 同受 RATIFLOW_UNIFIED_RISK 门控——flag=0 时
     // 完全恢复 WP-1 前行为（RDWS-003 探针：flag 关后 ledger 只读）。
     let exhausted_dim = if crate::risk_model::enabled() {
         store
@@ -816,9 +816,9 @@ mod tests {
 // Goal v2 七条硬条件的可判定子集（M6 交付面）：grant 未撤销未过期 + allow_gate_release
 // + 无 pending 审批 + 最新计划无 unknown/manual attempt。其余（release digest 一致、
 // trace coverage/evidence/requirements 满足）由放行链既有校验承接；
-// SIXGATES_AUTO_GATE_RELEASE 默认 0——谓词可用但消费侧关闭（EV-021）。
+// RATIFLOW_AUTO_GATE_RELEASE 默认 0——谓词可用但消费侧关闭（EV-021）。
 
-pub const AUTO_GATE_RELEASE_FLAG: &str = "SIXGATES_AUTO_GATE_RELEASE";
+pub const AUTO_GATE_RELEASE_FLAG: &str = "RATIFLOW_AUTO_GATE_RELEASE";
 
 pub fn auto_gate_release_enabled() -> bool {
     std::env::var(AUTO_GATE_RELEASE_FLAG).ok().as_deref() == Some("1")

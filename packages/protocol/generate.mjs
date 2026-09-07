@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// 从 contracts/rpc/sixgates.json 生成 TypeScript 方法清单与类型（契约先行，禁止手写漂移）。
+// 从 contracts/rpc/ratiflow.json 生成 TypeScript 方法清单与类型（契约先行，禁止手写漂移）。
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
-const contract = JSON.parse(readFileSync('contracts/rpc/sixgates.json', 'utf8'));
+const contract = JSON.parse(readFileSync('contracts/rpc/ratiflow.json', 'utf8'));
 
 function tsType(type) {
   switch (type) {
@@ -14,7 +14,7 @@ function tsType(type) {
   }
 }
 
-let code = `// 本文件由 generate.mjs 从 contracts/rpc/sixgates.json 生成；不要手写修改。
+let code = `// 本文件由 generate.mjs 从 contracts/rpc/ratiflow.json 生成；不要手写修改。
 export const PROTOCOL_VERSION = '1';
 export const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 
@@ -67,7 +67,7 @@ writeFileSync('packages/protocol/src/generated.ts', code);
 mkdirSync('apps/desktop/src/main', { recursive: true });
 writeFileSync(
   'apps/desktop/src/main/rpcMethods.generated.ts',
-  `// 本文件由 generate.mjs 从 contracts/rpc/sixgates.json 生成；不要手写修改。
+  `// 本文件由 generate.mjs 从 contracts/rpc/ratiflow.json 生成；不要手写修改。
 export const RPC_METHODS: readonly string[] = [
 ${contract.methods.map((m) => `  '${m.name}',`).join('\n')}
 ];
@@ -75,7 +75,7 @@ ${contract.methods.map((m) => `  '${m.name}',`).join('\n')}
 );
 
 // 方法 ↔ dispatch 实现对齐检查（契约测试数据）。
-const rustDispatch = readFileSync('crates/sixgates-core/src/dispatch.rs', 'utf8') + readFileSync('crates/sixgates-core/src/settings_dispatch.rs', 'utf8');
+const rustDispatch = readFileSync('crates/ratiflow-core/src/dispatch.rs', 'utf8') + readFileSync('crates/ratiflow-core/src/settings_dispatch.rs', 'utf8');
 const missing = contract.methods.filter((m) => !rustDispatch.includes(`"${m.name}"`));
 if (missing.length > 0) {
   console.error('契约中声明但 Rust 未实现的方法：', missing.map((m) => m.name));

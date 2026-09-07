@@ -31,12 +31,12 @@ describe('MCP 服务器页', () => {
   beforeEach(() => {
     cleanup();
     rpcMock.mockReset();
-    (window as unknown as { sixgates: unknown }).sixgates = {
+    (window as unknown as { ratiflow: unknown }).ratiflow = {
       rpc: (m: string, p: Record<string, unknown>) => rpcMock(m, p),
       hello: () => Promise.resolve({ ok: true }),
     };
   });
-  afterEach(() => { delete (window as unknown as { sixgates?: unknown }).sixgates; });
+  afterEach(() => { delete (window as unknown as { ratiflow?: unknown }).ratiflow; });
 
   it('按状态分组渲染并显示计数', async () => {
     mockList([ACTIVE, CANDIDATE]);

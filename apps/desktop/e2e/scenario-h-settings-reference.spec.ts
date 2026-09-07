@@ -24,7 +24,7 @@ test('H1 记忆与 MCP 页面匹配参考布局并保持交互可用', async ({}
   await e2e.window.setViewportSize({ width: 1920, height: 1050 });
 
   const project = await e2e.rpc<{ id: string }>('project.create', {
-    gitlabInstance: 'local', namespace: 'e2e', project: 'reference', name: 'sixgates',
+    gitlabInstance: 'local', namespace: 'e2e', project: 'reference', name: 'ratiflow',
   });
   const memorySettings = await e2e.rpc<{ revision: number }>('memory.settingsGet', { projectId: project.id });
   await e2e.rpc('memory.settingsUpdate', {
@@ -37,9 +37,9 @@ test('H1 记忆与 MCP 页面匹配参考布局并保持交互可用', async ({}
     ['github-ssh-push', 'GitHub SSH 推送使用独立凭据。'],
     ['github-upload-scope', '上传前确认仓库作用域。'],
     ['go-proxy-china', '国内环境使用可用代理。'],
-    ['sixgates-design-review-bar', '设计走查必须保留截图证据。'],
-    ['sixgates-electron-gotchas', 'Electron 退出后检查孤儿进程。'],
-    ['sixgates-project-status', '项目状态以当前代码为准。'],
+    ['ratiflow-design-review-bar', '设计走查必须保留截图证据。'],
+    ['ratiflow-electron-gotchas', 'Electron 退出后检查孤儿进程。'],
+    ['ratiflow-project-status', '项目状态以当前代码为准。'],
   ];
   for (const [title, body] of memories) {
     await e2e.rpc('memory.create', {

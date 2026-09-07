@@ -1,5 +1,5 @@
 {
-  "name": "sixgates-monorepo",
+  "name": "ratiflow-monorepo",
   "private": true,
   "version": "3.0.0",
   "workspaces": [
@@ -10,10 +10,10 @@
   "scripts": {
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "build:renderer": "npm --workspace @sixgates/desktop run build:renderer",
-    "build:core": "cargo build --release -p sixgates-core",
-    "start": "npm --workspace @sixgates/desktop run start",
-    "package": "npm --workspace @sixgates/desktop run package",
+    "build:renderer": "npm --workspace @ratiflow/desktop run build:renderer",
+    "build:core": "cargo build --release -p ratiflow-core",
+    "start": "npm --workspace @ratiflow/desktop run start",
+    "package": "npm --workspace @ratiflow/desktop run package",
     "codegen:protocol": "node packages/protocol/generate.mjs",
     "ci": "npm run codegen:protocol && npm run typecheck && npm run test && cargo fmt --check && cargo clippy -- -D warnings && cargo test"
   },

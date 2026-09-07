@@ -39,7 +39,7 @@ pub fn server_add(
     if mcp_disabled() {
         return Err(SettingsError::new(
             "INVALID_REQUEST",
-            "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+            "feature_disabled: RATIFLOW_MCP_MODE=disabled（MCP 已禁用）",
         ));
     }
     if let Some(existing) = server_by_name(store, name)? {
@@ -82,7 +82,7 @@ pub fn server_add(
 /// WP-3（RDWS v1.4）：MCP 模式开关。sandboxed=默认（唯一安全值）；disabled=kill
 /// switch（全部 MCP RPC 拒绝）。**不提供 unsandboxed 取值**——禁用只能停止新执行。
 pub fn mcp_mode() -> &'static str {
-    match std::env::var("SIXGATES_MCP_MODE").as_deref() {
+    match std::env::var("RATIFLOW_MCP_MODE").as_deref() {
         Ok("disabled") => "disabled",
         _ => "sandboxed",
     }

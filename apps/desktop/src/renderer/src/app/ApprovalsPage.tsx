@@ -50,7 +50,7 @@ export default function ApprovalsPage({ onDecided }: Props) {
   // F02 事件驱动刷新：挂载首拉 + 审批/任务事件即时拉取；30s 轮询仅作断线降级。
   useEffect(() => {
     void reload();
-    const off = window.sixgates.onEvent((e) => {
+    const off = window.ratiflow.onEvent((e) => {
       if (e.type.startsWith('approval.') || e.type.startsWith('run.')) void reload();
     });
     const t = setInterval(() => void reload(), 30000);

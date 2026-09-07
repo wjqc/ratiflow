@@ -1,7 +1,7 @@
 //! ToolProvider contract（RDWS 实施计划 v1.4 WP-2）：
 //! 可执行工具型插件的统一执行面——Builtin 与 MCP 各一 adapter，**治理权全留 Core
 //! orchestrator**（registry/policy/审批/budget/秘密扫描/outcome 状态机/audit/reconcile，
-//! 见 sixgates-core tool_exec::execute_tool）。本 trait 只描述执行能力：
+//! 见 ratiflow-core tool_exec::execute_tool）。本 trait 只描述执行能力：
 //! descriptor/probe/execute/query_result/cancel；返回 ProviderOutcome，**不决定重试**。
 //!
 //! ToolId 持久化契约（0042 tool_provider 列）：

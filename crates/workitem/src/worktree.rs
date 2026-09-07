@@ -1,4 +1,4 @@
-//! SixGates 隔离 worktree（ADR-030 M3 / SG-RBK-005 / 蓝图 §7.1/§7.2）。
+//! Ratiflow 隔离 worktree（ADR-030 M3 / SG-RBK-005 / 蓝图 §7.1/§7.2）。
 //! Agent 执行在 dataDir/worktrees/<workItemId> 的 git linked worktree 中进行；
 //! 快照记录其 HEAD/dirty，回滚对其 `reset --hard`+`clean` 是合法恢复——
 //! 用户主工作区（local_root）永不写入、永不 reset。
@@ -217,7 +217,7 @@ pub fn task_workspace_digest(
 }
 
 /// 恢复受管 worktree 到目标 HEAD（仅本目录；主工作区不参与）。
-/// `git reset --hard` + `clean -fd` 在 SixGates 受管 worktree 内是合法恢复操作，
+/// `git reset --hard` + `clean -fd` 在 Ratiflow 受管 worktree 内是合法恢复操作，
 /// 与 SG-RBK-005 禁止的"主工作区隐式 hard reset"无关。
 pub fn restore(store: &Store, workitem_id: &str, target_head: &str) -> Result<(), Error> {
     let path = worktree_root(store, workitem_id);
@@ -259,7 +259,7 @@ mod tests {
         std::fs::write(repo.join("README.md"), "base\n").unwrap();
         for args in [
             vec!["init", "-b", "main"],
-            vec!["config", "user.email", "t@sixgates.local"],
+            vec!["config", "user.email", "t@ratiflow.local"],
             vec!["config", "user.name", "t"],
             vec!["add", "."],
             vec!["commit", "-m", "init"],
@@ -427,7 +427,7 @@ mod windows_behavior_simulation {
         std::fs::write(repo.join("readme.txt"), "base\n").unwrap();
         for args in [
             vec!["init", "-b", "main"],
-            vec!["config", "user.email", "t@sixgates.local"],
+            vec!["config", "user.email", "t@ratiflow.local"],
             vec!["config", "user.name", "t"],
             vec!["add", "."],
             vec!["commit", "-m", "init"],

@@ -67,7 +67,7 @@ describe('设置页接线', () => {
         default: return ok({});
       }
     });
-    (window as unknown as { sixgates: unknown }).sixgates = {
+    (window as unknown as { ratiflow: unknown }).ratiflow = {
       rpc: (m: string, p: Record<string, unknown>) => rpcMock(m, p),
       hello: () => Promise.resolve({ ok: true }),
       selectFile: () => Promise.resolve(null),
@@ -79,7 +79,7 @@ describe('设置页接线', () => {
       onEvent: () => () => {},
     };
   });
-  afterEach(() => { delete (window as unknown as { sixgates?: unknown }).sixgates; });
+  afterEach(() => { delete (window as unknown as { ratiflow?: unknown }).ratiflow; });
 
   it.each([
     ['常规', GeneralPage, '管理应用启动'],

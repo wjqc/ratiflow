@@ -3,14 +3,14 @@
 // durable spans 从事实重建调用链；taskReadModel 只读真实状态（无估算假值）；
 // checkpoint 断线恢复；usage cache/cost 未知显示 unknown（EV-016）；
 // Slash preview→execute 命中同一放行链（EV-018 不旁路审批），token 不一致拒绝。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -77,9 +77,9 @@ async function main() {
     { content: JSON.stringify({ action: 'final', summary: 'done' }), tokensIn: 1, tokensOut: 1 },
   ]));
   const c = new CoreClient(dataDir, {
-    SIXGATES_PLAN_DAG: '1',
-    SIXGATES_FAKE_MODEL_SCRIPT: fakeScript,
-    SIXGATES_EXEC_MODE: 'safe_restricted',
+    RATIFLOW_PLAN_DAG: '1',
+    RATIFLOW_FAKE_MODEL_SCRIPT: fakeScript,
+    RATIFLOW_EXEC_MODE: 'safe_restricted',
   });
   // 绑定真实 Agent Run 驱动 attempt 至 completed_execution。
   async function runBound(wiId, attemptId, idem) {
@@ -107,7 +107,7 @@ async function main() {
     const fs = await import('node:fs');
     fs.mkdirSync(repoDir, { recursive: true });
     git(repoDir, 'init', '-b', 'main');
-    git(repoDir, 'config', 'user.email', 'e2e@sixgates.local');
+    git(repoDir, 'config', 'user.email', 'e2e@ratiflow.local');
     git(repoDir, 'config', 'user.name', 'e2e');
     fs.writeFileSync(join(repoDir, 'README.md'), 'hello\n');
     git(repoDir, 'add', '.');

@@ -5,14 +5,14 @@
 // ③ 同 key 同参重放返回首次响应（版本不追加 = 不重执行）；
 // ④ deterministic 错误 envelope 重放（同 key 重试返回首次错误，版本不追加）；
 // ⑤ 并发同 key 只一 owner 获得执行权（双发 create 只追加一个版本）。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -80,7 +80,7 @@ async function templateVersions(c, key) {
 
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-rpc-receipt-'));
-  const c = new CoreClient(dataDir, { SIXGATES_WORKFLOW_TEMPLATE_V2: '1' });
+  const c = new CoreClient(dataDir, { RATIFLOW_WORKFLOW_TEMPLATE_V2: '1' });
   const fail = (error) => {
     console.error(`E2E 失败：${error.message}`);
     c?.kill();

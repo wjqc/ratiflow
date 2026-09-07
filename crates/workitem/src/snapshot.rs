@@ -131,7 +131,7 @@ fn workspace_manifest(
         })
         .ok()
         .filter(|s| !s.is_empty());
-    // 受管隔离 worktree（SixGates 所有，回滚可整体恢复——SG-RBK-005 合法操作域）。
+    // 受管隔离 worktree（Ratiflow 所有，回滚可整体恢复——SG-RBK-005 合法操作域）。
     let (managed_json, managed_resources) = match crate::worktree::status(store, workitem_id)? {
         Some(wt) => {
             let mut res = vec![SnapshotResource {

@@ -1,5 +1,5 @@
 /**
- * SixGates 内联 SVG 图标集（单色线性，currentColor）。
+ * Ratiflow 内联 SVG 图标集（单色线性，currentColor）。
  * 不引入图标依赖，统一 16px 网格、1.6 描边。
  */
 import type { SVGProps } from 'react';

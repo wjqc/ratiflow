@@ -25,8 +25,8 @@ pub struct Store {
 impl Store {
     /// 打开/创建数据目录并应用迁移。拒绝网络文件系统（WAL 不安全）。
     ///
-    /// Schema 纪元（EvoFlow 方案 §7.1 / M0-05）：本包只打开 `sixgates-v3.db`。
-    /// 纪元链：legacy `sixgates.db` → `sixgates-v2.db` → `sixgates-v3.db`，均为 SQLite
+    /// Schema 纪元（EvoFlow 方案 §7.1 / M0-05）：本包只打开 `ratiflow-v3.db`。
+    /// 纪元链：legacy `ratiflow.db` → `ratiflow-v2.db` → `ratiflow-v3.db`，均为 SQLite
     /// backup API 一次性在线拷贝（含 WAL 一致性）；源文件保留不动 —— 旧包只打开旧纪元
     /// 文件（物理隔离），回滚 = 换回旧包。v3 导入或迁移失败时删除半成品 v3、保留 v2，
     /// 应用拒绝伪启动；下次打开重新导入。存量 v3 迁移失败则保留现场（预迁移备份在 backups/）。
@@ -38,9 +38,9 @@ impl Store {
         check_filesystem(data_dir)?;
         write_probe(data_dir)?;
 
-        let legacy_path = data_dir.join("sixgates.db");
-        let v2_path = data_dir.join("sixgates-v2.db");
-        let db_path = data_dir.join("sixgates-v3.db");
+        let legacy_path = data_dir.join("ratiflow.db");
+        let v2_path = data_dir.join("ratiflow-v2.db");
+        let db_path = data_dir.join("ratiflow-v3.db");
         // v1→v2：保留既有链路，让 v2 始终是旧包可用的完整回退点。
         if !v2_path.exists() && legacy_path.exists() {
             Self::import_epoch(&legacy_path, &v2_path)?;
@@ -67,8 +67,8 @@ impl Store {
                 // 存量 v3 不删：带数据现场交给调用方与预迁移备份处置。
                 if fresh_v3 {
                     let _ = std::fs::remove_file(&db_path);
-                    let _ = std::fs::remove_file(data_dir.join("sixgates-v3.db-wal"));
-                    let _ = std::fs::remove_file(data_dir.join("sixgates-v3.db-shm"));
+                    let _ = std::fs::remove_file(data_dir.join("ratiflow-v3.db-wal"));
+                    let _ = std::fs::remove_file(data_dir.join("ratiflow-v3.db-shm"));
                 }
                 Err(e)
             }
@@ -232,8 +232,8 @@ fn check_filesystem(dir: &Path) -> Result<(), Error> {
 }
 
 fn write_probe(dir: &Path) -> Result<(), Error> {
-    let probe = dir.join(".sixgates-write-probe");
-    let tmp = dir.join(".sixgates-write-probe.tmp");
+    let probe = dir.join(".ratiflow-write-probe");
+    let tmp = dir.join(".ratiflow-write-probe.tmp");
     std::fs::write(&tmp, b"probe")?;
     std::fs::rename(&tmp, &probe)?;
     std::fs::remove_file(&probe)?;

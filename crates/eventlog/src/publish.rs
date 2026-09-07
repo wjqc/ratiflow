@@ -210,7 +210,7 @@ pub fn reconcile(
     let events = store.load_workitem(workitem_id)?;
     let mut witnesses = Vec::new();
     for (stem, _env) in events {
-        let rel_path = format!(".sixgates/events/{workitem_id}/{stem}.json");
+        let rel_path = format!(".ratiflow/events/{workitem_id}/{stem}.json");
         let status = classify(repo_root, &rel_path, &stem, remote, ref_name, prior);
         if let Some(w) = status.witness {
             witnesses.push(w);
@@ -309,13 +309,13 @@ mod tests {
         );
     }
 
-    const REL: &str = ".sixgates/events/wi1/E.json";
+    const REL: &str = ".ratiflow/events/wi1/E.json";
     const REF: &str = "refs/heads/main";
 
     #[test]
     fn draft_when_uncommitted() {
         let repo = Repo::new(false);
-        std::fs::create_dir_all(repo.path.join(".sixgates/events/wi1")).unwrap();
+        std::fs::create_dir_all(repo.path.join(".ratiflow/events/wi1")).unwrap();
         std::fs::write(repo.path.join(REL), b"{}").unwrap();
         let st = classify(&repo.path, REL, "E", "origin", REF, &[]);
         assert_eq!(st.state, State::Draft);

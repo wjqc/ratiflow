@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = join(process.cwd(), 'target', 'release', 'ratiflow-core');
 const dataDir = mkdtempSync(join(tmpdir(), 'sg-e1-repro-'));
 
 class CoreClient {

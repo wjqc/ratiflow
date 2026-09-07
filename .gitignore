@@ -11,6 +11,7 @@ internal/web/dist/*
 *.log
 *.vsix
 *.tsbuildinfo
+apps/desktop/build/
 .idea/
 target/
 release/
@@ -30,4 +31,3 @@ __pycache__/
 
 # 会话工具本地状态
 /.zcode/
-apps/desktop/build/

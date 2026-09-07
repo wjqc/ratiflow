@@ -15,8 +15,8 @@ import sqlite3
 import sys
 import time
 
-DEFAULT_DATA = os.path.expanduser("~/Library/Application Support/SixGates/data")
-DB = "sixgates.db"
+DEFAULT_DATA = os.path.expanduser("~/Library/Application Support/Ratiflow/data")
+DB = "ratiflow.db"
 
 
 def q(conn, sql, params=()):
@@ -44,7 +44,7 @@ def main():
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_entries'",
     )[0][0]
     if not has_v23:
-        out["hint"] = "当前库尚未迁移到 v23：先用新构建的 SixGates 启动一次，再运行本脚本。"
+        out["hint"] = "当前库尚未迁移到 v23：先用新构建的 Ratiflow 启动一次，再运行本脚本。"
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 

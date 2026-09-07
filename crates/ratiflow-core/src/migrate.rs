@@ -8,9 +8,9 @@ use sg_store::{Error, Store};
 pub fn migrate_v2(from: &str, to: &str, version: &str) -> Result<serde_json::Value, Error> {
     let from_dir = Path::new(from);
     let to_dir = Path::new(to);
-    if !from_dir.join("sixgates.db").exists() {
+    if !from_dir.join("ratiflow.db").exists() {
         return Err(Error::Message(format!(
-            "v2 数据库不存在：{}/sixgates.db",
+            "v2 数据库不存在：{}/ratiflow.db",
             from_dir.display()
         )));
     }
@@ -22,7 +22,7 @@ pub fn migrate_v2(from: &str, to: &str, version: &str) -> Result<serde_json::Val
     std::fs::create_dir_all(to_dir)?;
 
     // 只读复制（原目录保持不动 → 可回退）。
-    std::fs::copy(from_dir.join("sixgates.db"), to_dir.join("sixgates.db"))?;
+    std::fs::copy(from_dir.join("ratiflow.db"), to_dir.join("ratiflow.db"))?;
     if from_dir.join("objects").exists() {
         copy_dir(&from_dir.join("objects"), &to_dir.join("objects"))?;
     }
@@ -49,7 +49,7 @@ pub fn migrate_v2(from: &str, to: &str, version: &str) -> Result<serde_json::Val
 }
 
 fn count_rows(dir: &Path) -> Result<serde_json::Value, Error> {
-    let conn = rusqlite::Connection::open(dir.join("sixgates.db"))?;
+    let conn = rusqlite::Connection::open(dir.join("ratiflow.db"))?;
     let count = |table: &str| -> i64 {
         conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .unwrap_or(0)

@@ -867,6 +867,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "ratiflow-core"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sg-agent",
+ "sg-artifact",
+ "sg-attachment",
+ "sg-context",
+ "sg-evidence",
+ "sg-executor",
+ "sg-integrations",
+ "sg-knowledge",
+ "sg-memory",
+ "sg-policy",
+ "sg-project",
+ "sg-protocol",
+ "sg-provenance",
+ "sg-settings",
+ "sg-store",
+ "sg-timeline",
+ "sg-workflow",
+ "sg-workitem",
+ "sha2",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1360,36 +1390,6 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
-
-[[package]]
-name = "sixgates-core"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "sg-agent",
- "sg-artifact",
- "sg-attachment",
- "sg-context",
- "sg-evidence",
- "sg-executor",
- "sg-integrations",
- "sg-knowledge",
- "sg-memory",
- "sg-policy",
- "sg-project",
- "sg-protocol",
- "sg-provenance",
- "sg-settings",
- "sg-store",
- "sg-timeline",
- "sg-workflow",
- "sg-workitem",
- "sha2",
- "tokio",
- "ureq",
-]
 
 [[package]]
 name = "slab"

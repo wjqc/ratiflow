@@ -1,6 +1,6 @@
 {
   "productName": "Ratiflow",
-  "name": "@sixgates/desktop",
+  "name": "@ratiflow/desktop",
   "private": true,
   "version": "3.0.0",
   "main": "dist/main/main.js",
@@ -10,7 +10,8 @@
     "build": "npm run build:renderer && npm run build:main && npm run build:preload",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit",
     "test": "vitest run",
-    "start": "npm run build && electron .",
+    "start": "node scripts/start-desktop.mjs",
+    "start:raw": "npm run build && electron .",
     "package": "npm run build && electron-builder --dir",
     "build:preload": "tsc -p tsconfig.preload.json",
     "test:e2e": "npm run build && playwright test"

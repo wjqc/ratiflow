@@ -66,7 +66,7 @@ mod tests {
         let dir = tempdir::make("sg-v2-adopt");
         // 手工构造 v2 骨架库：app_meta.schema_version=1，无 schema_migrations。
         {
-            let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow.db")).unwrap();
             conn.execute_batch(include_str!("../migrations/0001_init.sql"))
                 .unwrap();
             conn.pragma_update(None, "journal_mode", "WAL").unwrap();
@@ -83,7 +83,7 @@ mod tests {
         let dir = tempdir::make("sg-migration-0020");
         // 构造 0015–0019 版老库：带 CHECK 旧约束的 model_profiles + 种子数据。
         {
-            let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow.db")).unwrap();
             conn.pragma_update(None, "foreign_keys", "ON").unwrap();
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -219,7 +219,7 @@ mod tests {
         assert!(masked.contains("[REDACTED:password_assignment]"));
         assert!(!masked.contains("supersecretvalue123"));
 
-        let env = b"SIXGATES_GITLAB_TOKEN=\nSIXGATES_MODEL_BASE_URL=https://api.example.com/v1\n";
+        let env = b"RATIFLOW_GITLAB_TOKEN=\nRATIFLOW_MODEL_BASE_URL=https://api.example.com/v1\n";
         assert!(!scan::has_high_risk(&scan::scan(env)));
     }
 
@@ -290,7 +290,7 @@ mod tests {
     fn migration_0024_preserves_knowledge_data() {
         let dir = tempdir::make("sg-mig-0024");
         {
-            let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow.db")).unwrap();
             conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
                 .unwrap();
             for (v, body) in crate::migration::MIGRATIONS
@@ -378,7 +378,7 @@ mod tests {
     fn legacy_epoch_file_isolated_and_v2_carries_data() {
         let dir = tempdir::make("sg-epoch");
         {
-            let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow.db")).unwrap();
             conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
                 .unwrap();
             for (v, body) in crate::migration::MIGRATIONS
@@ -409,7 +409,7 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "v2 承接 legacy 数据");
         // 旧文件 schema_migrations 仍停在 23（只读保留，未被 0024 污染）。
-        let conn = rusqlite::Connection::open(dir.path().join("sixgates.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("ratiflow.db")).unwrap();
         let maxv: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
                 r.get(0)
@@ -428,7 +428,7 @@ mod tests {
         let dir = tempdir::make("sg-future-schema");
         let store = Store::open(dir.path(), "test").unwrap();
         drop(store);
-        let conn = rusqlite::Connection::open(dir.path().join("sixgates-v3.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("ratiflow-v3.db")).unwrap();
         conn.execute("INSERT INTO schema_migrations(version) VALUES (999)", [])
             .unwrap();
         drop(conn);
@@ -446,9 +446,9 @@ mod tests {
             store.schema_version().unwrap(),
             migration::MIGRATIONS.last().unwrap().0
         );
-        assert!(dir.path().join("sixgates-v3.db").exists());
-        assert!(!dir.path().join("sixgates-v2.db").exists());
-        assert!(!dir.path().join("sixgates.db").exists());
+        assert!(dir.path().join("ratiflow-v3.db").exists());
+        assert!(!dir.path().join("ratiflow-v2.db").exists());
+        assert!(!dir.path().join("ratiflow.db").exists());
         let epoch: String = store
             .with_conn(|c| {
                 c.query_row("SELECT value FROM app_meta WHERE key='db_epoch'", [], |r| {
@@ -462,7 +462,7 @@ mod tests {
 
     /// 构造 v2 纪元存量库：迁移 ≤30 + 一条已执行提案事实（含 FK 链）。
     fn build_v2_fixture(dir: &tempdir::TempDirGuard) {
-        let conn = rusqlite::Connection::open(dir.path().join("sixgates-v2.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("ratiflow-v2.db")).unwrap();
         conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
             .unwrap();
         for (v, body) in migration::MIGRATIONS.iter().filter(|(v, _)| *v <= 30) {
@@ -515,7 +515,7 @@ mod tests {
             ("executed", "read_file")
         );
         // 旧包回退点：v2 停在 30，存量事实同在。
-        let conn = rusqlite::Connection::open(dir.path().join("sixgates-v2.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("ratiflow-v2.db")).unwrap();
         let maxv: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
                 r.get(0)
@@ -539,17 +539,17 @@ mod tests {
         build_v2_fixture(&dir);
         // 故障注入：预建同名表使 0031 的 CREATE TABLE 失败（毒化随导入进入 v3）。
         {
-            let conn = rusqlite::Connection::open(dir.path().join("sixgates-v2.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow-v2.db")).unwrap();
             conn.execute_batch("CREATE TABLE tool_execution_outcomes (id TEXT PRIMARY KEY);")
                 .unwrap();
         }
         let result = Store::open(dir.path(), "test");
         assert!(result.is_err(), "迁移失败必须拒绝启动");
         assert!(
-            !dir.path().join("sixgates-v3.db").exists(),
+            !dir.path().join("ratiflow-v3.db").exists(),
             "半成品 v3 必须删除"
         );
-        assert!(dir.path().join("sixgates-v2.db").exists(), "v2 必须保留");
+        assert!(dir.path().join("ratiflow-v2.db").exists(), "v2 必须保留");
     }
 
     /// M0-06：decision 扩 unknown/indeterminate；outcome 事实表 CHECK / UNIQUE 生效。
@@ -1020,7 +1020,7 @@ mod tests {
         let dir = tempdir::make("sg-0042-upgrade");
         // 手搭 schema≤41：逐条应用 1..=41 并登记版本（复制 runner 的登记纪律）。
         {
-            let conn = rusqlite::Connection::open(dir.path().join("sixgates-v3.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow-v3.db")).unwrap();
             conn.execute_batch(
                 "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
                     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",

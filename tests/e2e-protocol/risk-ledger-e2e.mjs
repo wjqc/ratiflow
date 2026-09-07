@@ -5,16 +5,16 @@
 //    拒绝发生在调用前（零消耗）；
 // ③ 宽限额 Grant：无模型环境 run 照常走 open-phase 失败（model_unavailable），
 //    记账路径不改变既有失败语义；
-// ④ SIXGATES_UNIFIED_RISK=1 不破坏无 grant 的常规生命周期（kill-switch 探针面）。
+// ④ RATIFLOW_UNIFIED_RISK=1 不破坏无 grant 的常规生命周期（kill-switch 探针面）。
 // 硬规则穷举与并发 reserve/settle 的权威断言在 sg-policy unit（risk_model/ledger_tests）。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -83,8 +83,8 @@ async function expectErrorCode(call, code, label) {
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-risk-ledger-'));
   const c = new CoreClient(dataDir, {
-    SIXGATES_AUTOMATIONS: '1',
-    SIXGATES_UNIFIED_RISK: '1',
+    RATIFLOW_AUTOMATIONS: '1',
+    RATIFLOW_UNIFIED_RISK: '1',
   });
   const fail = (error) => {
     console.error(`E2E 失败：${error.message}`);

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sixgates.local/schemas/agent-decision.json",
-  "title": "SixGates Agent Decision",
+  "$id": "https://ratiflow.local/schemas/agent-decision.json",
+  "title": "Ratiflow Agent Decision",
   "description": "Agent 循环中模型每轮必须输出的结构化决策；模型不能直接执行工具。",
   "type": "object",
   "required": ["action", "summary"],

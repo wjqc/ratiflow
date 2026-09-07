@@ -578,8 +578,8 @@ fn execute(
     // 受管 worktree 恢复前移（缺陷审计）：先恢复后改控制面——恢复失败时
     // 控制面零变更（op 保持 executing 可 resume 重试），不再出现"关卡指针已回退、
     // attempt 全 superseded、worktree 未恢复"的半回滚死态。
-    // （SG-RBK-005：仅 SixGates 隔离区；主工作区不参与。）
-    // 受管 worktree 恢复（SG-RBK-005：仅 SixGates 隔离区；主工作区不参与）。
+    // （SG-RBK-005：仅 Ratiflow 隔离区；主工作区不参与。）
+    // 受管 worktree 恢复（SG-RBK-005：仅 Ratiflow 隔离区；主工作区不参与）。
     if let Some(head) = snapshot::resources(store, &target.id)?
         .into_iter()
         .find(|r| {

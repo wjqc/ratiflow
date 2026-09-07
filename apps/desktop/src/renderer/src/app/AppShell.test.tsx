@@ -35,8 +35,8 @@ describe('AppShell', () => {
           return ok({});
       }
     });
-    // 只注入 sixgates bridge，不替换 window 本体（testing-library 依赖 document 绑定）。
-    (window as unknown as { sixgates: unknown }).sixgates = {
+    // 只注入 ratiflow bridge，不替换 window 本体（testing-library 依赖 document 绑定）。
+    (window as unknown as { ratiflow: unknown }).ratiflow = {
       rpc: (method: string, params: Record<string, unknown>) => rpcMock(method, params),
       hello: () => Promise.resolve({ ok: true }),
       selectFile: () => Promise.resolve(null),
@@ -45,7 +45,7 @@ describe('AppShell', () => {
   });
 
   afterEach(() => {
-    delete (window as unknown as { sixgates?: unknown }).sixgates;
+    delete (window as unknown as { ratiflow?: unknown }).ratiflow;
   });
 
   it('显示需求入口与最近任务（来自真实 core 数据）', async () => {
@@ -95,7 +95,7 @@ describe('AppShell', () => {
   });
 
   it('core 不可用时显示错误标记', async () => {
-    (window as unknown as { sixgates: unknown }).sixgates = {
+    (window as unknown as { ratiflow: unknown }).ratiflow = {
       rpc: () => Promise.reject(new Error('core 未运行')),
       hello: () => Promise.resolve({ ok: false, error: 'down' }),
       selectFile: () => Promise.resolve(null),

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -229,7 +229,7 @@ async function main() {
     const repoDir = join(tmpdir(), `sg-rbk-repo-${Date.now()}`);
     mkdirSync(repoDir, { recursive: true });
     git(repoDir, 'init', '-b', 'main');
-    git(repoDir, 'config', 'user.email', 'e2e@sixgates.local');
+    git(repoDir, 'config', 'user.email', 'e2e@ratiflow.local');
     git(repoDir, 'config', 'user.name', 'e2e');
     writeFileSync(join(repoDir, 'README.md'), 'hello\n');
     git(repoDir, 'add', '.');

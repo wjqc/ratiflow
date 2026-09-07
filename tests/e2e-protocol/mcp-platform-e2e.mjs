@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 if (process.platform !== 'linux') {
   console.error('✕ mcp-platform-e2e 仅允许在 Linux 运行（unsupported 负例）');
@@ -82,7 +82,7 @@ async function main() {
       `失败前缀为平台/沙箱声明（实际 ${detail.slice(0, 90)}）`,
     );
     // disabled 模式：全部 MCP RPC 拒绝（kill switch）。
-    const c2 = new CoreClient(dataDir, { SIXGATES_MCP_MODE: 'disabled' });
+    const c2 = new CoreClient(dataDir, { RATIFLOW_MCP_MODE: 'disabled' });
     try {
       await c2.hello_();
       let err2 = null;

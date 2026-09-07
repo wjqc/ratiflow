@@ -194,16 +194,16 @@ test('G4 导入/导出并经业务 ID reveal（非法 ID 拒绝）', async () =>
 
   // 窄 IPC：合法 ID → true；未知/非法 ID → false（不暴露路径）。
   const ok = await e2e.window.evaluate(
-    (id: string) => (window as unknown as { sixgates: { revealMemoryExport(id: string): Promise<boolean> } }).sixgates.revealMemoryExport(id),
+    (id: string) => (window as unknown as { ratiflow: { revealMemoryExport(id: string): Promise<boolean> } }).ratiflow.revealMemoryExport(id),
     exported.exportId,
   );
   expect(ok).toBe(true);
   const bad = await e2e.window.evaluate(
-    () => (window as unknown as { sixgates: { revealMemoryExport(id: string): Promise<boolean> } }).sixgates.revealMemoryExport('../../etc/passwd'),
+    () => (window as unknown as { ratiflow: { revealMemoryExport(id: string): Promise<boolean> } }).ratiflow.revealMemoryExport('../../etc/passwd'),
   );
   expect(bad).toBe(false);
   const unknown = await e2e.window.evaluate(
-    () => (window as unknown as { sixgates: { revealMemoryExport(id: string): Promise<boolean> } }).sixgates.revealMemoryExport('memexp_ffffffffffffffffffffffff'),
+    () => (window as unknown as { ratiflow: { revealMemoryExport(id: string): Promise<boolean> } }).ratiflow.revealMemoryExport('memexp_ffffffffffffffffffffffff'),
   );
   expect(unknown).toBe(false);
   expectNoConsoleErrors();
@@ -214,8 +214,8 @@ test('G5 Secret 拒绝且无副作用', async () => {
   const projectId = await createProject();
   const errMsg = await e2e.window.evaluate(async (params: Record<string, unknown>) => {
     try {
-      await (window as unknown as { sixgates: { rpc(m: string, p: Record<string, unknown>): Promise<unknown> } })
-        .sixgates.rpc('memory.create', params);
+      await (window as unknown as { ratiflow: { rpc(m: string, p: Record<string, unknown>): Promise<unknown> } })
+        .ratiflow.rpc('memory.create', params);
       return null;
     } catch (e) {
       return String((e as Error)?.message ?? e);
@@ -355,7 +355,7 @@ test('G7 候选沉淀：capture → 待确认区 → 接受（可编辑）激活
       tokensOut: 40,
     },
   ]));
-  await launchApp({ env: { SIXGATES_FAKE_MODEL_SCRIPT: scriptPath } }).then((app) => {
+  await launchApp({ env: { RATIFLOW_FAKE_MODEL_SCRIPT: scriptPath } }).then((app) => {
     e2e = app;
   });
   consoleErrors = [];

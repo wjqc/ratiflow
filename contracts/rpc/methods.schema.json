@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sixgates.local/schemas/rpc-methods.json",
-  "title": "SixGates JSON-RPC 方法清单（TS/Rust 类型生成的单一契约源）",
+  "$id": "https://ratiflow.local/schemas/rpc-methods.json",
+  "title": "Ratiflow JSON-RPC 方法清单（TS/Rust 类型生成的单一契约源）",
   "type": "object",
   "required": ["methods", "events"],
   "properties": {

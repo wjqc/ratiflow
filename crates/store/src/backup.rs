@@ -12,7 +12,7 @@ pub struct Snapshot {
 pub fn snapshot(store: &Store) -> Result<Snapshot, Error> {
     let backups = store.data_dir.join("backups");
     std::fs::create_dir_all(&backups)?;
-    let name = format!("sixgates-{}.db", crate::timefmt::now().replace(':', ""));
+    let name = format!("ratiflow-{}.db", crate::timefmt::now().replace(':', ""));
     let target = backups.join(&name);
     if target.exists() {
         return Err(Error::Message("backup target exists".into()));
@@ -39,7 +39,7 @@ pub fn snapshot(store: &Store) -> Result<Snapshot, Error> {
         "rolloutsRootHash": rollouts_root,
         "memoryEntries": memory_entries,
         "memoryObjects": memory_objects,
-        "sixgatesVersion": store.version,
+        "ratiflowVersion": store.version,
         "createdAt": crate::timefmt::now(),
     });
     let manifest_path = backups.join(format!("{name}.manifest.json"));

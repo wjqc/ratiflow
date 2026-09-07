@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // 关卡放行竞态与不变量 E2E（ADR-030 M2 / 蓝图 §13.2 gate-release-race-e2e）：
 // ① 双击批准（并发 decideRelease 只推进一次）；② 并发改输出 → 旧审批失效（AC-SW-03）；
-// ③ 放行审批过期（SIXGATES_APPROVAL_TTL_SECS 钩子）；④ 跨任务待审批互不阻塞（AC-SW-05）。
+// ③ 放行审批过期（RATIFLOW_APPROVAL_TTL_SECS 钩子）；④ 跨任务待审批互不阻塞（AC-SW-05）。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -77,7 +77,7 @@ async function prepareReleasableWorkitem(client, project, title) {
 
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-release-race-'));
-  let client = new CoreClient(dataDir, { SIXGATES_APPROVAL_TTL_SECS: '3600' });
+  let client = new CoreClient(dataDir, { RATIFLOW_APPROVAL_TTL_SECS: '3600' });
   const fail = (error) => {
     console.error(`E2E 失败：${error.message}`);
     client?.kill();
@@ -192,7 +192,7 @@ async function main() {
     client.kill();
 
     // ③ 放行审批过期（TTL=1s 钩子）。
-    client = new CoreClient(dataDir, { SIXGATES_APPROVAL_TTL_SECS: '1' });
+    client = new CoreClient(dataDir, { RATIFLOW_APPROVAL_TTL_SECS: '1' });
     await client.hello_();
     {
       const wi = await prepareReleasableWorkitem(client, project, '过期任务');

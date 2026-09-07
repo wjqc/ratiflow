@@ -64,8 +64,8 @@ impl AppState {
     ) -> Self {
         // 适配器按环境装配：未配置时使用 fake 并在诊断中标记 not_ready。
         let (gitlab, gitlab_fake) = match (
-            std::env::var("SIXGATES_GITLAB_URL"),
-            std::env::var("SIXGATES_GITLAB_TOKEN"),
+            std::env::var("RATIFLOW_GITLAB_URL"),
+            std::env::var("RATIFLOW_GITLAB_TOKEN"),
         ) {
             (Ok(url), Ok(token)) if !url.is_empty() && !token.is_empty() => (
                 Arc::new(sg_integrations::GitLabHttp {
@@ -86,8 +86,8 @@ impl AppState {
                 std::sync::Arc::new(sg_settings::credentials::InMemoryCredentials::default())
             };
         let model = match (
-            std::env::var("SIXGATES_MODEL_BASE_URL"),
-            std::env::var("SIXGATES_MODEL_API_KEY"),
+            std::env::var("RATIFLOW_MODEL_BASE_URL"),
+            std::env::var("RATIFLOW_MODEL_API_KEY"),
         ) {
             (Ok(base), Ok(key)) if !base.is_empty() && !key.is_empty() => {
                 // M2：env 直连装配同样提供流式路径（reqwest+SSE，可取消）；同一实例双接口。
@@ -95,7 +95,7 @@ impl AppState {
                     name_value: "openai-compatible".into(),
                     base_url: base.clone(),
                     api_key: key,
-                    model: std::env::var("SIXGATES_MODEL_NAME").unwrap_or_default(),
+                    model: std::env::var("RATIFLOW_MODEL_NAME").unwrap_or_default(),
                 });
                 let gateway = Gateway::with_shared(http.clone(), Some(http));
                 gateway.set_reasoning_vault(Arc::new(
@@ -104,10 +104,10 @@ impl AppState {
                 gateway
             }
             _ => {
-                // E2E 钩子（仅未配置真实模型时生效）：SIXGATES_FAKE_MODEL_SCRIPT 指向
+                // E2E 钩子（仅未配置真实模型时生效）：RATIFLOW_FAKE_MODEL_SCRIPT 指向
                 // JSON 数组 [{content, tokensIn, tokensOut}]，按序作为脚本响应。
                 let fake = sg_integrations::FakeModel::default();
-                if let Ok(path) = std::env::var("SIXGATES_FAKE_MODEL_SCRIPT") {
+                if let Ok(path) = std::env::var("RATIFLOW_FAKE_MODEL_SCRIPT") {
                     if let Ok(body) = std::fs::read_to_string(&path) {
                         if let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&body) {
                             for item in list {
@@ -137,9 +137,9 @@ impl AppState {
         };
         let ssh: Arc<dyn sg_integrations::SSHAdapter> = Arc::new(FakeSSH::default());
         let _ = gitlab_fake;
-        // 执行模式：SIXGATES_EXEC_MODE 显式覆盖（开发/E2E 用），否则按 Docker 可用性探测
+        // 执行模式：RATIFLOW_EXEC_MODE 显式覆盖（开发/E2E 用），否则按 Docker 可用性探测
         // （不静默降级，ADR-024）。设置域 executionProfile 接线在 M3/F10 重排来源优先级。
-        let executor_mode = std::env::var("SIXGATES_EXEC_MODE")
+        let executor_mode = std::env::var("RATIFLOW_EXEC_MODE")
             .ok()
             .and_then(|m| match m.as_str() {
                 "docker" => Some(sg_executor::Mode::Docker),
@@ -152,7 +152,7 @@ impl AppState {
             .unwrap_or_else(|| {
                 sg_executor::detect_mode(
                     sg_executor::docker_available(),
-                    std::env::var("SIXGATES_UNSAFE_EXEC")
+                    std::env::var("RATIFLOW_UNSAFE_EXEC")
                         .map(|v| v == "1")
                         .unwrap_or(false),
                 )

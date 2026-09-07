@@ -2,7 +2,7 @@
 // M0 harness 基线评测（Codex 能力差距方案 §5 M0 / ADR-033）。
 // 覆盖：工具选择、参数正确性、格式修复轮数、任务完成率、token、总延迟、取消延迟、安全拒绝。
 // 协议：legacy_json（正文 JSON action）；跑在真实 core + FakeModel 脚本上。
-// 用法：cargo build --release -p sixgates-core && node tests/evals/agent-harness/eval.mjs [--out report.json]
+// 用法：cargo build --release -p ratiflow-core && node tests/evals/agent-harness/eval.mjs [--out report.json]
 // 说明：首 token 延迟（TTFT）在非流式协议下不可测，报告中为 null（M2 流式后启用）。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 const args = process.argv.slice(2);
 const outIdx = args.indexOf('--out');
 
@@ -82,7 +82,7 @@ async function main() {
   const scriptPath = join(tmpdir(), `sg-eval-script-${Date.now()}.json`);
   writeFileSync(scriptPath, JSON.stringify(script));
 
-  const c = new CoreClient(dataDir, { SIXGATES_FAKE_MODEL_SCRIPT: scriptPath });
+  const c = new CoreClient(dataDir, { RATIFLOW_FAKE_MODEL_SCRIPT: scriptPath });
   const report = { generatedAt: new Date().toISOString(), protocol: 'legacy_json', scenarios: [], summary: { pass: 0, total: 0 } };
   const record = (name, pass, metrics) => {
     report.scenarios.push({ name, pass, metrics });

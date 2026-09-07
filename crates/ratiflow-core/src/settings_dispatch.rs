@@ -271,7 +271,7 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                     settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
-                None => std::env::var("SIXGATES_MODEL_API_KEY").ok(),
+                None => std::env::var("RATIFLOW_MODEL_API_KEY").ok(),
             };
             let mut report = sg_integrations::model_test(
                 &profile.base_url,
@@ -304,7 +304,7 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                     settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
-                None => std::env::var("SIXGATES_MODEL_API_KEY").ok(),
+                None => std::env::var("RATIFLOW_MODEL_API_KEY").ok(),
             };
             let api_key = api_key
                 .filter(|k| !k.is_empty())
@@ -438,7 +438,7 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                     settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
-                None => std::env::var("SIXGATES_GITLAB_TOKEN").ok(),
+                None => std::env::var("RATIFLOW_GITLAB_TOKEN").ok(),
             };
             let report = sg_integrations::gitlab_test(&profile.base_url, token.as_deref());
             let status = if report.status == "ready" {
@@ -919,7 +919,7 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                     settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
-                None => std::env::var("SIXGATES_GITLAB_TOKEN").ok(),
+                None => std::env::var("RATIFLOW_GITLAB_TOKEN").ok(),
             };
             let client = sg_integrations::GitLabHttp {
                 base_url: profile.base_url.clone(),
@@ -937,7 +937,7 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
                     settings::profiles::reveal_for(store, state.credentials.as_ref(), rid)
                         .map_err(serr)?,
                 ),
-                None => std::env::var("SIXGATES_GITLAB_TOKEN").ok(),
+                None => std::env::var("RATIFLOW_GITLAB_TOKEN").ok(),
             };
             // 通过 /projects/:id 可达性检查（URL 编码 namespace/project）。
             let encoded =

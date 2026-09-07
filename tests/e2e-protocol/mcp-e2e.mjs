@@ -2,8 +2,8 @@
 // 受控 MCP ToolProvider 协议 E2E（ADR-035 / Codex 能力差距方案 M6）：
 // 注册探针→候选→批准→活跃；恶意 Schema fail-closed；Schema 漂移→新候选不热更新、
 // 再批准显式采用；撤销→工具明确失败；默认零行为变化。
-// 前置：cargo build --release -p sixgates-core；本机 python3 + /tmp/sg-mcp-e2e/fake_server.py
-//（fake server 由 crates/settings 与 sixgates-core 的协议测试共享）。
+// 前置：cargo build --release -p ratiflow-core；本机 python3 + /tmp/sg-mcp-e2e/fake_server.py
+//（fake server 由 crates/settings 与 ratiflow-core 的协议测试共享）。
 import { execSync, spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 import { strict as assert } from 'node:assert';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 const SERVER_DIR = '/tmp/sg-mcp-e2e';
 
 function ensureFakeServer() {

@@ -5,7 +5,7 @@ import type { Tokens } from 'marked';
 marked.setOptions({ gfm: true, breaks: true });
 
 // 链接与图片地址走 scheme 白名单：javascript:/data:/file:/vbscript: 等一律降级为纯文本。
-// 内容来自模型输出与知识库，视为不可信输入（XSS：渲染层可经 window.sixgates.rpc 调用任意 core RPC）。
+// 内容来自模型输出与知识库，视为不可信输入（XSS：渲染层可经 window.ratiflow.rpc 调用任意 core RPC）。
 function safeHref(raw: string | undefined): string | null {
   const url = (raw ?? '').trim();
   if (/^(https?:\/\/|mailto:)/i.test(url)) {

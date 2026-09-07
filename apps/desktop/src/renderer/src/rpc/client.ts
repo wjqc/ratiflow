@@ -1,7 +1,7 @@
 // renderer → preload bridge → main → Rust core。renderer 不接触 Node/文件系统/密钥。
 declare global {
   interface Window {
-    sixgates: {
+    ratiflow: {
       rpc(method: string, params?: Record<string, unknown>): Promise<unknown>;
       hello(): Promise<{ ok: boolean; error?: string } | null>;
       selectFile(): Promise<{ path: string; filename: string; contentBase64: string; size: number } | null>;
@@ -35,7 +35,7 @@ export interface AgentRunInfo {
 }
 
 export async function rpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  return (await window.sixgates.rpc(method, params)) as T;
+  return (await window.ratiflow.rpc(method, params)) as T;
 }
 
 /** M0-②：agent.start 立即返回 runId，终态经轮询 agent.get 获得（事件订阅到达后同样触发刷新）。 */

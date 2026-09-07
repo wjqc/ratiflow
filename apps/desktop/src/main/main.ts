@@ -10,6 +10,13 @@ import * as readline from 'node:readline';
 import { RPC_METHODS } from './rpcMethods.generated';
 
 const RPC_METHOD_SET = new Set<string>(RPC_METHODS);
+const PRODUCT_NAME = 'Ratiflow';
+const PRODUCT_TAGLINE = 'Governed AI Delivery';
+const PRODUCT_DESCRIPTION = '本地优先、可追溯、可审批、可回滚的 AI 软件交付工作台。';
+
+// `electron .` 使用 Electron.app 作为宿主；开发模式必须显式覆盖内部应用名，
+// 否则 macOS 应用菜单会显示 “Electron”。打包产物仍由 productName/Info.plist 决定。
+app.setName(PRODUCT_NAME);
 // 与 core 的 MAX_MESSAGE_BYTES 一致（attachment.import 等大载荷走同一上限）。
 const MAX_RPC_PARAMS_BYTES = 8 * 1024 * 1024;
 
@@ -237,23 +244,57 @@ let client: CoreClient | null = null;
 
 function resolveCoreBinary(): string {
   // 开发：target/release；打包：resources/。
-  const devPath = join(__dirname, '..', '..', '..', '..', 'target', 'release', 'sixgates-core');
+  const devPath = join(__dirname, '..', '..', '..', '..', 'target', 'release', 'ratiflow-core');
   if (existsSync(devPath)) {
     return devPath;
   }
-  const packagedPath = join(process.resourcesPath ?? '', 'sixgates-core');
+  const packagedPath = join(process.resourcesPath ?? '', 'ratiflow-core');
   if (existsSync(packagedPath)) {
     return packagedPath;
   }
   // PATH 回退（缺陷审计：资源缺失时静默执行 PATH 上任意同名程序，属劫持面）
   // 仅在显式环境开关下启用；否则明确失败并给可操作指引。
   if (process.env.SG_CORE_FROM_PATH === '1') {
-    return 'sixgates-core';
+    return 'ratiflow-core';
   }
   throw new Error(
-    'sixgates-core 二进制缺失（开发：cargo build --release -p sixgates-core；打包：resources/sixgates-core）。' +
+    'ratiflow-core 二进制缺失（开发：cargo build --release -p ratiflow-core；打包：resources/ratiflow-core）。' +
       '确要用 PATH 回退请设 SG_CORE_FROM_PATH=1',
   );
+}
+
+function resolveDevelopmentAppIcon(): string | undefined {
+  if (app.isPackaged) {
+    return undefined;
+  }
+  const iconPath = join(__dirname, '..', '..', 'build', 'icon.png');
+  return existsSync(iconPath) ? iconPath : undefined;
+}
+
+function applyDevelopmentAppIcon(): void {
+  const iconPath = resolveDevelopmentAppIcon();
+  if (process.platform === 'darwin' && iconPath) {
+    app.dock.setIcon(iconPath);
+  }
+}
+
+function showProductAboutDialog(): void {
+  const options: Electron.MessageBoxOptions = {
+    type: 'info',
+    title: `关于 ${PRODUCT_NAME}`,
+    message: PRODUCT_NAME,
+    detail: `${PRODUCT_TAGLINE}\n\n${PRODUCT_DESCRIPTION}\n\n版本 ${app.getVersion()}\nCopyright © 2026 Ratiflow`,
+    buttons: ['关闭'],
+    defaultId: 0,
+    noLink: true,
+  };
+  if (mainWindow) {
+    mainWindow.show();
+    mainWindow.focus();
+    dialog.showMessageBoxSync(mainWindow, options);
+  } else {
+    dialog.showMessageBoxSync(options);
+  }
 }
 
 function createWindow(): void {
@@ -263,7 +304,8 @@ function createWindow(): void {
     minWidth: 1180,
     minHeight: 760,
     show: false,
-    title: 'Ratiflow',
+    title: PRODUCT_NAME,
+    icon: process.platform === 'darwin' ? undefined : resolveDevelopmentAppIcon(),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -275,6 +317,9 @@ function createWindow(): void {
   mainWindow.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    if (isE2eInstance && process.env.RATIFLOW_E2E_SHOW_ABOUT === '1') {
+      setTimeout(showProductAboutDialog, 500);
+    }
   });
   // 导航与窗口打开拦截（外部链接走系统浏览器 allowlist）。
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -306,7 +351,7 @@ function createWindow(): void {
         const state = await mainWindow!.webContents.executeJavaScript(`(() => ({
           readyState: document.readyState,
           rootChildren: document.getElementById('root')?.childElementCount ?? -1,
-          hasBridge: typeof window.sixgates === 'object',
+          hasBridge: typeof window.ratiflow === 'object',
           scripts: Array.from(document.querySelectorAll('script')).map(s => ({ type: s.type, src: s.getAttribute('src') })),
           bodyText: document.body.innerText.slice(0, 80),
         }))()`);
@@ -396,12 +441,12 @@ function registerIpc(): void {
 
   ipcMain.handle('sg:appInfo', () => ({
     desktopVersion: app.getVersion(),
-    logDir: join(homedir(), 'Library', 'Logs', 'sixgates'),
+    logDir: join(homedir(), 'Library', 'Logs', 'ratiflow'),
     userDataDir: app.getPath('userData'),
   }));
 
   ipcMain.handle('sg:openLogs', async () => {
-    await shell.openPath(join(homedir(), 'Library', 'Logs', 'sixgates'));
+    await shell.openPath(join(homedir(), 'Library', 'Logs', 'ratiflow'));
   });
 
   // S12 项目记忆导出 reveal（ADR-032 §11.2）：只接受满足固定 ID 正则的 exportId，
@@ -412,7 +457,7 @@ function registerIpc(): void {
       return false;
     }
     // 与 bootstrap 同源的数据目录推导（E2E 显式覆盖优先）。
-    const dataRoot = join(process.env.SIXGATES_E2E_DATA_DIR || app.getPath('userData'), 'data');
+    const dataRoot = join(process.env.RATIFLOW_E2E_DATA_DIR || app.getPath('userData'), 'data');
     const exportsRoot = join(dataRoot, 'exports', 'memory');
     const index = join(exportsRoot, exportId, '_index.json');
     const resolvedIndex = resolve(index);
@@ -444,9 +489,9 @@ function registerIpc(): void {
 function buildMenu(): void {
   const template: Array<Electron.MenuItemConstructorOptions> = [
     {
-      label: 'Ratiflow',
+      label: PRODUCT_NAME,
       submenu: [
-        { label: '关于 Ratiflow', click: () => void shell.openExternal('https://sixgates.local') },
+        { label: `关于 ${PRODUCT_NAME}`, click: showProductAboutDialog },
         { type: 'separator' },
         { role: 'quit', label: '退出' },
       ],
@@ -480,13 +525,13 @@ function buildMenu(): void {
 
 // D5 多实例防线：双开会各自拉起 core 进程打开同一 SQLite，
 // 迁移窗口期的并发 ALTER 会 duplicate column 拒启——单实例锁 fail-closed。
-// E2E 实例使用独立 SIXGATES_E2E_DATA_DIR（不共享库），豁免单实例锁，
+// E2E 实例使用独立 RATIFLOW_E2E_DATA_DIR（不共享库），豁免单实例锁，
 // 否则与用户在用的桌面实例互斥，自动化无法启动。
-const isE2eInstance = Boolean(process.env.SIXGATES_E2E_DATA_DIR);
+const isE2eInstance = Boolean(process.env.RATIFLOW_E2E_DATA_DIR);
 if (isE2eInstance) {
   // localStorage（sg:lastRoute 等）也在 userData 下：不隔离会把在用实例的
   // 路由状态泄漏进 e2e（启动直接落在设置页，A0 首断言失败）。
-  app.setPath('userData', process.env.SIXGATES_E2E_DATA_DIR as string);
+  app.setPath('userData', process.env.RATIFLOW_E2E_DATA_DIR as string);
 }
 if (!isE2eInstance && !app.requestSingleInstanceLock()) {
   app.quit();
@@ -504,9 +549,10 @@ if (!isE2eInstance && !app.requestSingleInstanceLock()) {
 
 function bootstrap(): void {
   app.whenReady().then(async () => {
+  applyDevelopmentAppIcon();
   buildMenu();
   // E2E 隔离：显式数据目录覆盖（发布构建不设此变量，不影响生产）。
-  const userData = process.env.SIXGATES_E2E_DATA_DIR || app.getPath('userData');
+  const userData = process.env.RATIFLOW_E2E_DATA_DIR || app.getPath('userData');
   const logPath = join(userData, 'logs', 'core.log');
   mkdirSync(join(userData, 'logs'), { recursive: true });
   try {

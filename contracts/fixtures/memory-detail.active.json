@@ -13,7 +13,7 @@
   "title": "本机数据权威优先",
   "summary": "SQLite 与 app data objects 为本机权威，跨机同步后置。",
   "bodyState": "available",
-  "body": "## 决策\n\nSixGates 的项目记忆以本机 SQLite 元数据加 content-addressed object 为权威；FTS 仅为可重建投影。跨机共享记忆待 ADR-031 投影化完成后另立决策。\n\n依据：ADR-032 备选方案 C。",
+  "body": "## 决策\n\nRatiflow 的项目记忆以本机 SQLite 元数据加 content-addressed object 为权威；FTS 仅为可重建投影。跨机共享记忆待 ADR-031 投影化完成后另立决策。\n\n依据：ADR-032 备选方案 C。",
   "contentSha256": "sha256:3f7a91c4d2e8b6051a2c4d8e9f0b7a3c5d6e1f2a4b8c0d9e7f3a5b1c2d4e6f8a",
   "tags": ["architecture", "storage"],
   "sources": [

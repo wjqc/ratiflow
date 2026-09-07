@@ -1,7 +1,7 @@
 //! 文件事件仓 + 对象域（ADR-031 C1/C2）：
-//! - 事件：`.sixgates/events/<workitemId>/<ULID>.json`，一事件一文件，
+//! - 事件：`.ratiflow/events/<workitemId>/<ULID>.json`，一事件一文件，
 //!   临时文件 + rename 原子落盘；eventId 幂等（同内容重试安全，异内容报冲突）；
-//! - 对象：`.sixgates/objects/<sha256 前 2 位>/<sha256>`，content-addressed、只增不改；
+//! - 对象：`.ratiflow/objects/<sha256 前 2 位>/<sha256>`，content-addressed、只增不改；
 //! - 装载即校验：文件名=eventId，交由 [`crate::dag::DagView`] 做 fail-closed 完整性检查。
 //!
 //! 提交原子性（C1 r3：事件与对象引用须同 commit 可达）由调用方的 git 流程保证；
@@ -16,7 +16,7 @@ pub struct EventStore {
 }
 
 impl EventStore {
-    /// `root` 为仓库内工件域根（通常 `<repo>/.sixgates`）。
+    /// `root` 为仓库内工件域根（通常 `<repo>/.ratiflow`）。
     pub fn open(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }

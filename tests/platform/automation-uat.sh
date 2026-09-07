@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 自动化调度 UAT（EvoFlow 方案 M6-09）：重启收敛 / 重复触发去重 / grant 闸。
 # 时区/DST/休眠恢复/长任务/撤销项需真实桌面环境人工执行（见实施状态 v3.4 诚实缺口）。
-# 前置：cargo build --release -p sixgates-core；jq 不依赖（纯 grep 断言）。
+# 前置：cargo build --release -p ratiflow-core；jq 不依赖（纯 grep 断言）。
 set -euo pipefail
-CORE=${CORE_BIN:-"$(dirname "$0")/../../target/release/sixgates-core"}
+CORE=${CORE_BIN:-"$(dirname "$0")/../../target/release/ratiflow-core"}
 DATA=$(mktemp -d /tmp/sg-auto-uat-XXXX)
-export SIXGATES_AUTOMATIONS=1
+export RATIFLOW_AUTOMATIONS=1
 cleanup() { [ -n "${CORE_PID:-}" ] && kill "$CORE_PID" 2>/dev/null || true; rm -rf "$DATA"; }
 trap cleanup EXIT
 

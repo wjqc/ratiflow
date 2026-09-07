@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sixgates.local/schemas/tool-definition.json",
-  "title": "SixGates ToolDefinition",
+  "$id": "https://ratiflow.local/schemas/tool-definition.json",
+  "title": "Ratiflow ToolDefinition",
   "description": "工具注册声明（手册 §11.2）：Schema、风险、权限、数据等级、超时与审批要求。",
   "type": "object",
   "required": ["name", "description", "inputSchema", "risk", "dataLevel", "timeoutSec", "maxResultBytes", "requiresApproval"],

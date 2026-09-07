@@ -1,4 +1,4 @@
-//! sixgates-core app-server：JSON-RPC 2.0 over stdio（tokio 运行时，ADR-028）。
+//! ratiflow-core app-server：JSON-RPC 2.0 over stdio（tokio 运行时，ADR-028）。
 //! stdout 只输出协议消息（单写者任务）；stderr 输出结构化日志（main 轮转写文件）。
 //! 子命令：app-server（默认）| migrate-v2 --from <dir> --to <dir>
 
@@ -59,7 +59,7 @@ fn main() {
     }
 
     let data_dir = flag_value(&args, "--data-dir")
-        .unwrap_or_else(|| std::env::var("SIXGATES_DATA_DIR").unwrap_or_else(|_| "./data".into()));
+        .unwrap_or_else(|| std::env::var("RATIFLOW_DATA_DIR").unwrap_or_else(|_| "./data".into()));
     let store = match Store::open(std::path::Path::new(&data_dir), env!("CARGO_PKG_VERSION")) {
         Ok(s) => s,
         Err(e) => {
@@ -171,7 +171,7 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
         }
     }
     // M6-04：自动化孤儿触发收敛（重复启动不重复执行——receipt 已去重，只标终态）。
-    if std::env::var("SIXGATES_AUTOMATIONS").ok().as_deref() == Some("1") {
+    if std::env::var("RATIFLOW_AUTOMATIONS").ok().as_deref() == Some("1") {
         match sg_workflow::automation::reconcile_orphans(&store) {
             Ok(n) if n > 0 => {
                 eprintln!("{{\"level\":\"info\",\"msg\":\"automation orphan reconcile: {n}\"}}");
@@ -303,8 +303,8 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
         });
     }
 
-    // M6-04：自动化调度 timer（SIXGATES_AUTOMATIONS=1；5s tick）。
-    if std::env::var("SIXGATES_AUTOMATIONS").ok().as_deref() == Some("1") {
+    // M6-04：自动化调度 timer（RATIFLOW_AUTOMATIONS=1；5s tick）。
+    if std::env::var("RATIFLOW_AUTOMATIONS").ok().as_deref() == Some("1") {
         let app_timer = app.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(5));

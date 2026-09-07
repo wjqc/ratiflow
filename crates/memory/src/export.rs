@@ -338,7 +338,7 @@ pub fn export(
     )?;
     write_fsync(
         &tmp_dir.join("_README.txt"),
-        "本目录为项目记忆的派生 Markdown 导出，不是权威数据。\n外部修改不会回写 SixGates；如需更新，请通过 S12 页面重新导入或编辑。\n清除（purge）后的条目不会出现在导出中。\n",
+        "本目录为项目记忆的派生 Markdown 导出，不是权威数据。\n外部修改不会回写 Ratiflow；如需更新，请通过 S12 页面重新导入或编辑。\n清除（purge）后的条目不会出现在导出中。\n",
     )?;
     std::fs::rename(&tmp_dir, &final_dir)?;
 

@@ -1,5 +1,5 @@
 // 设置中心路由定义：SettingsRouteId 联合类型 + 分组导航元数据。
-// 依 SixGates_设置中心功能与页面设计_v1.0.md §3 信息架构；禁止任意字符串分支。
+// 依 Ratiflow_设置中心功能与页面设计_v1.0.md §3 信息架构；禁止任意字符串分支。
 import type { ComponentType } from 'react';
 import {
   IconBook,

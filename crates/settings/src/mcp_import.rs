@@ -14,16 +14,16 @@
 //! 额外放行 file:// 本地仓库路径——单机桌面形态下导入本机仓库是正当场景，且
 //! e2e/CI 需要无网络依赖的真实远端。git@/ssh:// 仍拒绝（WP-4b 立项）。
 //!
-//! Flag：SIXGATES_MCP_GIT_IMPORT（默认 0）。
+//! Flag：RATIFLOW_MCP_GIT_IMPORT（默认 0）。
 
 use serde_json::{json, Value};
 use sg_store::{ids, timefmt, Error, Store};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const FLAG: &str = "SIXGATES_MCP_GIT_IMPORT";
+const FLAG: &str = "RATIFLOW_MCP_GIT_IMPORT";
 const IMPORT_DIR: &str = "mcp-imports";
-const MANIFEST_FILE: &str = "sixgates-mcp.json";
+const MANIFEST_FILE: &str = "ratiflow-mcp.json";
 /// 后置体积上限（200MB，处于 512MiB fetch 配额内的诚实边界）。
 const MAX_CHECKOUT_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
@@ -36,7 +36,7 @@ pub fn enabled() -> bool {
 }
 
 fn flag_off() -> Error {
-    Error::Message("feature_disabled: SIXGATES_MCP_GIT_IMPORT 未开启".into())
+    Error::Message("feature_disabled: RATIFLOW_MCP_GIT_IMPORT 未开启".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ fn cleanup_import_dir(data_dir: &Path, import_id: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Manifest（仓库根 sixgates-mcp.json，canonical JSON，fail-closed）
+// Manifest（仓库根 ratiflow-mcp.json，canonical JSON，fail-closed）
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]

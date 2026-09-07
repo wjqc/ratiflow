@@ -1,5 +1,5 @@
 //! 放行决策 → 事件镜像（ADR-031 C2 写路径）：
-//! SQLite 放行成功后，把 ReleaseDecided 事件写入项目仓库的 `.sixgates/` 事件域。
+//! SQLite 放行成功后，把 ReleaseDecided 事件写入项目仓库的 `.ratiflow/` 事件域。
 //!
 //! 模式约定（C5 / AC-1）：
 //! - 工作项无 `local_root`（纯本地无仓库）→ 返回 `Ok(None)` 跳过，行为与现状等价；
@@ -63,7 +63,7 @@ pub fn mirror_release_decided(
         "approved" => Decision::Approved,
         _ => Decision::Rejected,
     };
-    let es = EventStore::open(std::path::Path::new(&local_root).join(".sixgates"));
+    let es = EventStore::open(std::path::Path::new(&local_root).join(".ratiflow"));
     let head = head_event_id(&es, workitem_id)?;
     let env = Envelope::new(
         workitem_id,
@@ -190,7 +190,7 @@ mod tests {
                 .unwrap()
                 .expect("第二次决定");
         assert_ne!(e1, e2);
-        let es = EventStore::open(root.path.join(".sixgates"));
+        let es = EventStore::open(root.path.join(".ratiflow"));
         let view = load_dag(&es, &wi).unwrap();
         assert_eq!(view.causal_order().len(), 2, "两次决定构成链");
         let facts = sg_eventlog::reducer::fact_projection(&view);
@@ -214,7 +214,7 @@ mod tests {
         let bad = format!(
             "{{\"event_id\":\"ZZZZZZZZZZZZZZZZZZZZZZZZZZ\",\"workitem_id\":\"{wi}\",\"attempt_id\":\"atX\",\"kind\":\"attempt_started\",\"schema_version\":1,\"parent_head\":\"GHOST\",\"idempotency_key\":\"k\",\"created_at\":\"t\",\"producer\":\"t\",\"payload\":{{\"type\":\"attempt_started\",\"gate\":\"requirements\"}}}}"
         );
-        let dir = root.path.join(".sixgates/events").join(&wi);
+        let dir = root.path.join(".ratiflow/events").join(&wi);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ZZZZZZZZZZZZZZZZZZZZZZZZZZ.json"), bad).unwrap();
         let r = mirror_release_decided(&store, &wi, "requirements", "at1", "d", "approved", "a@x");

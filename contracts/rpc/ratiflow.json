@@ -2289,6 +2289,53 @@
       "result": "value"
     },
     {
+      "name": "gate.requestManualConfirmation",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "element",
+          "type": "object",
+          "required": true
+        },
+        {
+          "name": "requestedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.manualConfirmations",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "stage.attempts",
       "params": [
         {

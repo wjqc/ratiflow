@@ -289,7 +289,7 @@ export function Workbench({
   // F02 事件驱动刷新：sg:event 推送触发对账拉取；30s 轮询仅作断线降级。
   // M2：流式 delta 是易失高频事件，进 streamBuffer 增量渲染，不触发全量刷新。
   useEffect(() => {
-    const off = window.sixgates.onEvent((event) => {
+    const off = window.ratiflow.onEvent((event) => {
       if (isDeltaEvent(event)) {
         streamBuffer.ingest(event);
         return;
@@ -1361,7 +1361,7 @@ function Composer({
   // 附件：原生文件对话框 → attachment.import（对象存储 + 附件记录）。
   const importAttachment = async () => {
     setAddMenuOpen(false);
-    const file = await window.sixgates.selectFile();
+    const file = await window.ratiflow.selectFile();
     if (!file) return;
     try {
       await rpc('attachment.import', {
@@ -1640,7 +1640,7 @@ function DeliverableChip({
   }, [reload, onChanged]);
 
   const importFile = async () => {
-    const picked = await window.sixgates.selectFile();
+    const picked = await window.ratiflow.selectFile();
     if (!picked) return;
     setBusy(true);
     setError('');
@@ -2019,7 +2019,7 @@ function CockpitCard({ workItemId }: { workItemId: string }) {
 }
 
 /// M2-09（ADR-036/037 只读骨架）：结构化计划卡。
-/// SIXGATES_PLAN_DAG 关闭时 RPC 返回 feature_disabled → 静默不渲染（零行为变化）。
+/// RATIFLOW_PLAN_DAG 关闭时 RPC 返回 feature_disabled → 静默不渲染（零行为变化）。
 function PlanCard({ workItemId }: { workItemId: string }) {
   const [data, setData] = useState<{
     latest?: {
@@ -2064,7 +2064,7 @@ function PlanCard({ workItemId }: { workItemId: string }) {
 }
 
 /// M1-09（ADR-036 只读骨架）：模板实例关卡条。
-/// Flag（SIXGATES_WORKFLOW_TEMPLATE_V2）关闭时 RPC 返回 feature_disabled → 静默不渲染，
+/// Flag（RATIFLOW_WORKFLOW_TEMPLATE_V2）关闭时 RPC 返回 feature_disabled → 静默不渲染，
 /// 默认六关界面行为不变；开启后按实例定义展示关卡标题与状态（自定义模板可见 3/2 关）。
 function InstanceGatesCard({ workItemId }: { workItemId: string }) {
   const [data, setData] = useState<{

@@ -164,7 +164,7 @@ pub fn remove_source(store: &Store, id: &str) -> Result<(), Error> {
     })
 }
 
-/// 忽略规则：.gitignore 简化匹配（目录名/后缀/精确路径）+ .sixgatesignore 逐行前缀匹配。
+/// 忽略规则：.gitignore 简化匹配（目录名/后缀/精确路径）+ .ratiflowignore 逐行前缀匹配。
 fn load_ignores(root: &Path) -> Vec<String> {
     let mut patterns = vec![
         ".git".to_string(),
@@ -172,7 +172,7 @@ fn load_ignores(root: &Path) -> Vec<String> {
         "target".to_string(),
         "dist".to_string(),
     ];
-    for file in [".sixgatesignore", ".gitignore"] {
+    for file in [".ratiflowignore", ".gitignore"] {
         if let Ok(body) = std::fs::read_to_string(root.join(file)) {
             for line in body.lines() {
                 let trimmed = line.trim();
@@ -532,7 +532,7 @@ mod tests {
             "ignored",
         )
         .unwrap();
-        std::fs::write(repo.join(".sixgatesignore"), "private/\n").unwrap();
+        std::fs::write(repo.join(".ratiflowignore"), "private/\n").unwrap();
         std::fs::write(repo.join("private"), b"secret area").ok(); // 文件非目录，命中前缀忽略
 
         let source =

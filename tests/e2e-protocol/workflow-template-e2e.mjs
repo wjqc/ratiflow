@@ -2,14 +2,14 @@
 // 数据化工作流模板协议级 E2E（EvoFlow 方案 M1-10 / ADR-036）：
 // 默认六关 parity、Flag 门控、3 关模板创建/激活/冻结实例、模板升级不改既有实例（EV-002）、
 // 非法模板拒绝激活（EV-004）、未开工实例迁移与运行事实拒绝迁移、护照按实例序列签发。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -71,7 +71,7 @@ async function main() {
   // ============ 场景一：Flag 显式关闭（默认开，=0 为 kill switch）============
   {
     const dataDir = mkdtempSync(join(tmpdir(), 'sg-wftpl-off-'));
-    const c = new CoreClient(dataDir, { SIXGATES_WORKFLOW_TEMPLATE_V2: '0' });
+    const c = new CoreClient(dataDir, { RATIFLOW_WORKFLOW_TEMPLATE_V2: '0' });
     try {
       await c.call('project.create', { gitlabInstance: 'local', namespace: 'e2e', project: 'flagoff', name: 'FlagOff' });
       const wi = await c.call('workitem.create', { projectId: (await c.call('project.list', {})).items[0].id, title: '默认六关' });
@@ -94,7 +94,7 @@ async function main() {
   // ============ 场景二：Flag 开启（完整生命周期）============
   {
     const dataDir = mkdtempSync(join(tmpdir(), 'sg-wftpl-on-'));
-    const c = new CoreClient(dataDir, { SIXGATES_WORKFLOW_TEMPLATE_V2: '1' });
+    const c = new CoreClient(dataDir, { RATIFLOW_WORKFLOW_TEMPLATE_V2: '1' });
     try {
       await c.call('project.create', { gitlabInstance: 'local', namespace: 'e2e', project: 'tpl', name: 'Tpl' });
       const pj = (await c.call('project.list', {})).items[0].id;

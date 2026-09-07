@@ -21,7 +21,7 @@ members = [
     "crates/sandbox",
     "crates/integrations",
     "crates/timeline",
-    "crates/sixgates-core",
+    "crates/ratiflow-core",
 ]
 
 [workspace.package]

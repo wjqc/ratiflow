@@ -111,7 +111,7 @@ fn migration_empty_db_reaches_v23() {
 fn migration_populated_v22_to_v23() {
     let t = tempdir("sg-mem-mig22");
     {
-        let conn = rusqlite::Connection::open(t.path.join("sixgates.db")).unwrap();
+        let conn = rusqlite::Connection::open(t.path.join("ratiflow.db")).unwrap();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,

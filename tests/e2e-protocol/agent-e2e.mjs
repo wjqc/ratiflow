@@ -1,12 +1,12 @@
 // M0-② 协议级 Agent 生命周期 E2E：agent.start 唯一入口、非阻塞、事件推送、终态与幂等。
-// 前置：cargo build --release -p sixgates-core；无模型环境变量（FakeModel 脚本耗尽 → model_unavailable）。
+// 前置：cargo build --release -p ratiflow-core；无模型环境变量（FakeModel 脚本耗尽 → model_unavailable）。
 import { spawn, execSync } from 'node:child_process';
 import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 const dataDir = mkdtempSync(join(tmpdir(), 'sg-agent-e2e-'));
 
 class CoreClient {
@@ -152,7 +152,7 @@ try {
   writeFileSync(join(projDir, 'NOTES.md'), 'hello-m03');
   // P0-4：可写执行必须在受管 worktree 内——夹具项目需为 git 仓库（否则 run_command 被正确拒绝）。
   execSync(`git -C "${projDir}" init -b main`, { stdio: 'ignore' });
-  execSync(`git -C "${projDir}" config user.email e2e@sixgates.local`, { stdio: 'ignore' });
+  execSync(`git -C "${projDir}" config user.email e2e@ratiflow.local`, { stdio: 'ignore' });
   execSync(`git -C "${projDir}" config user.name e2e`, { stdio: 'ignore' });
   writeFileSync(join(projDir, 'AGENTS.md'), '项目约定：注释使用中文（M2-PROJECT-MARK）。');
   execSync(`git -C "${projDir}" add .`, { stdio: 'ignore' });
@@ -173,11 +173,11 @@ try {
   writeFileSync(scriptPath, JSON.stringify(script));
   const dataDir2 = mkdtempSync(join(tmpdir(), 'sg-agent-e2e2-'));
   const toolClient = new CoreClient(CORE, dataDir2, {
-    SIXGATES_EXEC_MODE: 'safe_restricted',     // 确定性执行模式（无 Docker 依赖）
-    SIXGATES_FAKE_MODEL_SCRIPT: scriptPath,    // 脚本模型（未配置真实模型时生效）
+    RATIFLOW_EXEC_MODE: 'safe_restricted',     // 确定性执行模式（无 Docker 依赖）
+    RATIFLOW_FAKE_MODEL_SCRIPT: scriptPath,    // 脚本模型（未配置真实模型时生效）
   });
   // F07：全局指令层（数据目录根）。
-  writeFileSync(join(dataDir2, 'SixGates.md'), '全局约定：交付遵循 M2-GLOBAL-MARK 规范。');
+  writeFileSync(join(dataDir2, 'Ratiflow.md'), '全局约定：交付遵循 M2-GLOBAL-MARK 规范。');
   try {
     const project = await toolClient.rpc('project.create', {
       gitlabInstance: 'x', namespace: 'n', project: 'p', name: '工具链', localRoot: projDir,
@@ -196,7 +196,7 @@ try {
     // F07：context.instructions 分层预览（全局→项目根）。
     const instrPreview = await toolClient.rpc('context.instructions', { projectId: project.id });
     const instrLabels = (instrPreview.layers ?? []).map((l) => l.label);
-    assert(instrLabels.includes('global:SixGates.md'), `context.instructions 含全局层（${instrLabels}）`);
+    assert(instrLabels.includes('global:Ratiflow.md'), `context.instructions 含全局层（${instrLabels}）`);
     assert(instrLabels.includes('project:AGENTS.md'), `context.instructions 含项目层（${instrLabels}）`);
     assert((instrPreview.promptBytes?.system ?? 0) > 0, 'context.instructions 带装配字节占比');
 
@@ -337,7 +337,7 @@ try {
     const script4Path = join(tmpdir(), `sg-agent-e2e4-script-${Date.now()}.json`);
     writeFileSync(script4Path, JSON.stringify(script4));
     const modeClient = new CoreClient(CORE, dataDir4, {
-      SIXGATES_FAKE_MODEL_SCRIPT: script4Path, // 无 EXEC_MODE：默认来源=探测
+      RATIFLOW_FAKE_MODEL_SCRIPT: script4Path, // 无 EXEC_MODE：默认来源=探测
     });
     try {
       const project4 = await modeClient.rpc('project.create', {

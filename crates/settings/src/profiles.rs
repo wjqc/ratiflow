@@ -759,7 +759,7 @@ pub fn ssh_mark_tested(store: &Store, id: &str, status: &str) -> SettingsResult<
 pub fn import_env_profiles(store: &Store) -> SettingsResult<Vec<String>> {
     let mut imported = Vec::new();
     let now = timefmt::now();
-    let env_model = std::env::var("SIXGATES_MODEL_BASE_URL")
+    let env_model = std::env::var("RATIFLOW_MODEL_BASE_URL")
         .ok()
         .filter(|v| !v.is_empty());
     if let Some(base) = env_model {
@@ -778,7 +778,7 @@ pub fn import_env_profiles(store: &Store) -> SettingsResult<Vec<String>> {
                 conn.execute(
                     "INSERT INTO model_profiles(id, name, provider_kind, base_url, default_model, managed_source, status, revision, created_at, updated_at)
                      VALUES (?1,'环境变量模型','openai_compatible',?2,?3,'env','managed_read_only',1,?4,?4)",
-                    rusqlite::params![id, base, std::env::var("SIXGATES_MODEL_NAME").unwrap_or_default(), now],
+                    rusqlite::params![id, base, std::env::var("RATIFLOW_MODEL_NAME").unwrap_or_default(), now],
                 )?;
             }
             conn.execute(
@@ -789,7 +789,7 @@ pub fn import_env_profiles(store: &Store) -> SettingsResult<Vec<String>> {
         }).map_err(store_err)?;
         imported.push(id.into());
     }
-    let env_gitlab = std::env::var("SIXGATES_GITLAB_URL")
+    let env_gitlab = std::env::var("RATIFLOW_GITLAB_URL")
         .ok()
         .filter(|v| !v.is_empty());
     if let Some(base) = env_gitlab {

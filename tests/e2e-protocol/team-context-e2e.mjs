@@ -2,14 +2,14 @@
 // Agent Team / Skill 生命周期 / Context Policy / Middleware 协议 E2E
 // （EvoFlow 方案 M4-10 / ADR-038）：版本冻结、role 选路 fallback 证据、
 // skill revoke 离开注入面、middleware security 顺序校验、EV-014 客户端不可扩大工具。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -70,7 +70,7 @@ const DEFAULT_STEPS = [
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-team-e2e-'));
   // EV-014 需要 context policy flag 开启。
-  const c = new CoreClient(dataDir, { SIXGATES_CONTEXT_POLICY_V2: '1' });
+  const c = new CoreClient(dataDir, { RATIFLOW_CONTEXT_POLICY_V2: '1' });
   try {
     // --- 1. Skill 不可变版本生命周期（M4-04）---
     const skill = await c.call('skill.create', { name: `deploy-check-${Date.now()}`, description: '部署检查清单', body: 'v1 正文', source: 'manual' });
@@ -162,7 +162,7 @@ async function main() {
     const repoDir = join(tmpdir(), `sg-team-repo-${Date.now()}`);
     mkdirSync(repoDir, { recursive: true });
     git(repoDir, 'init', '-b', 'main');
-    git(repoDir, 'config', 'user.email', 'e2e@sixgates.local');
+    git(repoDir, 'config', 'user.email', 'e2e@ratiflow.local');
     git(repoDir, 'config', 'user.name', 'e2e');
     writeFileSync(join(repoDir, 'README.md'), 'hello\n');
     git(repoDir, 'add', '.');

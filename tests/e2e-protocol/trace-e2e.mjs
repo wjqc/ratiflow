@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -162,7 +162,7 @@ async function main() {
     client.kill();
 
     // 8. legacy 回填：关新写开关建任务 → 重启默认开关 → synthetic 修订（unverified）。
-    client = new CoreClient(dataDir, { SIXGATES_TRACE_WRITES: '0' });
+    client = new CoreClient(dataDir, { RATIFLOW_TRACE_WRITES: '0' });
     await client.hello_();
     const legacyWi = await client.call('workitem.create', {
       projectId: project.id, title: '历史任务', description: '旧描述',

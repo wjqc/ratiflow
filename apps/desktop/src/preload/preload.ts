@@ -59,6 +59,6 @@ const api = {
   },
 };
 
-export type SixGatesBridge = typeof api;
+export type RatiflowBridge = typeof api;
 
-contextBridge.exposeInMainWorld('sixgates', api);
+contextBridge.exposeInMainWorld('ratiflow', api);

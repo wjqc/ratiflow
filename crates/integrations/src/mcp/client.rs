@@ -219,7 +219,7 @@ impl<T: McpTransport> McpClient<T> {
             json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "sixgates-core", "version": env!("CARGO_PKG_VERSION")},
+                "clientInfo": {"name": "ratiflow-core", "version": env!("CARGO_PKG_VERSION")},
             }),
             Duration::from_secs(30),
         )?;

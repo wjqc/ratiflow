@@ -36,7 +36,7 @@ describe('ApprovalsPage WP-6 三要素', () => {
       if (method === 'approval.list') return ok({ items: [TOOL_APPROVAL] });
       return ok({});
     });
-    (window as unknown as { sixgates: unknown }).sixgates = {
+    (window as unknown as { ratiflow: unknown }).ratiflow = {
       rpc: (method: string, params: Record<string, unknown>) => rpcMock(method, params),
       hello: () => Promise.resolve({ ok: true }),
       onEvent: () => () => {},
@@ -44,7 +44,7 @@ describe('ApprovalsPage WP-6 三要素', () => {
   });
 
   afterEach(() => {
-    delete (window as unknown as { sixgates?: unknown }).sixgates;
+    delete (window as unknown as { ratiflow?: unknown }).ratiflow;
   });
 
   it('工具提案展示影响面 completeness（服务端权威）', async () => {

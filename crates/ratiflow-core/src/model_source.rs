@@ -51,10 +51,10 @@ impl ProfileModel {
             fallback: Arc::from(fallback),
             store,
             credentials,
-            env_key: std::env::var("SIXGATES_MODEL_API_KEY")
+            env_key: std::env::var("RATIFLOW_MODEL_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty()),
-            fallback_enabled: std::env::var_os("SIXGATES_FAKE_MODEL_SCRIPT").is_some(),
+            fallback_enabled: std::env::var_os("RATIFLOW_FAKE_MODEL_SCRIPT").is_some(),
         }
     }
 

@@ -66,7 +66,7 @@ const DEFS: Record<string, PendingDef> = {
       '每阶段预算上限与分步测试',
     ],
     awaiting: ['modelProfile.list/get/create/update/delete', 'modelProfile.testConnection', 'modelRoute.get/update'],
-    fallback: '当前经 SIXGATES_MODEL_* 环境变量启动装配；装配状态见「使用统计」。',
+    fallback: '当前经 RATIFLOW_MODEL_* 环境变量启动装配；装配状态见「使用统计」。',
   },
   tools: {
     title: '工具与审批',

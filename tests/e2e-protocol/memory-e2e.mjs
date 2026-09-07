@@ -2,14 +2,14 @@
 // 项目记忆协议级 E2E（ADR-032 / 实施方案 v1.0 §14.3，M1 手工闭环部分）：
 // 项目隔离、Secret fail-closed、幂等/CAS、不可变修订、上下文选择开关、
 // 归档/恢复、导入/导出、purge 两步墓碑、capture M4 显式未实施、审计无正文。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -72,7 +72,7 @@ async function main() {
     { content: candidate1, tokensIn: 30, tokensOut: 40 },
     { content: candidate2, tokensIn: 30, tokensOut: 40 },
   ]));
-  const c = new CoreClient(dataDir, { SIXGATES_FAKE_MODEL_SCRIPT: scriptPath });
+  const c = new CoreClient(dataDir, { RATIFLOW_FAKE_MODEL_SCRIPT: scriptPath });
   try {
     for (let i = 0; i < 50 && !c.hello; i++) await new Promise((r) => setTimeout(r, 100));
     assert(c.hello?.protocolVersion === '1', 'hello 握手');

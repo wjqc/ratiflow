@@ -259,7 +259,7 @@ impl OptionalRow for Result<String, rusqlite::Error> {
     }
 }
 
-/// 根目录检查（S10）：git、权限、技术栈、.sixgates、blockers。
+/// 根目录检查（S10）：git、权限、技术栈、.ratiflow、blockers。
 pub fn inspect_root(path: &str) -> Result<serde_json::Value, Error> {
     let root = std::path::Path::new(path);
     if !root.is_absolute() {
@@ -276,9 +276,9 @@ pub fn inspect_root(path: &str) -> Result<serde_json::Value, Error> {
     }
 
     let readable = std::fs::read_dir(&canonical).is_ok();
-    let writable = std::fs::write(canonical.join(".sixgates-probe"), b"1").is_ok();
+    let writable = std::fs::write(canonical.join(".ratiflow-probe"), b"1").is_ok();
     if writable {
-        let _ = std::fs::remove_file(canonical.join(".sixgates-probe"));
+        let _ = std::fs::remove_file(canonical.join(".ratiflow-probe"));
     }
     if !readable {
         blockers.push(serde_json::json!({"id": "not_readable", "severity": "blocking"}));
@@ -308,7 +308,7 @@ pub fn inspect_root(path: &str) -> Result<serde_json::Value, Error> {
         "readable": readable,
         "writable": writable,
         "stacks": stacks,
-        "hasSixgatesDir": canonical.join(".sixgates").exists(),
+        "hasRatiflowDir": canonical.join(".ratiflow").exists(),
         "blockers": blockers,
     }))
 }

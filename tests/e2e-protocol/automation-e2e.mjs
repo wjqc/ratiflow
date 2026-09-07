@@ -3,14 +3,14 @@
 // receipt 幂等（同 scheduled_for 不重复执行）；misfire skip；grant 闸（无/无效 grant
 // → blocked_no_grant + 通知，零副作用）；runNow 手动触发；goal.autoReleaseCheck
 // 七条件谓词（EV-021）；skill registry pin SHA 导入（draft，不执行任何代码，EV-022）。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -66,8 +66,8 @@ function git(dir, ...args) {
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-auto-e2e-'));
   const c = new CoreClient(dataDir, {
-    SIXGATES_AUTOMATIONS: '1',
-    SIXGATES_SKILL_REGISTRY_LOCAL: '1',
+    RATIFLOW_AUTOMATIONS: '1',
+    RATIFLOW_SKILL_REGISTRY_LOCAL: '1',
   });
   try {
     const proj = await c.call('project.create', { gitlabInstance: 'g', namespace: 'n', project: 'auto', name: 'Auto' });
@@ -158,7 +158,7 @@ async function main() {
     const sha = git(repoDir, 'rev-parse', 'HEAD');
     const bare = join(tmpdir(), `sg-reg-origin-${Date.now()}.git`);
     spawnSync('git', ['clone', '--quiet', '--bare', repoDir, bare]);
-    // 本地远端需 opt-in（client env 已带 SIXGATES_SKILL_REGISTRY_LOCAL=1）。
+    // 本地远端需 opt-in（client env 已带 RATIFLOW_SKILL_REGISTRY_LOCAL=1）。
     const imported = await c.call('skill.importFromRegistry', {
       repoUrl: bare, pinSha: sha,
     });

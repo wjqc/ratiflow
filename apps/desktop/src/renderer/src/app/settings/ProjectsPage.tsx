@@ -82,7 +82,7 @@ export function ProjectsPage() {
     setError(null);
     setNotice(null);
     try {
-      const localRoot = await window.sixgates.selectDirectory();
+      const localRoot = await window.ratiflow.selectDirectory();
       if (!localRoot) return;
       const name = localRoot.split('/').filter(Boolean).at(-1) || '本地工作区';
       const project = await rpc<ProjectRow>('project.create', {

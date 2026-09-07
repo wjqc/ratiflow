@@ -5,7 +5,7 @@
 // → planTask.transition(succeeded) 仅凭绑定 Run 终态证明放行。
 // 反向：无绑定 Run 自报 succeeded 被拒（task_execution_proof_required）；
 // 非法 autonomyGrantId 在 agent.start 即拒绝。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 import { createHash } from 'node:crypto';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -93,18 +93,18 @@ async function main() {
     { content: JSON.stringify({ action: 'final', summary: '验证完成' }), tokensIn: 2, tokensOut: 1 },
   ]));
   const c = new CoreClient(dataDir, {
-    SIXGATES_PLAN_DAG: '1',
-    SIXGATES_FAKE_MODEL_SCRIPT: fakeScript,
+    RATIFLOW_PLAN_DAG: '1',
+    RATIFLOW_FAKE_MODEL_SCRIPT: fakeScript,
     // 本机 Docker daemon 不可用时执行器回落需要确定性：safe_restricted
     // （argv 只读白名单）足够承接 read_file 的真实执行。
-    SIXGATES_EXEC_MODE: 'safe_restricted',
+    RATIFLOW_EXEC_MODE: 'safe_restricted',
   });
   try {
     // 主仓库（worktree/工作区 prepare 依赖）。
     const repoDir = join(tmpdir(), `sg-plan-exec-repo-${Date.now()}`);
     mkdirSync(repoDir, { recursive: true });
     git(repoDir, 'init', '-b', 'main');
-    git(repoDir, 'config', 'user.email', 'e2e@sixgates.local');
+    git(repoDir, 'config', 'user.email', 'e2e@ratiflow.local');
     git(repoDir, 'config', 'user.name', 'e2e');
     writeFileSync(join(repoDir, 'README.md'), 'hello\n');
     git(repoDir, 'add', '.');

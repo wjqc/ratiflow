@@ -1,5 +1,5 @@
 // Electron E2E 公共设施：fake GitLab 服务器 + 应用启动/驱动/清理。
-// 场景定义见 docs/current/SixGates_跨端契约与验收手册_v1.0.md §14 A/D/E/F。
+// 场景定义见 docs/current/Ratiflow_跨端契约与验收手册_v1.0.md §14 A/D/E/F。
 import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
@@ -62,7 +62,7 @@ export async function launchApp(options: { env?: Record<string, string> } = {}):
     cwd: join(process.cwd()),
     env: {
       ...process.env,
-      SIXGATES_E2E_DATA_DIR: dataDir,
+      RATIFLOW_E2E_DATA_DIR: dataDir,
       ...options.env,
     },
   });
@@ -73,8 +73,8 @@ export async function launchApp(options: { env?: Record<string, string> } = {}):
   while (Date.now() < deadline) {
     try {
       await window.evaluate(() =>
-        (window as unknown as { sixgates: { rpc(m: string): Promise<unknown> } })
-          .sixgates.rpc('core.version'));
+        (window as unknown as { ratiflow: { rpc(m: string): Promise<unknown> } })
+          .ratiflow.rpc('core.version'));
       break;
     } catch {
       await new Promise((r) => setTimeout(r, 250));
@@ -83,8 +83,8 @@ export async function launchApp(options: { env?: Record<string, string> } = {}):
 
   const rpc = <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
     window.evaluate(([m, p]: [string, Record<string, unknown>]) =>
-      (window as unknown as { sixgates: { rpc(m: string, p: Record<string, unknown>): Promise<unknown> } })
-        .sixgates.rpc(m, p), [method, params] as [string, Record<string, unknown>]) as Promise<T>;
+      (window as unknown as { ratiflow: { rpc(m: string, p: Record<string, unknown>): Promise<unknown> } })
+        .ratiflow.rpc(m, p), [method, params] as [string, Record<string, unknown>]) as Promise<T>;
 
   const gotoSettings = async (section: string): Promise<void> => {
     await window.evaluate((s: string) => {
@@ -106,7 +106,7 @@ export async function launchApp(options: { env?: Record<string, string> } = {}):
 export async function findCorePid(dataDir: string): Promise<number[]> {
   const { execSync } = await import('node:child_process');
   try {
-    const out = execSync(`pgrep -f "sixgates-core.*${dataDir}"`).toString().trim();
+    const out = execSync(`pgrep -f "ratiflow-core.*${dataDir}"`).toString().trim();
     return out.split('\n').filter(Boolean).map(Number);
   } catch { return []; }
 }

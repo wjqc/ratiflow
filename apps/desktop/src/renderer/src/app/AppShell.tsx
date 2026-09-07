@@ -79,7 +79,7 @@ export default function AppShell() {
   useEffect(() => {
     (async () => {
       try {
-        const hello = await window.sixgates.hello();
+        const hello = await window.ratiflow.hello();
         if (hello && hello.ok === false) throw new Error(hello.error ?? 'core 未就绪');
         setCoreReady(true);
         const result = await rpc<{ items: Project[] }>('project.list');

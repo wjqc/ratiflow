@@ -104,7 +104,7 @@ impl GitLabClient for GitLabHttp {
         _target: &str,
         _title: &str,
     ) -> Result<GitLabMR, String> {
-        Err("gitlab_mr_create: 未配置真实实例（诊断页检查 SIXGATES_GITLAB_URL/TOKEN）".into())
+        Err("gitlab_mr_create: 未配置真实实例（诊断页检查 RATIFLOW_GITLAB_URL/TOKEN）".into())
     }
 
     fn get_mr(&self, project_id: &str, iid: &str) -> Result<GitLabMR, String> {

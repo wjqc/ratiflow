@@ -176,7 +176,7 @@ fn model_profile_managed_readonly_and_route_reference() {
     assert_eq!(blocked.code, "CONFLICT");
 
     // env 托管只读。
-    std::env::set_var("SIXGATES_MODEL_BASE_URL", "https://env.example.com/v1");
+    std::env::set_var("RATIFLOW_MODEL_BASE_URL", "https://env.example.com/v1");
     let imported = profiles::import_env_profiles(&s).unwrap();
     assert!(imported.iter().any(|id| id == "mp_env_model"));
     let managed = profiles::model_get(&s, "mp_env_model").unwrap();
@@ -195,7 +195,7 @@ fn model_profile_managed_readonly_and_route_reference() {
         profiles::model_get(&s, &updated.id).unwrap().models,
         vec!["m1"]
     );
-    std::env::remove_var("SIXGATES_MODEL_BASE_URL");
+    std::env::remove_var("RATIFLOW_MODEL_BASE_URL");
 }
 
 #[test]

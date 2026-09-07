@@ -1,4 +1,4 @@
-appId: local.sixgates.desktop
+appId: local.ratiflow.desktop
 productName: Ratiflow
 directories:
   output: release
@@ -6,8 +6,8 @@ directories:
 files:
   - dist/**
 extraResources:
-  - from: ../../target/release/sixgates-core
-    to: sixgates-core
+  - from: ../../target/release/ratiflow-core
+    to: ratiflow-core
 mac:
   category: public.app-category.developer-tools
   target: dir

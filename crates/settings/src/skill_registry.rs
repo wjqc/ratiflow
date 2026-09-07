@@ -24,7 +24,7 @@ fn is_allowed_remote(repo_url: &str) -> bool {
         return true;
     }
     // 显式 opt-in（气隙环境导入/测试夹具）；生产默认仍 HTTPS/SSH。
-    if std::env::var("SIXGATES_SKILL_REGISTRY_LOCAL")
+    if std::env::var("RATIFLOW_SKILL_REGISTRY_LOCAL")
         .ok()
         .as_deref()
         == Some("1")
@@ -91,7 +91,7 @@ pub fn import_from_git(
             String::from_utf8_lossy(&cloned.stderr)
         )));
     }
-    let _ = git_out(&tmp, &["config", "user.email", "registry@sixgates.local"]);
+    let _ = git_out(&tmp, &["config", "user.email", "registry@ratiflow.local"]);
     let checkout = std::process::Command::new("git")
         .arg("-C")
         .arg(&tmp)
@@ -258,7 +258,7 @@ mod tests {
     }
 
     fn bare_with_md() -> (String, String) {
-        std::env::set_var("SIXGATES_SKILL_REGISTRY_LOCAL", "1");
+        std::env::set_var("RATIFLOW_SKILL_REGISTRY_LOCAL", "1");
         let dir = std::env::temp_dir().join(format!(
             "sg-reg-remote-{}-{}",
             std::process::id(),

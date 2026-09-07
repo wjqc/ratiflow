@@ -83,7 +83,7 @@ export interface BackupRecord {
     objectsRootHash: string;
     rolloutsCount: number;
     rolloutsRootHash: string;
-    sixgatesVersion: string;
+    ratiflowVersion: string;
     createdAt: string;
   };
   created_at: string;
@@ -157,7 +157,7 @@ export interface InspectRootResult {
   readable: boolean;
   writable: boolean;
   stacks: string[];
-  hasSixgatesDir: boolean;
+  hasRatiflowDir: boolean;
   blockers: Array<{ id: string; severity: string; detail?: string }>;
 }
 

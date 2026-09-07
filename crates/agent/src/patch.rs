@@ -66,7 +66,7 @@ impl Default for PatchLimits {
 }
 
 /// 受保护路径（永不许补丁触碰；前缀匹配）。
-pub const PROTECTED_PREFIXES: [&str; 3] = [".git/", ".sixgates/", "sixgates.lock"];
+pub const PROTECTED_PREFIXES: [&str; 3] = [".git/", ".ratiflow/", "ratiflow.lock"];
 
 /// 解析 unified diff（容忍 `diff --git` 头；要求 ---/+++ 对与 @@ hunk）。
 pub fn parse_patch(text: &str) -> Result<Vec<FilePatch>, String> {

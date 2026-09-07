@@ -198,7 +198,7 @@ export function SkillsPage() {
   };
 
   const importFile = async () => {
-    const picked = await window.sixgates.selectFile();
+    const picked = await window.ratiflow.selectFile();
     if (!picked) return;
     setError(null);
     try {

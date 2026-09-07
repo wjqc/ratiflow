@@ -197,10 +197,10 @@ impl Gateway {
 
     /// 流式选路：能力快照显式 false（manual 禁用/探测否定）→ 非流式；
     /// unknown/未验证 → 尝试流式（打开期失败自动回退，见 call_turn）；
-    /// SIXGATES_MODEL_STREAM=0 全局回滚开关。带工具请求且 streamToolArguments
+    /// RATIFLOW_MODEL_STREAM=0 全局回滚开关。带工具请求且 streamToolArguments
     /// 显式 false → 非流式。
     pub fn wants_stream(&self, req: &CompletionRequest) -> bool {
-        if std::env::var("SIXGATES_MODEL_STREAM")
+        if std::env::var("RATIFLOW_MODEL_STREAM")
             .map(|v| v == "0")
             .unwrap_or(false)
         {

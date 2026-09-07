@@ -31,7 +31,7 @@ describe('PRD 自动起草', () => {
           return Promise.resolve({});
       }
     });
-    (window as unknown as { sixgates: unknown }).sixgates = {
+    (window as unknown as { ratiflow: unknown }).ratiflow = {
       rpc: (method: string, params: Record<string, unknown>) => rpcMock(method, params),
       hello: () => Promise.resolve({ ok: true }),
       selectFile: () => Promise.resolve(null),
@@ -44,7 +44,7 @@ describe('PRD 自动起草', () => {
   });
 
   afterEach(() => {
-    delete (window as unknown as { sixgates?: unknown }).sixgates;
+    delete (window as unknown as { ratiflow?: unknown }).ratiflow;
   });
 
   it('创建 PRD 工件、启动 Agent 并自动保存草稿', async () => {

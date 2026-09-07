@@ -1,4 +1,4 @@
-//! 分层指令文件（F07/M2）：全局（<dataDir>/SixGates.md）→ 项目根 → 项目 docs/。
+//! 分层指令文件（F07/M2）：全局（<dataDir>/Ratiflow.md）→ 项目根 → 项目 docs/。
 //! 越具体越靠后；单层/总字节上限截断；层内容命中高风险秘密整体拒绝（fail-closed）。
 use std::path::Path;
 
@@ -6,7 +6,7 @@ use serde_json::json;
 
 #[derive(Clone, Debug)]
 pub struct InstructionSettings {
-    /// 按序探测的文件名（默认 SixGates.md、AGENTS.md 兼容）。
+    /// 按序探测的文件名（默认 Ratiflow.md、AGENTS.md 兼容）。
     pub file_names: Vec<String>,
     pub max_total_bytes: usize,
     pub max_layer_bytes: usize,
@@ -15,7 +15,7 @@ pub struct InstructionSettings {
 impl Default for InstructionSettings {
     fn default() -> Self {
         Self {
-            file_names: vec!["SixGates.md".into(), "AGENTS.md".into()],
+            file_names: vec!["Ratiflow.md".into(), "AGENTS.md".into()],
             max_total_bytes: 32 * 1024,
             max_layer_bytes: 8 * 1024,
         }
@@ -132,7 +132,7 @@ mod tests {
     fn aggregates_layers_in_order_with_markers() {
         let data = tmpdir("a");
         let proj = tmpdir("b");
-        std::fs::write(data.join("SixGates.md"), "全局约定").unwrap();
+        std::fs::write(data.join("Ratiflow.md"), "全局约定").unwrap();
         std::fs::write(proj.join("AGENTS.md"), "项目约定").unwrap();
         std::fs::write(proj.join("docs").join("AGENTS.md"), "文档约定").unwrap();
         let (text, layers, warns) = aggregate(&data, Some(&proj), &InstructionSettings::default());
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "global:SixGates.md",
+                "global:Ratiflow.md",
                 "project:AGENTS.md",
                 "project:docs/AGENTS.md"
             ]
@@ -164,7 +164,7 @@ mod tests {
             format!("token glpat-{}end", "x".repeat(30)),
         )
         .unwrap();
-        std::fs::write(data.join("SixGates.md"), "A".repeat(20_000)).unwrap();
+        std::fs::write(data.join("Ratiflow.md"), "A".repeat(20_000)).unwrap();
         let (text, layers, warns) = aggregate(&data, Some(&proj), &InstructionSettings::default());
         assert!(!warns.is_empty(), "秘密层告警");
         assert!(text.contains("TRUNCATED"), "超限层截断标记");
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn settings_fallbacks() {
         let s = settings_from_json(&serde_json::json!({}));
-        assert_eq!(s.file_names, vec!["SixGates.md", "AGENTS.md"]);
+        assert_eq!(s.file_names, vec!["Ratiflow.md", "AGENTS.md"]);
         assert_eq!(s.max_total_bytes, 32 * 1024);
         let s2 = settings_from_json(&serde_json::json!({
             "instructionFileNames": ["TEAM.md"], "maxInstructionBytes": 8192

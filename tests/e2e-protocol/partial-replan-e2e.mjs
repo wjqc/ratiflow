@@ -3,14 +3,14 @@
 // 失败任务只使下游闭包重做；无关成功任务复用（reused_from_attempt_id 证明）；
 // unknown 不自动重跑、对账后才可安全重试；effect 升级 → 计划升级重批；
 // 免重批替换直接 approved；调度容量/串行档背压。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -80,9 +80,9 @@ async function main() {
     { content: JSON.stringify({ action: 'final', summary: 'done' }), tokensIn: 1, tokensOut: 1 },
   ]));
   const c = new CoreClient(dataDir, {
-    SIXGATES_PLAN_DAG: '1',
-    SIXGATES_FAKE_MODEL_SCRIPT: fakeScript,
-    SIXGATES_EXEC_MODE: 'safe_restricted',
+    RATIFLOW_PLAN_DAG: '1',
+    RATIFLOW_FAKE_MODEL_SCRIPT: fakeScript,
+    RATIFLOW_EXEC_MODE: 'safe_restricted',
   });
 
   // 绑定真实 Agent Run 驱动 attempt 至终态（执行证明的正当来源）。
@@ -106,7 +106,7 @@ async function main() {
     const repoDir = join(tmpdir(), `sg-replan-repo-${Date.now()}`);
     mkdirSync(repoDir, { recursive: true });
     git(repoDir, 'init', '-b', 'main');
-    git(repoDir, 'config', 'user.email', 'e2e@sixgates.local');
+    git(repoDir, 'config', 'user.email', 'e2e@ratiflow.local');
     git(repoDir, 'config', 'user.name', 'e2e');
     writeFileSync(join(repoDir, 'README.md'), 'hello\n');
     git(repoDir, 'add', '.');

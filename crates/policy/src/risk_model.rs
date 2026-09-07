@@ -12,12 +12,12 @@
 //! 纪律：Provider/模型自声明只升风险不得降级；执行前 unknown 的**风险能力**与
 //! 执行后 unknown 的 **outcome** 是两个事实面，后者由 tool_execution_outcomes 承载。
 //!
-//! Flag：`SIXGATES_UNIFIED_RISK`（默认 0）。关闭时调用方跳过评估，不放宽既有审批链。
+//! Flag：`RATIFLOW_UNIFIED_RISK`（默认 0）。关闭时调用方跳过评估，不放宽既有审批链。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const FLAG: &str = "SIXGATES_UNIFIED_RISK";
+pub const FLAG: &str = "RATIFLOW_UNIFIED_RISK";
 
 /// 默认 0（§1.5 能力开关）；kill switch =0 只停止新评估，不改变任何已落事实。
 pub fn enabled() -> bool {

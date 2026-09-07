@@ -3,14 +3,14 @@
 // Flag 关闭 feature_disabled；环计划拒绝（EV-005）；合法计划生命周期
 // submit→decide→start（ready attempt 创建）；两个并行写任务隔离工作区（EV-007）；
 // 只读任务无工作区；workspace finalize 落 retained + after digest。
-// 前置：cargo build --release -p sixgates-core。
+// 前置：cargo build --release -p ratiflow-core。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -95,13 +95,13 @@ async function main() {
   // ============ 场景二：Flag 开启 ============
   {
     const dataDir = mkdtempSync(join(tmpdir(), 'sg-plan-on-'));
-    const c = new CoreClient(dataDir, { SIXGATES_PLAN_DAG: '1' });
+    const c = new CoreClient(dataDir, { RATIFLOW_PLAN_DAG: '1' });
     try {
       // git 主仓库（工作区 prepare 依赖）。
       const repoDir = join(tmpdir(), `sg-plan-repo-${Date.now()}`);
       mkdirSync(repoDir, { recursive: true });
       git(repoDir, 'init', '-b', 'main');
-      git(repoDir, 'config', 'user.email', 'e2e@sixgates.local');
+      git(repoDir, 'config', 'user.email', 'e2e@ratiflow.local');
       git(repoDir, 'config', 'user.name', 'e2e');
       writeFileSync(join(repoDir, 'README.md'), 'hello\n');
       git(repoDir, 'add', '.');

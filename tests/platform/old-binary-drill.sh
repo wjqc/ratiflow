@@ -6,9 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 OLD_COMMIT=${1:-HEAD}
-NEW_CORE="target/release/sixgates-core"
+NEW_CORE="target/release/ratiflow-core"
 if [[ ! -x "$NEW_CORE" ]]; then
-  echo "先构建新 core：cargo build --release -p sixgates-core" >&2
+  echo "先构建新 core：cargo build --release -p ratiflow-core" >&2
   exit 1
 fi
 
@@ -18,8 +18,8 @@ echo "[1/4] worktree @ $OLD_COMMIT"
 git worktree add --detach "$WORK/src" "$OLD_COMMIT" >/dev/null
 
 echo "[2/4] 构建旧 core（独立 target，约数分钟）..."
-(cd "$WORK/src" && CARGO_TARGET_DIR="$WORK/target" cargo build --release -p sixgates-core)
-OLD_CORE="$WORK/target/release/sixgates-core"
+(cd "$WORK/src" && CARGO_TARGET_DIR="$WORK/target" cargo build --release -p ratiflow-core)
+OLD_CORE="$WORK/target/release/ratiflow-core"
 
 echo "[3/4] 新 core 建 v23 库并写入记忆数据"
 DATA=$(mktemp -d /tmp/sg-drill-data-XXXXXX)

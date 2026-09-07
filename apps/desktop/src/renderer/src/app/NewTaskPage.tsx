@@ -203,7 +203,7 @@ export default function NewTaskPage({
   };
 
   const pickFile = async () => {
-    const selected = await window.sixgates.selectFile();
+    const selected = await window.ratiflow.selectFile();
     if (!selected) {
       return;
     }
@@ -217,7 +217,7 @@ export default function NewTaskPage({
   // “+”菜单的添加附件：按文件类型自动落到 图片（多模态附件）或 文档 模式。
   const attachFromMenu = async () => {
     setModeMenuOpen(false);
-    const selected = await window.sixgates.selectFile();
+    const selected = await window.ratiflow.selectFile();
     if (!selected) {
       return;
     }

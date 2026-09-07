@@ -38,7 +38,7 @@ export function BackupPage() {
     rpc<CoreVersionInfo>('core.version')
       .then(setVersion)
       .catch(() => setVersion(null));
-    void window.sixgates
+    void window.ratiflow
       .appInfo()
       .then((info) => setDataDir(info.userDataDir))
       .catch(() => setDataDir(null));
@@ -176,7 +176,7 @@ export function BackupPage() {
               <span className="sg-kv-k">sha256</span>
               <span className="sg-path">{manifest.digest}</span>
               <span className="sg-kv-k">schema</span>
-              <span>v{manifest.schema_version}（core {manifest.manifest.sixgatesVersion}）</span>
+              <span>v{manifest.schema_version}（core {manifest.manifest.ratiflowVersion}）</span>
               <span className="sg-kv-k">对象数</span>
               <span>
                 {Object.entries(manifest.manifest.objectsCount ?? {})

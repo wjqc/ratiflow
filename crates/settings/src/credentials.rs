@@ -6,7 +6,7 @@ use std::process::Command;
 use crate::{codes, store_err, SettingsError, SettingsResult};
 use sg_store::{ids, timefmt, Store};
 
-pub const KEYCHAIN_SERVICE: &str = "com.sixgates.desktop";
+pub const KEYCHAIN_SERVICE: &str = "com.ratiflow.desktop";
 
 pub trait CredentialStore: Send + Sync {
     /// 写入并返回 account 名（= ref id）。

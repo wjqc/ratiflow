@@ -15,7 +15,7 @@ use crate::state::AppState;
 
 /// memory-candidate 提取提示词（与 contracts 侧 memory-candidate schema 对齐；
 /// 输入只含脱敏 rollout 摘要，模型输出必须是单个候选 JSON 对象）。
-const CAPTURE_SYSTEM_PROMPT: &str = "你是 SixGates 的项目记忆提取器。输入是一次已完成 Run 的脱敏摘要。\
+const CAPTURE_SYSTEM_PROMPT: &str = "你是 Ratiflow 的项目记忆提取器。输入是一次已完成 Run 的脱敏摘要。\
 请从中提炼一条值得该项目长期复用的已验证结论，输出且仅输出一个 JSON 对象：\n\
 {\"title\": \"一句话结论（≤200 字符）\", \"kind\": \"decision|convention|fact|lesson|preference\", \"summary\": \"纯文本摘要（≤512 字符）\", \"body\": \"Markdown 正文（≤12 KiB，包含依据与边界）\"}\n\
 要求：只提取已验证的事实与结论，排除未验证推测；不得包含任何密钥或敏感值；\

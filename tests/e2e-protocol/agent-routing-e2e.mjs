@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
 class CoreClient {
   constructor(dataDir, env = {}) {
@@ -70,7 +70,7 @@ async function main() {
   ];
   const scriptPath = join(tmpdir(), `sg-routing-script-${Date.now()}.json`);
   writeFileSync(scriptPath, JSON.stringify(script));
-  let client = new CoreClient(dataDir, { SIXGATES_FAKE_MODEL_SCRIPT: scriptPath });
+  let client = new CoreClient(dataDir, { RATIFLOW_FAKE_MODEL_SCRIPT: scriptPath });
   const fail = (error) => {
     console.error(`E2E 失败：${error.message}`);
     client?.kill();

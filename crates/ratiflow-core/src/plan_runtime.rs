@@ -139,7 +139,7 @@ mod tests {
         std::fs::write(repo.join("README.md"), "base\n").unwrap();
         for args in [
             vec!["init", "-b", "main"],
-            vec!["config", "user.email", "t@sixgates.local"],
+            vec!["config", "user.email", "t@ratiflow.local"],
             vec!["config", "user.name", "t"],
             vec!["add", "."],
             vec!["commit", "-m", "init"],

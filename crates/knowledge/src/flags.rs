@@ -5,7 +5,7 @@ use sg_store::{Error, Store};
 
 /// knowledge.gcPaused（默认 false）：暂停 GC 第二步（排查/回退窗口）。
 pub fn gc_paused(store: &Store) -> Result<bool, Error> {
-    if let Ok(v) = std::env::var("SIXGATES_KNOWLEDGE_GC_PAUSE") {
+    if let Ok(v) = std::env::var("RATIFLOW_KNOWLEDGE_GC_PAUSE") {
         return Ok(v == "1" || v.eq_ignore_ascii_case("true"));
     }
     flag(store, "knowledge.gcPaused")

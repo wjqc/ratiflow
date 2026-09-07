@@ -35,7 +35,7 @@ cargo build 2>&1 | tail -1
 FAILED=0
 for f in rollback-e2e gate-release-race-e2e trace-e2e agent-routing-e2e e2e; do
   printf "%-24s " "$f"
-  if CORE_BIN=/tmp/target-linux/debug/sixgates-core node tests/e2e-protocol/$f.mjs >/tmp/$f.linux.log 2>&1; then
+  if CORE_BIN=/tmp/target-linux/debug/ratiflow-core node tests/e2e-protocol/$f.mjs >/tmp/$f.linux.log 2>&1; then
     echo PASS
   else
     echo FAIL; tail -3 /tmp/$f.linux.log; FAILED=1

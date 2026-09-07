@@ -119,7 +119,7 @@ impl ReasoningVault {
 
 /// AAD：绑定用途与密钥代际（防 blob 挪用）。
 fn aad() -> Vec<u8> {
-    Sha256::digest(b"sixgates-reasoning-state-v1").to_vec()
+    Sha256::digest(b"ratiflow-reasoning-state-v1").to_vec()
 }
 
 #[cfg(test)]

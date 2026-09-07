@@ -136,7 +136,7 @@ fn apply_patch_exec(
             "beforeHash": c.before_hash, "afterHash": c.after_hash,
         })).collect::<Vec<_>>(),
         "alreadyDone": already_done,
-        "note": "回滚仅作用于受管 worktree：git checkout <beforeHash 路径> 或 reset --hard <preApplyHead>（SixGates 域内）",
+        "note": "回滚仅作用于受管 worktree：git checkout <beforeHash 路径> 或 reset --hard <preApplyHead>（Ratiflow 域内）",
     });
     std::fs::write(artifacts.join("recovery.json"), recovery.to_string())
         .map_err(|e| format!("patch_apply: 恢复点写入 {e}"))?;
@@ -513,7 +513,7 @@ mod plan_guard_tests {
         std::fs::create_dir_all(&dir).unwrap();
         for args in [
             vec!["init", "-q"],
-            vec!["config", "user.email", "t@sixgates.local"],
+            vec!["config", "user.email", "t@ratiflow.local"],
             vec!["config", "user.name", "t"],
         ] {
             let out = Command::new("git")
@@ -777,7 +777,7 @@ mod apply_patch_tests {
         ));
         std::fs::create_dir_all(dir.join("src")).unwrap();
         git(&dir, &["init", "-q"]);
-        git(&dir, &["config", "user.email", "t@sixgates.local"]);
+        git(&dir, &["config", "user.email", "t@ratiflow.local"]);
         git(&dir, &["config", "user.name", "tester"]);
         std::fs::write(dir.join("src/app.txt"), "line1\nline2\nline3\n").unwrap();
         git(&dir, &["add", "."]);
@@ -955,7 +955,7 @@ mod apply_patch_flow_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         git(&dir, &["init", "-q"]);
-        git(&dir, &["config", "user.email", "t@sixgates.local"]);
+        git(&dir, &["config", "user.email", "t@ratiflow.local"]);
         git(&dir, &["config", "user.name", "tester"]);
         std::fs::write(dir.join("app.txt"), "line1\nline2\nline3\n").unwrap();
         git(&dir, &["add", "."]);
@@ -1211,7 +1211,7 @@ fn mcp_invoke(
         return Err("action_denied: 隔离 worktree 不可用，拒绝调用 MCP 工具".into());
     }
     if sg_settings::mcp_ext::mcp_disabled() {
-        return Err("feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）".into());
+        return Err("feature_disabled: RATIFLOW_MCP_MODE=disabled（MCP 已禁用）".into());
     }
     let tool_name = model_name.to_string();
     let active = (*active).clone();
@@ -1222,7 +1222,7 @@ fn mcp_invoke(
             active.transport
         ));
     }
-    let timeout = std::env::var("SIXGATES_MCP_CALL_TIMEOUT_SECS")
+    let timeout = std::env::var("RATIFLOW_MCP_CALL_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(60);
@@ -1418,7 +1418,7 @@ mod mcp_invoke_tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
-    /// SIXGATES_MCP_CALL_TIMEOUT_SECS 是进程级 env：涉及 MCP 调用的测试串行执行。
+    /// RATIFLOW_MCP_CALL_TIMEOUT_SECS 是进程级 env：涉及 MCP 调用的测试串行执行。
     static MCP_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     const FAKE_SERVER_PY: &str = r#"#!/usr/bin/env python3
@@ -1493,7 +1493,7 @@ for line in sys.stdin:
         ));
         std::fs::create_dir_all(&dir).unwrap();
         git_cmd(&dir, &["init", "-q"]);
-        git_cmd(&dir, &["config", "user.email", "t@sixgates.local"]);
+        git_cmd(&dir, &["config", "user.email", "t@ratiflow.local"]);
         git_cmd(&dir, &["config", "user.name", "tester"]);
         std::fs::write(dir.join("app.txt"), "line1\n").unwrap();
         git_cmd(&dir, &["add", "."]);
@@ -1701,9 +1701,9 @@ for line in sys.stdin:
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(Store::open(&dir, "test").unwrap());
         let (_id, srv) = setup_server(&store, "sleep", "srvtimeout");
-        std::env::set_var("SIXGATES_MCP_CALL_TIMEOUT_SECS", "1");
+        std::env::set_var("RATIFLOW_MCP_CALL_TIMEOUT_SECS", "1");
         let out = run_tool(&store, &repo, &format!("mcp__{srv}__send_thing"));
-        std::env::remove_var("SIXGATES_MCP_CALL_TIMEOUT_SECS");
+        std::env::remove_var("RATIFLOW_MCP_CALL_TIMEOUT_SECS");
         let out = out.unwrap();
         assert!(out.starts_with("tool_outcome_unknown"), "{out}");
         assert!(out.contains("不要重复调用"), "禁自动重试语义进工具消息");

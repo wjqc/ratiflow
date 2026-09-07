@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sixgates.local/schemas/execution-manifest.json",
-  "title": "SixGates ExecutionManifest",
+  "$id": "https://ratiflow.local/schemas/execution-manifest.json",
+  "title": "Ratiflow ExecutionManifest",
   "description": "执行器唯一输入（手册 §11.3）：不接受 sh -c <model text>；argv 直接 exec。",
   "type": "object",
   "required": ["argv", "timeoutSec"],

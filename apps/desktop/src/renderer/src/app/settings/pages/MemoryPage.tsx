@@ -176,7 +176,7 @@ export function MemoryPage() {
 
   const doImport = async (mode: 'proposed' | 'active') => {
     if (!projectId) return;
-    const picked = await window.sixgates.selectFile();
+    const picked = await window.ratiflow.selectFile();
     if (!picked) return;
     setNotice(null);
     try {
@@ -213,7 +213,7 @@ export function MemoryPage() {
 
   const reveal = async () => {
     if (!revealExportId) return;
-    const ok = await window.sixgates.revealMemoryExport(revealExportId);
+    const ok = await window.ratiflow.revealMemoryExport(revealExportId);
     setNotice(ok ? '已在访达中显示' : '导出目录不存在或已被清理');
   };
 

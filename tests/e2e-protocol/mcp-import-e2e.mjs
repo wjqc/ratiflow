@@ -4,7 +4,7 @@
 //    本地 git 远端 + 真实沙箱探针）；② 两次批准前零 checkout（零代码执行）；
 // ③ 源 checkout 冻结后只读；④ 同 ref 新 SHA = 新行新候选；⑤ revoke 目录清理 +
 //    server 级联 revoked；⑥ 空仓库受限 fetch（HEAD==pinnedSha 且无默认分支残留）。
-// call 前 tool_source_drift 的篡改拒绝在 sixgates-core 单测（mcp_import_call_tests）
+// call 前 tool_source_drift 的篡改拒绝在 ratiflow-core 单测（mcp_import_call_tests）
 // 覆盖（需要 executor 直调）。前置：cargo build --release；本机 git + python3。
 import { execSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as readline from 'node:readline';
 
-const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'sixgates-core');
+const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 const HAS_PY = (() => { try { execSync('python3 --version', { stdio: 'ignore', timeout: 10000 }); return true; } catch { return false; } })();
 const HAS_GIT = (() => { try { execSync('git --version', { stdio: 'ignore', timeout: 10000 }); return true; } catch { return false; } })();
 if (!HAS_PY || !HAS_GIT) {
@@ -99,7 +99,7 @@ for line in sys.stdin:
 function makeRemote(root) {
   const repo = join(root, 'remote');
   mkdirSync(repo, { recursive: true });
-  writeFileSync(join(repo, 'sixgates-mcp.json'), MANIFEST);
+  writeFileSync(join(repo, 'ratiflow-mcp.json'), MANIFEST);
   writeFileSync(join(repo, 'server.py'), SERVER_PY);
   mkdirSync(join(repo, 'lib'), { recursive: true });
   writeFileSync(join(repo, 'lib', 'helper.py'), 'DATA = 1\n');
@@ -133,7 +133,7 @@ async function main() {
   mkdirSync(dataDir, { recursive: true });
   const remote = makeRemote(work);
   const sha1 = sh('git rev-parse HEAD', remote);
-  const c = new CoreClient(dataDir, { SIXGATES_MCP_GIT_IMPORT: '1' });
+  const c = new CoreClient(dataDir, { RATIFLOW_MCP_GIT_IMPORT: '1' });
   const fail = (e) => { console.error(`E2E 失败：${e.message}`); c?.kill(); process.exit(1); };
 
   try {

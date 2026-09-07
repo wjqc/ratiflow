@@ -2,7 +2,7 @@
 //! fire_due（到期扫描 → overlap 闸 → receipt 认领 → misfire 决策 → grant 检查 →
 //! 意图落账 + 重调度）。只产 RunIntent：真正的 Run 创建走消费侧（Goal 执行器，
 //! 复用既有 agent/plan 装配与审批链），无有效 grant 永远只落 blocked_no_grant。
-//! main.rs 定时器（SIXGATES_AUTOMATIONS=1）周期调用 fire_due；启动时先跑
+//! main.rs 定时器（RATIFLOW_AUTOMATIONS=1）周期调用 fire_due；启动时先跑
 //! reconcile_orphans（重复启动不重复执行）。
 
 use serde_json::{json, Value};

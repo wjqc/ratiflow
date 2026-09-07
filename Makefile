@@ -43,11 +43,11 @@ test-web: ## Renderer component tests
 test: test-rust test-web ## All unit tests
 
 test-electron: ## Electron E2E scenarios A/D/E/F (Playwright)
-	npm --workspace @sixgates/desktop run build
+	npm --workspace @ratiflow/desktop run build
 	cd apps/desktop && npx playwright test
 
 e2e: ## Protocol E2E golden flow + agent lifecycle + settings + trace + gate release race + rollback + memory + mcp (requires release core build)
-	cargo build --release -p sixgates-core
+	cargo build --release -p ratiflow-core
 	node tests/e2e-protocol/with-timeout.mjs 300 e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 agent-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 settings-e2e.mjs
@@ -72,18 +72,18 @@ test-contract: ## Contract fixtures + decoders + secret probe (F11/M4)
 	node tests/contract/run.mjs
 
 build-core: ## Release build of Rust core
-	cargo build --release -p sixgates-core
+	cargo build --release -p ratiflow-core
 
 build-desktop: ## Build Electron main/preload/renderer
-	npm --workspace @sixgates/desktop run build
+	npm --workspace @ratiflow/desktop run build
 
 build: build-core build-desktop ## Build everything
 
 run: build ## Launch desktop app
-	npm --workspace @sixgates/desktop run start
+	npm --workspace @ratiflow/desktop run start
 
 package: build ## Package desktop app (dir, unsigned)
-	npm --workspace @sixgates/desktop run package
+	npm --workspace @ratiflow/desktop run package
 
 ci: fmt-check clippy codegen-drift typecheck test test-contract e2e test-electron ## Local CI sequence
 
