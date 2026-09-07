@@ -24,8 +24,9 @@ pub struct InstanceGate {
     pub title: String,
     pub purpose: String,
     pub deliverables: Vec<String>,
-    /// 本关验收策略（模板声明，随版本冻结；空 = 通用六输入门禁基线）。
-    pub acceptance: Vec<String>,
+    /// 本关验收策略（WP-7 双形态：字符串=仅展示；对象=结构化机器契约；
+    /// 模板声明，随版本冻结；空 = 通用六输入门禁基线）。
+    pub acceptance: Vec<serde_json::Value>,
     pub state: String,
 }
 

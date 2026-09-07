@@ -1,9 +1,11 @@
 //! WorkItem 与六关阶段状态（PRD v2 §16.1 行为等价）+ 门禁引擎（三态输入）。
 
+pub mod acceptance_eval;
 pub mod attempt;
 pub mod deliverable;
 pub mod docs;
 pub mod gate;
+pub mod manual_confirm;
 pub mod progress;
 pub mod release;
 pub mod release_events;

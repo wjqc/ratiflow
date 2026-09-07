@@ -1,4 +1,4 @@
-// 本文件由 generate.mjs 从 contracts/rpc/sixgates.json 生成；不要手写修改。
+// 本文件由 generate.mjs 从 contracts/rpc/ratiflow.json 生成；不要手写修改。
 export const PROTOCOL_VERSION = '1';
 export const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 
@@ -141,6 +141,8 @@ export type RpcMethodName =
   | 'gate.requestRelease'
   | 'gate.decideRelease'
   | 'gate.getRelease'
+  | 'gate.requestManualConfirmation'
+  | 'gate.manualConfirmations'
   | 'stage.attempts'
   | 'stage.package'
   | 'snapshot.get'
@@ -409,6 +411,8 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'gate.requestRelease',
   'gate.decideRelease',
   'gate.getRelease',
+  'gate.requestManualConfirmation',
+  'gate.manualConfirmations',
   'stage.attempts',
   'stage.package',
   'snapshot.get',
@@ -1351,6 +1355,19 @@ export interface GateDecideReleaseParams {
 
 export interface GateGetReleaseParams {
   releaseId: string;
+}
+
+export interface GateRequestManualConfirmationParams {
+  workItemId: string;
+  gate: string;
+  element: unknown;
+  requestedBy: string;
+  reason?: string;
+}
+
+export interface GateManualConfirmationsParams {
+  workItemId: string;
+  gate?: string;
 }
 
 export interface StageAttemptsParams {

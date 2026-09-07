@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sg_policy::Risk;
 use sg_store::{ids, outbox, timefmt, Error, Store};
 
+pub mod acceptance;
 pub mod automation;
 pub mod dag;
 pub mod delivery;

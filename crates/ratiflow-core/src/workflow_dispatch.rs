@@ -1,5 +1,5 @@
 //! 数据化工作流模板与实例 RPC（EvoFlow 方案 M1-07 / ADR-036 / §8.1）。
-//! 全域受 `SIXGATES_WORKFLOW_TEMPLATE_V2` 门控：默认关闭返回 feature_disabled
+//! 全域受 `RATIFLOW_WORKFLOW_TEMPLATE_V2` 门控：默认关闭返回 feature_disabled
 //! （kill switch 语义，方案 §11.1）；关闭不删除新事实，实例投影继续 shadow 双写。
 
 use serde_json::{json, Value};
@@ -12,7 +12,7 @@ use sg_store::Store;
 fn disabled() -> RpcError {
     RpcError::new(
         ErrorCode::InvalidRequest,
-        "feature_disabled: SIXGATES_WORKFLOW_TEMPLATE_V2 未开启",
+        "feature_disabled: RATIFLOW_WORKFLOW_TEMPLATE_V2 未开启",
     )
 }
 
@@ -61,6 +61,14 @@ fn parse_gates(params: &Value) -> Result<Vec<sg_workflow::template::GateDefInput
                 })
                 .unwrap_or_default()
         };
+        // WP-7 双形态：acceptance 元素原样透传（字符串=仅展示；对象=结构化契约，
+        // 形状校验在 sg-workflow template::validate_defs 创建/激活口）。
+        let value_list = |key: &str| -> Vec<Value> {
+            g.get(key)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        };
         let opt_ref = |key: &str| -> Option<String> {
             g.get(key)
                 .and_then(|v| v.as_str())
@@ -84,7 +92,7 @@ fn parse_gates(params: &Value) -> Result<Vec<sg_workflow::template::GateDefInput
                 .unwrap_or("")
                 .to_string(),
             deliverables: str_list("deliverables"),
-            acceptance: str_list("acceptance"),
+            acceptance: value_list("acceptance"),
             context_policy_ref: opt_ref("contextPolicyRef"),
             team_policy_ref: opt_ref("teamPolicyRef"),
             workspace_policy_ref: opt_ref("workspacePolicyRef"),

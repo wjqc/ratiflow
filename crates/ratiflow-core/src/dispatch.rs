@@ -153,9 +153,9 @@ fn gate_decide_release_rpc(store: &Store, params: &Value) -> RpcResult {
     Ok(result)
 }
 
-/// M1 谱系新写开关（可回退点）：SIXGATES_TRACE_WRITES=0 关闭全部谱系写入/回填，保留表结构。
+/// M1 谱系新写开关（可回退点）：RATIFLOW_TRACE_WRITES=0 关闭全部谱系写入/回填，保留表结构。
 pub(crate) fn trace_writes_enabled() -> bool {
-    std::env::var("SIXGATES_TRACE_WRITES")
+    std::env::var("RATIFLOW_TRACE_WRITES")
         .map(|v| v != "0")
         .unwrap_or(true)
 }
@@ -1104,7 +1104,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             {
                 return Err(err(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_WORKFLOW_TEMPLATE_V2 未开启",
+                    "feature_disabled: RATIFLOW_WORKFLOW_TEMPLATE_V2 未开启",
                 ));
             }
             let wi = sg_workitem::create_with_template(
@@ -1362,8 +1362,8 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(result)
         }
         "rollback.request" => {
-            // E2E 钩子（仅显式设置生效）：SIXGATES_APPROVAL_TTL_SECS 覆盖回滚审批有效期。
-            let ttl = std::env::var("SIXGATES_APPROVAL_TTL_SECS")
+            // E2E 钩子（仅显式设置生效）：RATIFLOW_APPROVAL_TTL_SECS 覆盖回滚审批有效期。
+            let ttl = std::env::var("RATIFLOW_APPROVAL_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or_else(|| assemble_policy_snapshot(store).0.approval_ttl_secs);
@@ -1855,11 +1855,11 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 })
                 .unwrap_or_else(|| vec!["read_file".into()]);
             // M4-08（EV-014 / ADR-038 §6.10）：服务端工具交集——客户端只可收紧。
-            // SIXGATES_CONTEXT_POLICY_V2=1 且存在 active policy 时，
+            // RATIFLOW_CONTEXT_POLICY_V2=1 且存在 active policy 时，
             // effective = registry ∩ policy ∩ client（越权请求被移除并记 excluded）。
             let mut ctx_policy_frozen: Option<String> = None;
             let mut ctx_excluded: serde_json::Value = serde_json::Value::Null;
-            if std::env::var("SIXGATES_CONTEXT_POLICY_V2").ok().as_deref() == Some("1") {
+            if std::env::var("RATIFLOW_CONTEXT_POLICY_V2").ok().as_deref() == Some("1") {
                 let gate_for_policy = sg_workitem::get(store, &workitem_id)
                     .map(|w| w.current_gate)
                     .unwrap_or_default();
@@ -2100,7 +2100,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             if sg_settings::mcp_ext::mcp_disabled() {
                 return Err(err(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+                    "feature_disabled: RATIFLOW_MCP_MODE=disabled（MCP 已禁用）",
                 ));
             }
             let args_list = str_list_param(params, "args");
@@ -2116,7 +2116,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             if sg_settings::mcp_ext::mcp_disabled() {
                 return Err(err(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+                    "feature_disabled: RATIFLOW_MCP_MODE=disabled（MCP 已禁用）",
                 ));
             }
             sg_settings::mcp_ext::server_approve(
@@ -2138,7 +2138,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             if sg_settings::mcp_ext::mcp_disabled() {
                 return Err(err(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+                    "feature_disabled: RATIFLOW_MCP_MODE=disabled（MCP 已禁用）",
                 ));
             }
             sg_settings::mcp_ext::server_refresh(store, &str_param(params, "serverId")?)
@@ -2148,7 +2148,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             if sg_settings::mcp_ext::mcp_disabled() {
                 return Err(err(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+                    "feature_disabled: RATIFLOW_MCP_MODE=disabled（MCP 已禁用）",
                 ));
             }
             sg_settings::mcp_ext::server_set_enabled(
@@ -2160,7 +2160,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
         "mcp.toolsList" => mcp_tools_list(store, opt_str_param(params, "serverId").as_deref()),
 
-        // --- Git 仓库导入 MCP（RDWS v1.4 WP-4 / ADR flag：SIXGATES_MCP_GIT_IMPORT）---
+        // --- Git 仓库导入 MCP（RDWS v1.4 WP-4 / ADR flag：RATIFLOW_MCP_GIT_IMPORT）---
         "mcp.importAdd" => with_rpc_receipt(
             store,
             &opt_str_param(params, "idempotencyKey").unwrap_or_default(),
@@ -2263,8 +2263,8 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
         "gate.requestRelease" => {
             // 关卡放行审批不限时（人工评审无期限）；E2E 需要限时行为时显式设置
-            // SIXGATES_APPROVAL_TTL_SECS（秒）即可恢复过期语义。
-            let ttl = std::env::var("SIXGATES_APPROVAL_TTL_SECS")
+            // RATIFLOW_APPROVAL_TTL_SECS（秒）即可恢复过期语义。
+            let ttl = std::env::var("RATIFLOW_APPROVAL_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or(0);
@@ -2282,6 +2282,41 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "gate.getRelease" => {
             sg_workitem::release::get_release(store, &str_param(params, "releaseId")?)
                 .map_err(store_err)
+        }
+        // --- WP-7 结构化验收：manual_confirm 人工确认链（决定走 approval.decide 路由）---
+        "gate.requestManualConfirmation" => {
+            let workitem_id = str_param(params, "workItemId")?;
+            let gate_name = str_param(params, "gate")?;
+            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
+                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
+            }
+            let element = params
+                .get("element")
+                .cloned()
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "missing param: element"))?;
+            let requested_by = str_param(params, "requestedBy")?;
+            let reason = opt_str_param(params, "reason").unwrap_or_default();
+            let confirmation = sg_workitem::manual_confirm::request(
+                store,
+                &workitem_id,
+                &gate_name,
+                &element,
+                &requested_by,
+                &reason,
+            )
+            .map_err(store_err)?;
+            Ok(serde_json::to_value(confirmation).unwrap_or_default())
+        }
+        "gate.manualConfirmations" => {
+            let workitem_id = str_param(params, "workItemId")?;
+            let gate_name = opt_str_param(params, "gate");
+            let items = sg_workitem::manual_confirm::list(
+                store,
+                &workitem_id,
+                gate_name.as_deref().filter(|g| !g.is_empty()),
+            )
+            .map_err(store_err)?;
+            Ok(json!({ "items": items }))
         }
         "stage.attempts" => {
             let workitem_id = str_param(params, "workItemId")?;
@@ -2395,11 +2430,11 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 })
                 .unwrap_or_else(|| vec!["read_file".into()]);
             // M4-08（EV-014 / ADR-038 §6.10）：服务端工具交集——客户端只可收紧。
-            // SIXGATES_CONTEXT_POLICY_V2=1 且存在 active policy 时，
+            // RATIFLOW_CONTEXT_POLICY_V2=1 且存在 active policy 时，
             // effective = registry ∩ policy ∩ client（越权请求被移除并记 excluded）。
             let mut ctx_policy_frozen: Option<String> = None;
             let mut ctx_excluded: serde_json::Value = serde_json::Value::Null;
-            if std::env::var("SIXGATES_CONTEXT_POLICY_V2").ok().as_deref() == Some("1") {
+            if std::env::var("RATIFLOW_CONTEXT_POLICY_V2").ok().as_deref() == Some("1") {
                 let gate_for_policy = sg_workitem::get(store, &workitem_id)
                     .map(|w| w.current_gate)
                     .unwrap_or_default();
@@ -2700,6 +2735,36 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     )
                     .map_err(store_err)?;
                     return Ok(out);
+                }
+                // WP-7：manual_confirm 确认单落态（单向 requested → confirmed/rejected；
+                // evaluator 只读 confirmed 行 + acceptance_item_digest 精确匹配）。
+                "gate_manual_confirm" => {
+                    if !matches!(decision.as_str(), "approved" | "rejected") {
+                        return Err(err(
+                            ErrorCode::InvalidParams,
+                            "decision must be approved|rejected for gate_manual_confirm",
+                        ));
+                    }
+                    let appr =
+                        sg_policy::decide(store, &approval_id, &decision, &decided_by, &reason)
+                            .map_err(store_err)?;
+                    let confirmation = sg_workitem::manual_confirm::apply_approval_decision(
+                        store,
+                        &approval_id,
+                        &decision,
+                        &decided_by,
+                    )
+                    .map_err(store_err)?;
+                    sg_store::audit::append(
+                        store,
+                        &decided_by,
+                        &format!("approval.{decision}"),
+                        "approval",
+                        &approval_id,
+                        json!({"subjectId": subject.subject_id, "confirmationId": confirmation.id}),
+                    )
+                    .map_err(store_err)?;
+                    return Ok(json!({"approval": appr, "confirmation": confirmation}));
                 }
                 _ => {}
             }
@@ -3029,7 +3094,7 @@ fn diagnostics_checks(state: &AppState, store: &Store) -> Vec<Value> {
                 .unwrap_or(0))
         })
         .unwrap_or(0);
-    let gl_env = std::env::var("SIXGATES_GITLAB_URL")
+    let gl_env = std::env::var("RATIFLOW_GITLAB_URL")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
     let mp_profiles: i64 = store
@@ -3039,7 +3104,7 @@ fn diagnostics_checks(state: &AppState, store: &Store) -> Vec<Value> {
                 .unwrap_or(0))
         })
         .unwrap_or(0);
-    let mp_env = std::env::var("SIXGATES_MODEL_API_KEY")
+    let mp_env = std::env::var("RATIFLOW_MODEL_API_KEY")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
     let ssh_targets: i64 = store
@@ -3287,7 +3352,7 @@ pub(crate) fn effective_executor_mode(
     state: &AppState,
     store: &Store,
 ) -> (sg_executor::Mode, &'static str) {
-    if let Some(m) = std::env::var("SIXGATES_EXEC_MODE")
+    if let Some(m) = std::env::var("RATIFLOW_EXEC_MODE")
         .ok()
         .and_then(|m| match m.as_str() {
             "docker" => Some(sg_executor::Mode::Docker),
@@ -3418,7 +3483,7 @@ fn spawn_run_task(
             .map_err(|_| sg_store::Error::Message("workitem_not_found".into()))
         })
         .map_err(store_err)?;
-    // M3+：Agent 工具执行在 SixGates 隔离 worktree（SG-RBK-005）；不可用时诚实回退 local_root。
+    // M3+：Agent 工具执行在 Ratiflow 隔离 worktree（SG-RBK-005）；不可用时诚实回退 local_root。
     let worktree_info = sg_workitem::worktree::ensure(store, &workitem_id).ok();
     let mut work_dir = match &worktree_info {
         Some(info) => Some(std::path::PathBuf::from(&info.path)),
@@ -4191,10 +4256,10 @@ mod model_usage_daily_tests {
     }
 }
 
-/// M6-04：automation.* / goal.* RPC（SIXGATES_AUTOMATIONS 门控创建/触发；
+/// M6-04：automation.* / goal.* RPC（RATIFLOW_AUTOMATIONS 门控创建/触发；
 /// 查询面不受限——审计可见）。
 fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
-    let automation_flag = std::env::var("SIXGATES_AUTOMATIONS").ok().as_deref() == Some("1");
+    let automation_flag = std::env::var("RATIFLOW_AUTOMATIONS").ok().as_deref() == Some("1");
     let invalid = |m: String| RpcError::new(ErrorCode::InvalidParams, m.as_str());
     let store_err =
         |e: sg_store::Error| RpcError::new(ErrorCode::InternalError, e.to_string().as_str());
@@ -4210,7 +4275,7 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             if !automation_flag {
                 return Err(RpcError::new(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                    "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
                 ));
             }
             let interval_secs = params
@@ -4282,7 +4347,7 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             if !automation_flag {
                 return Err(RpcError::new(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                    "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
                 ));
             }
             let status = if method == "automation.pause" {
@@ -4306,7 +4371,7 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             if !automation_flag {
                 return Err(RpcError::new(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                    "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
                 ));
             }
             let automation_id = str_param("automationId")?;
@@ -4352,7 +4417,7 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             if !automation_flag {
                 return Err(RpcError::new(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                    "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
                 ));
             }
             let id = sg_store::ids::new_id("agr");
@@ -4427,7 +4492,7 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             if !automation_flag {
                 return Err(RpcError::new(
                     ErrorCode::InvalidRequest,
-                    "feature_disabled: SIXGATES_AUTOMATIONS 未开启",
+                    "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
                 ));
             }
             // 撤销即时生效（缺陷审计修复：此前全库无撤销路径）。

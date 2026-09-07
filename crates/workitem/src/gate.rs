@@ -106,7 +106,21 @@ pub fn record(store: &Store, inputs: &EvaluateInputs, result: &GateResult) -> Re
 }
 
 pub fn evaluate_and_record(store: &Store, inputs: &EvaluateInputs) -> Result<GateResult, Error> {
-    let result = evaluate(inputs);
+    let mut result = evaluate(inputs);
+    // WP-7：结构化 acceptance 逐项判定，以 `acceptance:*`/`acceptance_evaluator_unavailable:*`
+    // 追加进 failed_inputs（六输入之外）。自由文本元素不进判定；关无结构化项时
+    // 行为与旧六输入完全一致。evaluator 内部 fail-closed（kill switch=0 → 放行被阻）。
+    let elements =
+        sg_workflow::acceptance::elements_for_gate(store, &inputs.workitem_id, &inputs.gate)?;
+    if elements.iter().any(|el| {
+        matches!(
+            el,
+            sg_workflow::acceptance::AcceptanceElement::Structured(_)
+        )
+    }) {
+        let outcomes = crate::acceptance_eval::evaluate_elements(store, inputs, &elements)?;
+        crate::acceptance_eval::merge_into_result(&mut result, &outcomes);
+    }
     record(store, inputs, &result)?;
     Ok(result)
 }

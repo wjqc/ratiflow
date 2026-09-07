@@ -6,16 +6,16 @@
 use sg_store::{ids, timefmt, Error, Store};
 use sha2::{Digest, Sha256};
 
-/// M1 功能开关（方案 §11.1）：`SIXGATES_WORKFLOW_TEMPLATE_V2`。
+/// M1 功能开关（方案 §11.1）：`RATIFLOW_WORKFLOW_TEMPLATE_V2`。
 /// 默认关闭 = 新模板管理 RPC 与非默认模板创建不可用；默认六关行为不变。
 /// 实例顺序解析对默认模板与 legacy 枚举逐字相同（parity 由单测断言），
 /// 因此关闭 flag 不影响已存在实例的一致性（§11.3 只读延续）。
 /// 模板域开关：**默认开启**（关卡/交付物配置化为产品能力，用户 2026-09-07 拍板）；
-/// `SIXGATES_WORKFLOW_TEMPLATE_V2=0` 为显式关闭（kill switch，回退 legacy 行为：
+/// `RATIFLOW_WORKFLOW_TEMPLATE_V2=0` 为显式关闭（kill switch，回退 legacy 行为：
 /// 新模板 RPC feature_disabled，workitem.create 拒绝非默认 templateId）。
 /// 默认模板 six-gate-default 与 legacy 六关逐字同序（parity 单测），默认行为不变。
 pub fn template_v2_enabled() -> bool {
-    std::env::var("SIXGATES_WORKFLOW_TEMPLATE_V2")
+    std::env::var("RATIFLOW_WORKFLOW_TEMPLATE_V2")
         .map(|v| v != "0")
         .unwrap_or(true)
 }
@@ -65,8 +65,9 @@ pub struct GateDefinition {
     pub title: String,
     pub purpose: String,
     pub deliverables: Vec<String>,
-    /// 本关验收策略（逐条可判定的 acceptance 说明；空 = 沿用通用六输入门禁基线）。
-    pub acceptance: Vec<String>,
+    /// 本关验收策略（WP-7 双形态：字符串=仅展示；对象=结构化机器契约，
+    /// 形状由 sg-workflow acceptance 校验；空 = 沿用通用六输入门禁基线）。
+    pub acceptance: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_policy_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,6 +79,8 @@ pub struct GateDefinition {
 /// 版本内容的输入形状（ordinal 由数组位置隐含：1..n 连续）。
 /// acceptance 与 policy refs = 门禁数据化输入面（评审 P0-4）：每关可声明
 /// 验收策略与 Context/Team/Workspace 策略引用，随版本冻结、参与 digest。
+/// acceptance 元素为原始 JSON（字符串或 {verifier,...} 对象），创建/激活时经
+/// acceptance::parse_elements 校验（WP-7：未知 verifier/缺参数/越界即拒）。
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct GateDefInput {
     pub gate_id: String,
@@ -87,7 +90,7 @@ pub struct GateDefInput {
     #[serde(default)]
     pub deliverables: Vec<String>,
     #[serde(default)]
-    pub acceptance: Vec<String>,
+    pub acceptance: Vec<serde_json::Value>,
     #[serde(default)]
     pub context_policy_ref: Option<String>,
     #[serde(default)]
@@ -100,9 +103,26 @@ fn ref_str(r: &Option<String>) -> &str {
     r.as_deref().unwrap_or("-")
 }
 
+/// acceptance 槽（digest v3）：逐元素 canonical 形态（`str|文本` / `obj|{...}`）
+/// 以逗号拼接；无法解析的元素按 `invalid|<原始JSON>` 入哈希（fail-closed：
+/// 垃圾元素改变 digest 且激活前的 parse 校验会先行拒绝）。
+fn acceptance_v3_slot(vals: &[serde_json::Value]) -> String {
+    vals.iter()
+        .map(
+            |v| match serde_json::from_value::<crate::acceptance::AcceptanceElement>(v.clone()) {
+                Ok(el) => crate::acceptance::canonical_form(&el),
+                Err(_) => format!("invalid|{v}"),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// 版本内容 digest：
-/// sha256("v2|" + join("ordinal|gate_id|title|purpose|deliverables_csv|acceptance_csv|ctx_ref|team_ref|ws_ref", "\n"))。
-/// v1（迁移 0032 历史常量）不含 acceptance 与 refs；存量激活版本不重算，仅新版本生效。
+/// sha256("v3|" + join("ordinal|gate_id|title|purpose|deliverables_csv|acceptance_v3|ctx_ref|team_ref|ws_ref", "\n"))。
+/// v3（WP-7）：acceptance 槽从原始字符串拼接升级为逐元素 canonical 形态，
+/// 结构化契约进 digest；v1/v2 存量激活版本不重算，仅新版本生效（v1→v2 先例）。
+/// WP-8 的 skip/fast_track 列升 v4，版本标签永不复用为两套 canonical schema。
 pub fn content_digest(defs: &[GateDefInput]) -> String {
     let lines: Vec<String> = defs
         .iter()
@@ -115,7 +135,7 @@ pub fn content_digest(defs: &[GateDefInput]) -> String {
                 d.title,
                 d.purpose,
                 d.deliverables.join(","),
-                d.acceptance.join(","),
+                acceptance_v3_slot(&d.acceptance),
                 ref_str(&d.context_policy_ref),
                 ref_str(&d.team_policy_ref),
                 ref_str(&d.workspace_policy_ref),
@@ -123,7 +143,7 @@ pub fn content_digest(defs: &[GateDefInput]) -> String {
         })
         .collect();
     let mut hasher = Sha256::new();
-    hasher.update(format!("v2|{}", lines.join("\n")).as_bytes());
+    hasher.update(format!("v3|{}", lines.join("\n")).as_bytes());
     sg_store::ids::hex(&hasher.finalize())
 }
 
@@ -159,6 +179,11 @@ fn validate_defs(defs: &[GateDefInput]) -> Result<(), Error> {
                 d.gate_id
             )));
         }
+        // WP-7：结构化 acceptance 契约在创建/改稿/激活三口统一校验
+        //（未知 verifier/缺参数/越界 → acceptance_schema_invalid；
+        //  kill switch 关闭遇结构化项 → feature_disabled）。
+        crate::acceptance::parse_elements(&d.acceptance)
+            .map_err(|e| Error::Message(format!("{}（gate: {}）", e, d.gate_id)))?;
         let _ = i; // ordinal 连续由数组位置隐含
     }
     Ok(())
@@ -527,7 +552,7 @@ mod tests {
                 title: "分诊关".into(),
                 purpose: "快速分诊".into(),
                 deliverables: vec!["doc".into()],
-                acceptance: vec!["分诊结论落档".into()],
+                acceptance: vec![serde_json::json!("分诊结论落档")],
                 context_policy_ref: None,
                 team_policy_ref: None,
                 workspace_policy_ref: None,
@@ -637,5 +662,62 @@ mod tests {
         assert!(!valid_key("Fix"));
         assert!(!valid_key("1abc"));
         assert!(!valid_key("has space"));
+    }
+
+    /// WP-7：结构化 acceptance 全链——创建校验、digest v3 确定性、
+    /// 读回（definitions）保真双形态；kill switch 关闭拒绝创建。
+    #[test]
+    fn structured_acceptance_lifecycle_and_digest_v3() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = setup();
+        let t = create_template(&store, "wp7-acc", "结构化验收").unwrap();
+        let defs = |structured: bool| -> Vec<GateDefInput> {
+            vec![GateDefInput {
+                gate_id: "confirm".into(),
+                title: "确认关".into(),
+                purpose: String::new(),
+                deliverables: vec!["verification".into()],
+                acceptance: if structured {
+                    vec![
+                        serde_json::json!("自由文本仅展示"),
+                        serde_json::json!({"verifier": "evidence_verified", "evidence_kind": "test_report", "min_count": 1}),
+                    ]
+                } else {
+                    vec![serde_json::json!("自由文本仅展示")]
+                },
+                context_policy_ref: None,
+                team_policy_ref: None,
+                workspace_policy_ref: None,
+            }]
+        };
+        // kill switch 关闭：结构化项创建即拒（feature_disabled）。
+        std::env::remove_var(crate::acceptance::FLAG);
+        assert!(create_version(&store, &t.id, &defs(true), "tester")
+            .unwrap_err()
+            .to_string()
+            .contains("feature_disabled"));
+        // 纯字符串版本不受 kill switch 影响。
+        let v1 = create_version(&store, &t.id, &defs(false), "tester").unwrap();
+        activate(&store, &v1.id).unwrap();
+        // flag 开启：结构化版本可创建并激活；digest 确定且随结构化内容变化。
+        std::env::set_var(crate::acceptance::FLAG, "1");
+        let v2 = create_version(&store, &t.id, &defs(true), "tester").unwrap();
+        assert!(activate(&store, &v2.id).unwrap().status == "active");
+        std::env::remove_var(crate::acceptance::FLAG);
+        let d2a = content_digest(&defs(true));
+        let d2b = content_digest(&defs(true));
+        assert_eq!(d2a, d2b, "digest v3 必须确定");
+        assert_ne!(d2a, content_digest(&defs(false)), "结构化项必须进 digest");
+        // 读回保真：字符串仍是字符串，对象仍是对象（InstanceGate/读模型同源）。
+        let readback = definitions_via_store(&store, &v2.id).unwrap();
+        assert_eq!(
+            readback[0].acceptance[0],
+            serde_json::json!("自由文本仅展示")
+        );
+        assert_eq!(
+            readback[0].acceptance[1],
+            serde_json::json!({"verifier": "evidence_verified", "evidence_kind": "test_report", "min_count": 1})
+        );
     }
 }

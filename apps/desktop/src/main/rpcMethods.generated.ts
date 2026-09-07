@@ -1,4 +1,4 @@
-// 本文件由 generate.mjs 从 contracts/rpc/sixgates.json 生成；不要手写修改。
+// 本文件由 generate.mjs 从 contracts/rpc/ratiflow.json 生成；不要手写修改。
 export const RPC_METHODS: readonly string[] = [
   'core.version',
   'diagnostics.check',
@@ -138,6 +138,8 @@ export const RPC_METHODS: readonly string[] = [
   'gate.requestRelease',
   'gate.decideRelease',
   'gate.getRelease',
+  'gate.requestManualConfirmation',
+  'gate.manualConfirmations',
   'stage.attempts',
   'stage.package',
   'snapshot.get',
