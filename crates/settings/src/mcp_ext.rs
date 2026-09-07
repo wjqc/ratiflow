@@ -479,13 +479,16 @@ pub struct ActiveMcpTool {
     pub transport: String,
     pub command: String,
     pub args: Vec<String>,
+    /// WP-4：导入型 server 的 import 行 id（直启注册为空串）——call 前冻结复核入口。
+    pub import_id: String,
 }
 
 pub fn active_tools(store: &Store) -> Vec<ActiveMcpTool> {
     store
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT s.id, s.name, t.tool_name, t.description, t.schema_json, t.schema_digest, t.read_only_hint, s.transport, s.command, s.args_json
+                "SELECT s.id, s.name, t.tool_name, t.description, t.schema_json, t.schema_digest, t.read_only_hint, s.transport, s.command, s.args_json,
+                        COALESCE((SELECT i.id FROM mcp_repo_imports i WHERE i.server_id = s.id LIMIT 1), '')
                  FROM mcp_server_tools t JOIN mcp_servers s ON s.id = t.server_id
                  WHERE t.status='active' AND s.status='active' AND s.enabled=1
                  ORDER BY s.name, t.tool_name",
@@ -502,6 +505,7 @@ pub fn active_tools(store: &Store) -> Vec<ActiveMcpTool> {
                     transport: r.get(7)?,
                     command: r.get(8)?,
                     args: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
+                    import_id: r.get(10)?,
                 })
             })?;
             let out = rows.flatten().collect();

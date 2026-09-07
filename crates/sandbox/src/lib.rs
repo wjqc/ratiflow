@@ -355,6 +355,16 @@ pub fn spawn_sandboxed(
     policy: &crate::SandboxPolicy,
     argv: &[String],
 ) -> Result<ManagedChild, SandboxError> {
+    spawn_sandboxed_in(policy, argv, None)
+}
+
+/// 同 spawn_sandboxed，但子进程以 work_dir 为 cwd（导入型 server 的相对入口
+/// 必须以 checkout 为工作目录解析；None = 继承当前进程 cwd）。
+pub fn spawn_sandboxed_in(
+    policy: &crate::SandboxPolicy,
+    argv: &[String],
+    work_dir: Option<&std::path::Path>,
+) -> Result<ManagedChild, SandboxError> {
     if !policy.network_off {
         return Err(SandboxError::Denied(
             "mcp_sandbox_policy: MCP 沙箱策略必须禁网（network_off=false 不可接受）".into(),
@@ -369,6 +379,9 @@ pub fn spawn_sandboxed(
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(dir) = work_dir {
+            cmd.current_dir(dir);
+        }
         use_process_group(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| SandboxError::Io(e.to_string()))?;
         let stdin = child
@@ -421,14 +434,14 @@ pub fn spawn_sandboxed(
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = (policy, argv);
+        let _ = (policy, argv, work_dir);
         Err(SandboxError::Denied(
             "mcp_platform_unsupported: Linux Landlock ABI v1 无网络隔离位（需 ABI≥4/内核≥6.7，UP-3a），MCP 沙箱暂不支持".into(),
         ))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (policy, argv);
+        let _ = (policy, argv, work_dir);
         Err(SandboxError::Denied(
             "mcp_platform_unsupported: 本平台无内核沙箱后端".into(),
         ))

@@ -261,7 +261,13 @@ export type RpcMethodName =
   | 'notification.list'
   | 'skill.importFromRegistry'
   | 'autonomy.createGrant'
-  | 'autonomy.revokeGrant';
+  | 'autonomy.revokeGrant'
+  | 'mcp.importAdd'
+  | 'mcp.importDecide'
+  | 'mcp.importResume'
+  | 'mcp.importRevoke'
+  | 'mcp.importList'
+  | 'mcp.importGet';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -523,6 +529,12 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'skill.importFromRegistry',
   'autonomy.createGrant',
   'autonomy.revokeGrant',
+  'mcp.importAdd',
+  'mcp.importDecide',
+  'mcp.importResume',
+  'mcp.importRevoke',
+  'mcp.importList',
+  'mcp.importGet',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -2002,4 +2014,37 @@ export interface AutonomyCreateGrantParams {
 export interface AutonomyRevokeGrantParams {
   grantId: string;
   reason?: string;
+}
+
+export interface McpImportAddParams {
+  repoUrl: string;
+  ref: string;
+  idempotencyKey: string;
+  createdBy?: string;
+}
+
+export interface McpImportDecideParams {
+  importId: string;
+  decision: string;
+  decidedBy: string;
+  idempotencyKey: string;
+  reason?: string;
+}
+
+export interface McpImportResumeParams {
+  importId: string;
+  idempotencyKey: string;
+}
+
+export interface McpImportRevokeParams {
+  importId: string;
+  decidedBy: string;
+  idempotencyKey: string;
+  reason?: string;
+}
+
+export type McpImportListParams = Record<string, never>;
+
+export interface McpImportGetParams {
+  importId: string;
 }

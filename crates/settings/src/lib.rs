@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod executor_ext;
 pub mod knowledge_defaults;
 pub mod mcp_ext;
+pub mod mcp_import;
 pub mod operations;
 pub mod policy_ext;
 pub mod profiles;

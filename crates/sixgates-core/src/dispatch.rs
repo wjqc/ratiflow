@@ -2112,6 +2112,76 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
         "mcp.toolsList" => mcp_tools_list(store, opt_str_param(params, "serverId").as_deref()),
 
+        // --- Git 仓库导入 MCP（RDWS v1.4 WP-4 / ADR flag：SIXGATES_MCP_GIT_IMPORT）---
+        "mcp.importAdd" => with_rpc_receipt(
+            store,
+            &opt_str_param(params, "idempotencyKey").unwrap_or_default(),
+            "mcp.importAdd",
+            params,
+            || {
+                sg_settings::mcp_import::import_add(
+                    store,
+                    &store.data_dir,
+                    &str_param(params, "repoUrl")?,
+                    &str_param(params, "ref")?,
+                    &opt_str_param(params, "createdBy").unwrap_or_else(|| "local-user".into()),
+                )
+                .map_err(store_err)
+            },
+        ),
+        "mcp.importDecide" => with_rpc_receipt(
+            store,
+            &opt_str_param(params, "idempotencyKey").unwrap_or_default(),
+            "mcp.importDecide",
+            params,
+            || {
+                sg_settings::mcp_import::import_decide(
+                    store,
+                    &store.data_dir,
+                    &str_param(params, "importId")?,
+                    &str_param(params, "decision")?,
+                    &str_param(params, "decidedBy")?,
+                    &opt_str_param(params, "reason").unwrap_or_default(),
+                )
+                .map_err(store_err)
+            },
+        ),
+        "mcp.importResume" => with_rpc_receipt(
+            store,
+            &opt_str_param(params, "idempotencyKey").unwrap_or_default(),
+            "mcp.importResume",
+            params,
+            || {
+                sg_settings::mcp_import::import_resume(
+                    store,
+                    &store.data_dir,
+                    &str_param(params, "importId")?,
+                )
+                .map_err(store_err)
+            },
+        ),
+        "mcp.importRevoke" => with_rpc_receipt(
+            store,
+            &opt_str_param(params, "idempotencyKey").unwrap_or_default(),
+            "mcp.importRevoke",
+            params,
+            || {
+                sg_settings::mcp_import::import_revoke(
+                    store,
+                    &store.data_dir,
+                    &str_param(params, "importId")?,
+                    &str_param(params, "decidedBy")?,
+                    &opt_str_param(params, "reason").unwrap_or_default(),
+                )
+                .map_err(store_err)
+            },
+        ),
+        "mcp.importList" => sg_settings::mcp_import::import_list(store).map_err(store_err),
+        "mcp.importGet" => {
+            sg_settings::mcp_import::import_get(store, &str_param(params, "importId")?)
+                .map_err(store_err)
+        }
+
         // M4：模型缓存与压缩观测（不含任何 reasoning 正文）。
         "model.usage" => {
             let run_id = opt_str_param(params, "runId");

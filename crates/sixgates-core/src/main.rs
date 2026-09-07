@@ -194,6 +194,10 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
     // WP-1（RDWS v1.4 §1.4）：Grant 计量残留对账——终态 run 仍有 reserved 消费行 →
     // 按 model_calls/tool_proposals 权威事实回填 settle；无法对账 →
     // reconciliation_required + outbox 告警（人工处置后置 manual_action_required）。
+    // WP-4（RDWS v1.4）：Git 导入启动对账——过期租约收敛 unknown + 孤儿临时目录清理。
+    if let Err(e) = sg_settings::mcp_import::startup_reconcile(&store, &store.data_dir) {
+        eprintln!("{{\"level\":\"warn\",\"msg\":\"mcp import startup reconcile: {e}\"}}");
+    }
     match sg_policy::autonomy::reconcile_all_terminal_runs(&store) {
         Ok(n) if n > 0 => {
             eprintln!("{{\"level\":\"info\",\"msg\":\"grant ledger reconcile: {n} residues\"}}");
@@ -201,6 +205,25 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
         Ok(_) => {}
         Err(e) => eprintln!("{{\"level\":\"warn\",\"msg\":\"grant ledger reconcile: {e}\"}}"),
     }
+    // WP-4：导入 worker（每 5s tick；flag 关闭时 tick 内部自 no-op）。
+    // run_store 是 DB actor 专属连接——worker 用独立 Store 连接避免与 actor 争锁。
+    {
+        let data_dir = store.data_dir.to_string_lossy().to_string();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let Ok(worker_store) =
+                Store::open(std::path::Path::new(&data_dir), env!("CARGO_PKG_VERSION"))
+            else {
+                continue;
+            };
+            if let Err(e) =
+                sg_settings::mcp_import::tick_probing(&worker_store, &worker_store.data_dir)
+            {
+                eprintln!("{{\"level\":\"warn\",\"msg\":\"mcp import tick: {e}\"}}");
+            }
+        });
+    }
+
     let schema_version = store.schema_version().unwrap_or(0);
     let initial_seq = outbox::latest_sequence(&store).unwrap_or(0);
 

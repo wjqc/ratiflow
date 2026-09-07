@@ -328,10 +328,20 @@ impl SandboxedTransport {
         command: &str,
         args: &[String],
     ) -> Result<Self, String> {
+        Self::spawn_in(policy, None, command, args)
+    }
+
+    /// 同 spawn，但子进程以 work_dir 为 cwd（导入型 server 以 checkout 为工作目录）。
+    pub fn spawn_in(
+        policy: &sg_sandbox::SandboxPolicy,
+        work_dir: Option<&std::path::Path>,
+        command: &str,
+        args: &[String],
+    ) -> Result<Self, String> {
         let argv = std::iter::once(command.to_string())
             .chain(args.iter().cloned())
             .collect::<Vec<_>>();
-        let managed = sg_sandbox::spawn_sandboxed(policy, &argv)
+        let managed = sg_sandbox::spawn_sandboxed_in(policy, &argv, work_dir)
             .map_err(|e| format!("mcp_sandbox_unavailable: {e}"))?;
         Ok(Self {
             managed,

@@ -387,6 +387,12 @@ fn execute_tool(
             // M6：MCP 工具不走静态注册表（动态注册+审批治理），结果按 64KiB 裁剪。
             // Registry 步：活跃注册解析（撤销 → tool_revoked，先于 PlanGuard）。
             let active = resolve_active_mcp(store, &server, &tool)?;
+            // WP-4：导入型 server 每次 call 前复核内容冻结五元组（同 canonical 算法
+            // 重算工作树 Merkle + porcelain）——漂移 → tool_source_drift fail-closed，
+            // 仅可重新 import 产新候选（改依赖模块不改入口文件同样被拒）。
+            if !active.import_id.is_empty() {
+                sg_settings::mcp_import::verify_freeze(store, &store.data_dir, &active.import_id)?;
+            }
             // 分类步：readOnlyHint → read；否则保守 external_write。
             let effect = if active.read_only {
                 sg_policy::plan_guard::EffectClass::Read
@@ -1238,12 +1244,32 @@ fn mcp_invoke(
     let policy_digest_w = policy_digest.clone();
     let (tx, rx) =
         std::sync::mpsc::channel::<Result<sg_integrations::mcp::McpToolCallOutcome, String>>();
+    // 导入型 server：入口以 checkout 为 cwd；policy 追加 state/tmp 可写面与冻结参数。
+    let mut spawn_policy = policy.clone();
+    let mut spawn_cwd: Option<std::path::PathBuf> = None;
+    if !active.import_id.is_empty() {
+        let root = store.data_dir.join("mcp-imports").join(&active.import_id);
+        spawn_cwd = Some(root.join("checkout"));
+        spawn_policy
+            .write_paths
+            .push(root.join("tmp").to_string_lossy().to_string());
+        spawn_policy
+            .write_paths
+            .push(root.join("state").to_string_lossy().to_string());
+    }
     let _worker = std::thread::spawn(move || {
         let outcome = (|| -> Result<sg_integrations::mcp::McpToolCallOutcome, String> {
+            // 导入型相对入口：execvp 无斜杠只搜 PATH——显式 ./（cwd=checkout）。
+            let invoke_cmd = if !active.import_id.is_empty() && !active.command.contains('/') {
+                format!("./{}", active.command)
+            } else {
+                active.command.clone()
+            };
             let mut client = sg_integrations::mcp::McpClient::new(
-                sg_integrations::mcp::SandboxedTransport::spawn(
-                    &policy,
-                    &active.command,
+                sg_integrations::mcp::SandboxedTransport::spawn_in(
+                    &spawn_policy,
+                    spawn_cwd.as_deref(),
+                    &invoke_cmd,
                     &active.args,
                 )?,
             );

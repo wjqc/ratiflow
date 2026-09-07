@@ -259,4 +259,10 @@ export const RPC_METHODS: readonly string[] = [
   'skill.importFromRegistry',
   'autonomy.createGrant',
   'autonomy.revokeGrant',
+  'mcp.importAdd',
+  'mcp.importDecide',
+  'mcp.importResume',
+  'mcp.importRevoke',
+  'mcp.importList',
+  'mcp.importGet',
 ];

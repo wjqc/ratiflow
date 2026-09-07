@@ -4558,6 +4558,121 @@
       ],
       "result": "value",
       "desc": "撤销自治授权(即时生效;重放幂等;审计)"
+    },
+    {
+      "name": "mcp.importAdd",
+      "params": [
+        {
+          "name": "repoUrl",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "ref",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "createdBy",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "description": "Git 仓库导入 MCP：解析 ref→SHA + 建 probe 审批（两次批准前零代码执行）"
+    },
+    {
+      "name": "mcp.importDecide",
+      "params": [
+        {
+          "name": "importId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "description": "导入审批唯一权威推进入口（probe→probing；activation→建 server+active；reject→failed+清理）"
+    },
+    {
+      "name": "mcp.importResume",
+      "params": [
+        {
+          "name": "importId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "description": "unknown 恢复：确认旧 worker 不存活后清 owner 重置 probing"
+    },
+    {
+      "name": "mcp.importRevoke",
+      "params": [
+        {
+          "name": "importId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "description": "任意可达态撤销：目录清理 + 已注册 server 级联 revoked"
+    },
+    {
+      "name": "mcp.importList",
+      "params": [],
+      "description": "导入列表（八态）"
+    },
+    {
+      "name": "mcp.importGet",
+      "params": [
+        {
+          "name": "importId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "description": "导入详情（entrypoint/候选/冻结五元组/cursor/server）"
     }
   ],
   "events": [
