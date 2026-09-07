@@ -185,7 +185,7 @@ export function ProjectSidebar({
         aria-label="返回任务首页"
       >
         <IconLogo size={20} className="sg-brand-logo" />
-        <span>通关 SixGates</span>
+        <span>Ratiflow</span>
         {coreReady === false ? (
           <span className="sg-status sg-status--error" title="Rust core 不可用">
             core 异常

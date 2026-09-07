@@ -1,7 +1,8 @@
 appId: local.sixgates.desktop
-productName: SixGates
+productName: Ratiflow
 directories:
   output: release
+  buildResources: build
 files:
   - dist/**
 extraResources:
@@ -10,3 +11,8 @@ extraResources:
 mac:
   category: public.app-category.developer-tools
   target: dir
+  icon: icon.icns
+win:
+  icon: icon.ico
+linux:
+  icon: icon.png

@@ -102,7 +102,7 @@ const DEFS: Record<string, PendingDef> = {
     features: [
       '已安装编辑器检测（VS Code / Cursor 等）',
       '默认打开命令与命令模板',
-      'SixGates 扩展状态',
+      'Ratiflow 扩展状态',
     ],
     awaiting: ['editor.detect（S32 可选，未进契约——非发布阻塞）'],
     fallback: '可在系统文件管理器中直接打开项目目录。',

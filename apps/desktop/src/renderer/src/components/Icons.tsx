@@ -23,18 +23,10 @@ function base(size: number) {
 
 export const IconLogo = ({ size = 20, ...rest }: IconProps) => (
   <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden focusable={false} {...rest}>
-    <path
-      d="M10 1.8l7 4v8.4l-7 4-7-4V5.8l7-4z"
-      stroke="#1769e8"
-      strokeWidth="1.6"
-      strokeLinejoin="round"
-    />
-    <path
-      d="M10 5.6l3.7 2.1v4.6L10 14.4l-3.7-2.1V7.7L10 5.6z"
-      fill="#1769e8"
-      opacity="0.18"
-    />
-    <circle cx="10" cy="10" r="1.6" fill="#1769e8" />
+    <rect x="2" y="3" width="10" height="13" rx="2.2" fill="#1769e8" opacity="0.28" />
+    <rect x="5" y="4" width="10" height="13" rx="2.2" fill="#1769e8" opacity="0.56" />
+    <rect x="8" y="5.5" width="10" height="11.5" rx="2.2" fill="#1769e8" />
+    <path d="M10.4 11.1l2.1 2 3.4-4" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
 

@@ -1,5 +1,5 @@
 {
-  "productName": "SixGates",
+  "productName": "Ratiflow",
   "name": "@sixgates/desktop",
   "private": true,
   "version": "3.0.0",
@@ -36,6 +36,6 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
-  "description": "通关 SixGates — AI 软件交付工作台",
-  "author": "SixGates"
+  "description": "Ratiflow — Governed AI Delivery",
+  "author": "Ratiflow"
 }

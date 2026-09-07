@@ -263,7 +263,7 @@ function createWindow(): void {
     minWidth: 1180,
     minHeight: 760,
     show: false,
-    title: '通关 SixGates',
+    title: 'Ratiflow',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -444,9 +444,9 @@ function registerIpc(): void {
 function buildMenu(): void {
   const template: Array<Electron.MenuItemConstructorOptions> = [
     {
-      label: '通关 SixGates',
+      label: 'Ratiflow',
       submenu: [
-        { label: '关于 SixGates', click: () => void shell.openExternal('https://sixgates.local') },
+        { label: '关于 Ratiflow', click: () => void shell.openExternal('https://sixgates.local') },
         { type: 'separator' },
         { role: 'quit', label: '退出' },
       ],
@@ -512,7 +512,7 @@ function bootstrap(): void {
   try {
     client = new CoreClient(resolveCoreBinary(), join(userData, 'data'), logPath);
   } catch (error) {
-    dialog.showErrorBox('SixGates core 启动失败', `${error}\n\n日志：${logPath}`);
+    dialog.showErrorBox('Ratiflow core 启动失败', `${error}\n\n日志：${logPath}`);
     registerIpc();
     createWindow();
     return;
@@ -526,7 +526,7 @@ function bootstrap(): void {
   try {
     await client.start();
   } catch (error) {
-    dialog.showErrorBox('SixGates core 启动失败', `${error}\n\n日志：${logPath}`);
+    dialog.showErrorBox('Ratiflow core 启动失败', `${error}\n\n日志：${logPath}`);
   }
   registerIpc();
   createWindow();

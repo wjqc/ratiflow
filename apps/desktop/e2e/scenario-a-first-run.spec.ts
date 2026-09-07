@@ -19,7 +19,7 @@ test('A0 设置替换项目侧栏，高级能力按需展开', async ({}, testIn
     if (message.type() === 'error') consoleErrors.push(message.text());
   });
 
-  await expect(e2e.window).toHaveTitle(/SixGates/);
+  await expect(e2e.window).toHaveTitle(/Ratiflow/);
   await expect(e2e.window.getByRole('complementary', { name: '项目导航' })).toBeVisible();
   await e2e.window.getByRole('button', { name: '设置' }).click();
 

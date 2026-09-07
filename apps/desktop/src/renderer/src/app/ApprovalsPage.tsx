@@ -6,6 +6,11 @@ import { IconAlert, IconCheck, IconShield } from '../components/Icons';
 interface ApprovalInfo {
   id: string; subject_type: string; subject_id: string; risk: string;
   status: string; reason: string; expires_at: string; action_digest?: string;
+  // WP-6 三要素（tool_proposal 审批才有；缺省如实留空）。
+  rationale?: string;
+  confidence?: number | null;
+  impactCompleteness?: 'complete' | 'incomplete' | 'unknown' | string;
+  impactNodeCount?: number;
 }
 
 interface ReleaseDetail {
@@ -22,7 +27,8 @@ type Tab = 'pending' | 'decided' | 'expired';
 const TAB_LABELS: Record<Tab, string> = { pending: '待处理', decided: '已决定', expired: '已过期' };
 
 // 审批中心（规范 §4.5，原型 05）：ActionDigest 绑定；批准/拒绝都要求可审计理由。
-// 左列表 + 右详情；不虚构步骤/影响面等后端未返回的字段。
+// 左列表 + 右详情；工具提案展示 WP-6 三要素（影响面 completeness 服务端权威 /
+// 模型理由与置信度=模型自报 untrusted_display，不参与判定）。
 export default function ApprovalsPage({ onDecided }: Props) {
   const [items, setItems] = useState<ApprovalInfo[]>([]);
   const [tab, setTab] = useState<Tab>('pending');
@@ -41,8 +47,9 @@ export default function ApprovalsPage({ onDecided }: Props) {
     }
   }, []);
 
-  // F02 事件驱动刷新：审批/任务事件即时拉取；30s 轮询仅作断线降级。
+  // F02 事件驱动刷新：挂载首拉 + 审批/任务事件即时拉取；30s 轮询仅作断线降级。
   useEffect(() => {
+    void reload();
     const off = window.sixgates.onEvent((e) => {
       if (e.type.startsWith('approval.') || e.type.startsWith('run.')) void reload();
     });
@@ -267,6 +274,55 @@ export default function ApprovalsPage({ onDecided }: Props) {
                 </div>
               ) : null}
 
+              {selected.subject_type === 'tool_proposal' ? (
+                <div className="sg-ap-block">
+                  <div className="sg-ap-block-label">工具提案依据（服务端权威）</div>
+                  <dl className="sg-kv">
+                    <dt>影响面</dt>
+                    <dd>
+                      {selected.impactCompleteness ? (
+                        <>
+                          <span
+                            className={`sg-chip ${selected.impactCompleteness === 'complete' ? '' : 'sg-chip--danger'}`}
+                            data-testid="impact-completeness"
+                          >
+                            {impactLabel(selected.impactCompleteness)}
+                          </span>
+                          {typeof selected.impactNodeCount === 'number'
+                            ? ` · ${selected.impactNodeCount} 个关联节点`
+                            : ''}
+                          <span className="sg-muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                            审批等待期间影响面漂移将使本审批自动失效
+                          </span>
+                        </>
+                      ) : (
+                        <span className="sg-muted">未绑定（旧版审批）</span>
+                      )}
+                    </dd>
+                    {selected.rationale ? (
+                      <>
+                        <dt>模型理由</dt>
+                        <dd data-testid="model-rationale">
+                          {selected.rationale}
+                          <span className="sg-muted" style={{ marginLeft: 6, fontSize: 12 }}>（模型自报）</span>
+                        </dd>
+                      </>
+                    ) : null}
+                    {selected.confidence != null ? (
+                      <>
+                        <dt>置信度</dt>
+                        <dd data-testid="model-confidence">
+                          {formatConfidence(selected.confidence)}
+                          <span className="sg-muted" style={{ marginLeft: 6, fontSize: 12 }}>
+                            （模型自报，仅供参考——不参与自动判定）
+                          </span>
+                        </dd>
+                      </>
+                    ) : null}
+                  </dl>
+                </div>
+              ) : null}
+
               <div className="sg-ap-block">
                 <div className="sg-ap-block-label">申请理由</div>
                 <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7 }}>{selected.reason}</p>
@@ -343,6 +399,17 @@ function subjectLabel(type: string): string {
   if (type === 'baseline') return '基线';
   if (type === 'risk') return '风险';
   return type;
+}
+
+function impactLabel(completeness: string): string {
+  if (completeness === 'complete') return '全图可达';
+  if (completeness === 'incomplete') return '影响面过大（已截断）';
+  return '无谱系数据';
+}
+
+function formatConfidence(v: number): string {
+  if (v >= 0 && v <= 1) return `${Math.round(v * 100)}%`;
+  return String(v);
 }
 
 function statusLabel(status: string): string {

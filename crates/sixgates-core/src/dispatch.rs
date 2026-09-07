@@ -2613,7 +2613,48 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50),
             )
             .map_err(store_err)?;
-            Ok(json!({"items": items}))
+            // WP-6（RDWS v1.4 A3）：tool_proposal 审批拼装展示三要素——提案的
+            // rationale/confidence（模型自报，untrusted_display）+ 实时影响面
+            // completeness（服务端权威，非模型自述）。缺行/无绑定时字段缺省，前端如实留空。
+            let enriched: Vec<Value> = items
+                .iter()
+                .map(|a| {
+                    let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
+                    if a.subject_type == "tool_proposal" {
+                        let detail: Option<(String, String)> = store
+                            .with_conn(|c| {
+                                Ok(c.query_row(
+                                    "SELECT COALESCE(rationale,''), COALESCE(confidence_json,'')
+                                 FROM tool_proposals WHERE id=?1",
+                                    [&a.subject_id],
+                                    |r| Ok((r.get(0)?, r.get(1)?)),
+                                )
+                                .ok())
+                            })
+                            .unwrap_or(None);
+                        if let Some((rationale, confidence_json)) = detail {
+                            v["rationale"] = json!(rationale);
+                            v["confidence"] = serde_json::from_str::<Value>(&confidence_json)
+                                .ok()
+                                .and_then(|c| c.get("value").cloned())
+                                .unwrap_or(Value::Null);
+                        }
+                        if !a.impact_digest.is_empty() {
+                            match sg_provenance::impact::for_proposal(store, &a.subject_id) {
+                                Ok(impact) => {
+                                    v["impactCompleteness"] = json!(impact.completeness.as_str());
+                                    v["impactNodeCount"] = json!(impact.nodes.len());
+                                }
+                                Err(_) => {
+                                    v["impactCompleteness"] = json!("unknown");
+                                }
+                            }
+                        }
+                    }
+                    v
+                })
+                .collect();
+            Ok(json!({"items": enriched}))
         }
         "approval.decide" => {
             let approval_id = str_param(params, "approvalId")?;
