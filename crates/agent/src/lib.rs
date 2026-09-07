@@ -365,6 +365,7 @@ pub fn execute_run(
                 compact.keep_turns,
                 iteration,
                 est,
+                &grant_ledger_id,
             ) {
                 Ok(after) => {
                     log_rollout(
@@ -414,10 +415,13 @@ pub fn execute_run(
         // WP-1（RDWS v1.4）：模型每 model_call 独立消费行（每次重试/压缩后新 key）。
         // 保留量用 utf8_bytes_upper_v1 上界（bytes/4 对中文是低估、非上界，禁用）；
         // tokens_out 按请求 max_tokens 保留。超限 → autonomy_budget_exhausted（零消耗）。
+        // P1-1（评审修复）：model_call id 在调用方生成并经 TurnOpts 透传——
+        // model_calls 权威行 id == ledger consumption_key，崩溃对账才能命中权威用量。
+        let mc_id = ids::new_id("mc");
         let ledger_key = if grant_ledger_id.is_empty() {
             String::new()
         } else {
-            ids::new_id("mc")
+            mc_id.clone()
         };
         if !ledger_key.is_empty() {
             let est_in = tokens_upper_v1(&request);
@@ -454,12 +458,20 @@ pub fn execute_run(
                 cancel,
                 forwarder: forwarder.clone(),
                 prompt_cache_key: cache_key.clone(),
+                model_call_id: mc_id,
             },
         ) {
             Ok(resp) => {
-                // 实际用量 settle（Provider usage 权威；actual 超 reserve 由 ledger
-                // 判 reconciliation_required，不写 0 冒充）。
+                // 实际用量 settle：仅 Provider 真实返回过 usage 才作为 actual（P1-2：
+                // usage 缺失时数值是估算/缺省——settle None 保留 reserve 进
+                // reconciliation，不写 0 冒充）；actual 超 reserve 由 ledger 判
+                // reconciliation_required。
                 if !ledger_key.is_empty() {
+                    let (tin, tout) = if resp.usage_present {
+                        (Some(resp.tokens_in), Some(resp.tokens_out))
+                    } else {
+                        (None, None)
+                    };
                     let _ = sg_policy::autonomy::settle(
                         store,
                         &grant_ledger_id,
@@ -467,8 +479,8 @@ pub fn execute_run(
                         &ledger_key,
                         &[
                             ("model_calls", Some(1)),
-                            ("tokens_in", Some(resp.tokens_in)),
-                            ("tokens_out", Some(resp.tokens_out)),
+                            ("tokens_in", tin),
+                            ("tokens_out", tout),
                         ],
                         &json!({"source": "call_turn", "finishReason": resp.finish_reason})
                             .to_string(),
@@ -792,6 +804,7 @@ fn compact_history(
     keep_turns: usize,
     iteration: usize,
     est_before: usize,
+    grant_ledger_id: &str,
 ) -> Result<usize, Error> {
     // 回滚点（phase=running；压缩失败可从此恢复重试）。
     checkpoint(store, &run.id, iteration, messages, None, &[], "compaction");
@@ -805,14 +818,71 @@ fn compact_history(
         response_schema: None,
         tools_json: None,
     };
+    // P1-3（评审修复）：压缩调用是真实计费消费——每次调用（含重试）以独立
+    // model_call id 走同一记账管线（RDWS v1.4「每次 retry/压缩后重试都使用新
+    // model_call id 建新 reservation」）；ledger key 与 model_calls 行 id 共用。
+    let compact_call = |attempt: u32| -> Result<sg_integrations::model::CompletionResponse, Error> {
+        let mc_id = ids::new_id("mc");
+        if !grant_ledger_id.is_empty() {
+            let est_in = tokens_upper_v1(&request);
+            sg_policy::autonomy::reserve(
+                store,
+                grant_ledger_id,
+                &run.id,
+                &mc_id,
+                &[
+                    ("model_calls", 1),
+                    ("tokens_in", est_in),
+                    ("tokens_out", request.max_tokens.max(0)),
+                ],
+                &json!({"estimator": "utf8_bytes_upper_v1", "kind": "compaction", "attempt": attempt}),
+            )?;
+        }
+        let result = gateway
+            .call_with_id(store, &run.id, budget, &request, &mc_id)
+            .map_err(|e| Error::Message(format!("context_too_large: 压缩调用失败 {e}")));
+        if !grant_ledger_id.is_empty() {
+            match &result {
+                Ok(resp) => {
+                    let (tin, tout) = if resp.usage_present {
+                        (Some(resp.tokens_in), Some(resp.tokens_out))
+                    } else {
+                        (None, None)
+                    };
+                    let _ = sg_policy::autonomy::settle(
+                        store,
+                        grant_ledger_id,
+                        &run.id,
+                        &mc_id,
+                        &[
+                            ("model_calls", Some(1)),
+                            ("tokens_in", tin),
+                            ("tokens_out", tout),
+                        ],
+                        &json!({"source": "compaction", "attempt": attempt}).to_string(),
+                    );
+                }
+                Err(e) => {
+                    let preflight = e.to_string().contains("budget_exceeded")
+                        || modelgw::open_phase_failure(&e.to_string());
+                    let _ = sg_policy::autonomy::settle(
+                        store, grant_ledger_id, &run.id, &mc_id,
+                        if preflight {
+                            &[("model_calls", Some(0)), ("tokens_in", Some(0)), ("tokens_out", Some(0))]
+                        } else {
+                            &[("model_calls", Some(1))]
+                        },
+                        &json!({"source": "compaction_failed", "attempt": attempt, "error": e.to_string()}).to_string(),
+                    );
+                }
+            }
+        }
+        result
+    };
     // M4：摘要 JSON 校验（字段/大小）——失败重试一次，仍失败保留原 checkpoint。
-    let mut resp = gateway
-        .call(store, &run.id, budget, &request)
-        .map_err(|e| Error::Message(format!("context_too_large: 压缩调用失败 {e}")))?;
+    let mut resp = compact_call(0)?;
     if validate_summary_json(&resp.content).is_err() {
-        resp = gateway
-            .call(store, &run.id, budget, &request)
-            .map_err(|e| Error::Message(format!("context_too_large: 压缩调用失败 {e}")))?;
+        resp = compact_call(1)?;
         if validate_summary_json(&resp.content).is_err() {
             return Err(Error::Message(
                 "context_too_large: 压缩摘要校验失败（字段缺失或超限）；原 checkpoint 保留".into(),
@@ -2640,6 +2710,7 @@ mod tests {
                     cancel: &token,
                     forwarder: Some(recorder.clone()),
                     prompt_cache_key: "test-cache-key".into(),
+                    model_call_id: ids::new_id("mc"),
                 },
             )
             .unwrap();
@@ -2667,6 +2738,7 @@ mod tests {
                     cancel: &token,
                     forwarder: Some(recorder.clone()),
                     prompt_cache_key: "test-cache-key".into(),
+                    model_call_id: ids::new_id("mc"),
                 },
             )
             .unwrap();
@@ -2929,6 +3001,7 @@ mod tests {
                     cancel: &token,
                     forwarder: None,
                     prompt_cache_key: "k1".into(),
+                    model_call_id: ids::new_id("mc"),
                 },
             )
             .unwrap();
@@ -2959,6 +3032,7 @@ mod tests {
                     cancel: &token,
                     forwarder: None,
                     prompt_cache_key: "k1".into(),
+                    model_call_id: ids::new_id("mc"),
                 },
             )
             .unwrap();
@@ -2988,6 +3062,7 @@ mod tests {
                     cancel: &token,
                     forwarder: None,
                     prompt_cache_key: "k1".into(),
+                    model_call_id: ids::new_id("mc"),
                 },
             )
             .unwrap();
@@ -3631,5 +3706,57 @@ mod tests {
         let final_run = get_run(&store, &run.id).unwrap();
         assert_eq!(final_run.status, "failed");
         assert!(final_run.result.contains("context_too_large"));
+    }
+
+    /// P1-1（评审修复）：TurnOpts.model_call_id 即 model_calls 权威行 id——
+    /// 与 ledger consumption_key 共用，崩溃对账按 id 命中权威用量。
+    #[test]
+    fn call_turn_records_model_calls_with_caller_id() {
+        let store = setup();
+        let fake = FakeModel::default();
+        fake.push_response(r#"{"action":"final","summary":"完成"}"#, 5, 3);
+        let gateway = Gateway::new(Box::new(fake));
+        let token = sg_integrations::CancelToken::new();
+        let fixed_id = ids::new_id("mc");
+        gateway
+            .call_turn(
+                &store,
+                "run-mcid",
+                &Budget::default(),
+                &CompletionRequest {
+                    model: String::new(),
+                    system_prompt: "s".into(),
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: "hi".into(),
+                        ..Default::default()
+                    }],
+                    max_tokens: 64,
+                    response_schema: None,
+                    tools_json: None,
+                },
+                &modelgw::TurnOpts {
+                    cancel: &token,
+                    forwarder: None,
+                    prompt_cache_key: String::new(),
+                    model_call_id: fixed_id.clone(),
+                },
+            )
+            .unwrap();
+        let rows: Vec<String> = store
+            .with_conn(|c| {
+                let mut stmt =
+                    c.prepare("SELECT id FROM model_calls WHERE agent_run_id='run-mcid'")?;
+                let out = stmt
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(out)
+            })
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![fixed_id.clone()],
+            "权威行 id == 调用方指定 key（且恰一行）"
+        );
     }
 }

@@ -202,6 +202,9 @@ pub struct Usage {
     pub cached_input: i64,
     pub output: i64,
     pub reasoning_output: i64,
+    /// WP-1 计量语义（RDWS-003）：Provider 是否实际下发过 usage 事件——
+    /// 缺失时数值不可作为 settle 实际量（估算值只服务 budget，不进 ledger）。
+    pub measured: bool,
 }
 
 /// 协议错误终态（§4.3）。
@@ -311,6 +314,7 @@ impl TurnAggregator {
                     cached_input,
                     output,
                     reasoning_output,
+                    measured: true,
                 };
             }
             ModelEvent::Completed { finish_reason } => {
@@ -528,4 +532,36 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
+}
+
+/// P1-2（评审修复）：未收到 Usage 事件的轮次 measured=false——
+/// 数值不可作 ledger settle 实际量（settle None 进 reconciliation）。
+#[test]
+fn usage_missing_marks_unmeasured() {
+    let mut agg = TurnAggregator::new();
+    agg.feed(ModelEvent::TextDelta { text: "ok".into() })
+        .unwrap();
+    agg.feed(ModelEvent::Completed {
+        finish_reason: "stop".into(),
+    })
+    .unwrap();
+    let turn = agg.finish().unwrap();
+    assert!(!turn.usage.measured, "缺 Usage 事件 → measured=false");
+
+    let mut agg2 = TurnAggregator::new();
+    agg2.feed(ModelEvent::Usage {
+        input: 7,
+        cached_input: 0,
+        output: 3,
+        reasoning_output: 0,
+    })
+    .unwrap();
+    agg2.feed(ModelEvent::Completed {
+        finish_reason: "stop".into(),
+    })
+    .unwrap();
+    assert!(
+        agg2.finish().unwrap().usage.measured,
+        "收到 Usage 事件 → measured=true"
+    );
 }

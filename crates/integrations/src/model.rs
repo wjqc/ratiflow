@@ -51,6 +51,10 @@ pub struct CompletionResponse {
     pub cached_tokens: i64,
     #[serde(default)]
     pub reasoning_tokens: i64,
+    /// WP-1 计量：Provider 是否真实返回 usage（false = 数值为估算/缺省，不得作
+    /// ledger settle 实际量——settle None 进 reconciliation）。
+    #[serde(default)]
+    pub usage_present: bool,
     /// M4：本轮流式的 reasoning plaintext 经 AES-256-GCM 加密后的状态
     /// （base64(nonce||ciphertext||tag)）。None = 未启用持久化/无 reasoning。
     /// 网关层填充；明文永不出网关，不进 rollout/日志/UI。
@@ -225,6 +229,7 @@ impl ModelProvider for ModelHttp {
             reasoning_tokens: parsed["usage"]["completion_tokens_details"]["reasoning_tokens"]
                 .as_i64()
                 .unwrap_or(0),
+            usage_present: parsed["usage"].get("prompt_tokens").is_some(),
             reasoning_state_encrypted: None,
             reasoning_state_status: "none".into(),
         })

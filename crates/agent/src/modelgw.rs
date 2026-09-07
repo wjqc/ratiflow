@@ -67,6 +67,9 @@ pub struct TurnOpts<'a> {
     /// M4：prompt_cache_key = tenant/workitem/tool-schema/instruction digest 组合，
     /// 不含原始用户身份或秘密；仅作观测与显式键缓存能力启用时的请求字段。
     pub prompt_cache_key: String,
+    /// WP-1（P1-1 评审修复）：本轮 model_call 权威 id——调用方生成，ledger
+    /// consumption_key 与 model_calls 行 id 共用，崩溃对账按 id 命中权威用量。
+    pub model_call_id: String,
 }
 
 /// M4：压缩策略选择（provider_opaque → local_structured → fail）。
@@ -261,17 +264,18 @@ impl Gateway {
                     {
                         // 流打开期失败（未产出任何 token）：同协议非流式聚合兜底，
                         // 不回退正文 JSON。已见 delta 的中断不兜底（禁止双重消费）。
+                        // 兜底调用沿用同一 model_call_id（同一逻辑轮次的权威行）。
                         eprintln!(
                             "{{\"level\":\"warn\",\"msg\":\"stream open failed; fallback non-stream: {e}\"}}"
                         );
-                        return self.call(store, run_id, budget, req);
+                        return self.call_with_id(store, run_id, budget, req, &opts.model_call_id);
                     }
                     Err((e, _)) => return Err(e),
                     Ok(resp) => return Ok(resp),
                 }
             }
         }
-        self.call(store, run_id, budget, req)
+        self.call_with_id(store, run_id, budget, req, &opts.model_call_id)
     }
 
     /// 流式路径。Err 携带 (错误串, 是否已产出 delta)。
@@ -348,6 +352,7 @@ impl Gateway {
                         redactions,
                         &CompletionResponse::default(),
                         &opts.prompt_cache_key,
+                        &opts.model_call_id,
                     );
                     return Err((e, saw_delta));
                 }
@@ -373,6 +378,7 @@ impl Gateway {
                         .collect(),
                     cached_tokens: turn.usage.cached_input,
                     reasoning_tokens: turn.usage.reasoning_output,
+                    usage_present: turn.usage.measured,
                     reasoning_state_encrypted,
                     reasoning_state_status,
                 };
@@ -388,6 +394,7 @@ impl Gateway {
                     redactions,
                     &resp,
                     &opts.prompt_cache_key,
+                    &opts.model_call_id,
                 );
                 let _ = reasoning_bytes; // 字节数不落库（明文纪律）
                 Ok(resp)
@@ -425,6 +432,7 @@ impl Gateway {
                     redactions,
                     &CompletionResponse::default(),
                     &opts.prompt_cache_key,
+                    &opts.model_call_id,
                 );
                 Err((msg, saw_delta))
             }
@@ -440,6 +448,7 @@ impl Gateway {
                     redactions,
                     &CompletionResponse::default(),
                     &opts.prompt_cache_key,
+                    &opts.model_call_id,
                 );
                 Err((e, saw_delta))
             }
@@ -495,6 +504,7 @@ impl Gateway {
         redactions: usize,
         resp: &CompletionResponse,
         prompt_cache_key: &str,
+        model_call_id: &str,
     ) {
         let ttft = sink.timer.lock().unwrap().ttft_ms();
         let total_ms = started.elapsed().as_millis() as i64;
@@ -537,6 +547,7 @@ impl Gateway {
                 },
                 ttft_ms: ttft,
                 prompt_cache_key,
+                model_call_id: model_call_id.to_string(),
             },
         );
     }
@@ -548,6 +559,18 @@ impl Gateway {
         run_id: &str,
         budget: &Budget,
         req: &CompletionRequest,
+    ) -> Result<CompletionResponse, String> {
+        self.call_with_id(store, run_id, budget, req, &sg_store::ids::new_id("mc"))
+    }
+
+    /// 同 call，但 model_calls 权威行 id 由调用方指定（ledger consumption_key 共用）。
+    pub fn call_with_id(
+        &self,
+        store: &Store,
+        run_id: &str,
+        budget: &Budget,
+        req: &CompletionRequest,
+        model_call_id: &str,
     ) -> Result<CompletionResponse, String> {
         self.check_budget(budget)?;
         let (masked, redactions) = mask_request(req);
@@ -583,6 +606,7 @@ impl Gateway {
                         cached_tokens: resp.cached_tokens,
                         reasoning_tokens: resp.reasoning_tokens,
                         prompt_cache_key: "",
+                        model_call_id: model_call_id.to_string(),
                     },
                 );
                 Ok(resp)
@@ -611,6 +635,7 @@ impl Gateway {
                         finish_reason: None,
                         error_code: Some(e.split(':').next().unwrap_or("model_error")),
                         ttft_ms: None,
+                        model_call_id: model_call_id.to_string(),
                         cached_tokens: 0,
                         reasoning_tokens: 0,
                         prompt_cache_key: "",
@@ -662,6 +687,8 @@ struct CallStats<'a> {
     reasoning_tokens: i64,
     /// M4：缓存域键（观测与显式键缓存）。
     prompt_cache_key: &'a str,
+    /// WP-1（P1-1）：model_calls 权威行 id = 调用方生成的 ledger consumption_key。
+    model_call_id: String,
 }
 
 /// 流打开期失败判定（call_turn 非流式兜底的准入）：传输层/限流/打开即中断，
@@ -827,7 +854,7 @@ fn record_inner(store: &Store, run_id: &str, stats: &CallStats<'_>) -> Result<()
         conn.execute(
             "INSERT INTO model_calls(id, agent_run_id, provider, model, tokens_in, tokens_out, cost_micros, latency_ms, redactions, status, created_at, cached_tokens, reasoning_tokens)
              VALUES (?1,?2,?3,'default',?4,?5,0,?6,?7,?8,?9,?10,?11)",
-            rusqlite::params![ids::new_id("mc"), run_id, provider, tin, tout, latency_ms, redactions as i64, status, timefmt::now(), stats.cached_tokens, stats.reasoning_tokens],
+            rusqlite::params![stats.model_call_id, run_id, provider, tin, tout, latency_ms, redactions as i64, status, timefmt::now(), stats.cached_tokens, stats.reasoning_tokens],
         )?;
         // ADR-033 M0：模型轮次观测（additive；不存 prompt/response 正文）。
         let turn_seq: i64 = conn

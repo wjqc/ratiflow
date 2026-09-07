@@ -40,6 +40,9 @@ FROM approvals;
 
 DROP TABLE approvals;
 ALTER TABLE approvals_v42 RENAME TO approvals;
+-- 重建查询索引（DROP TABLE 连带删除 0017/0034 所建；先例均随重建补回）。
+CREATE INDEX idx_approvals_subject ON approvals(subject_type, subject_id);
+CREATE INDEX idx_approvals_wi_status ON approvals(workitem_id, status);
 
 -- 2) tool_proposals 加列（WP-1 rationale/confidence、WP-2 tool_provider、WP-3 send_phase）。
 ALTER TABLE tool_proposals ADD COLUMN rationale TEXT NOT NULL DEFAULT '';

@@ -155,24 +155,30 @@ pub fn validate_grant(
     }
     // WP-1（RDWS v1.4）：ledger 耗尽闭合——任一限额维度的累计占用已达上限 →
     // 状态位写实为 exhausted（治理可见）并拒绝。逐消费行的零消耗校验在 reserve。
-    if let Some(_dim) = store
-        .with_conn(|conn| -> Result<Option<String>, Error> {
-            let limits = limits_of(conn, grant_id)?;
-            if let Some(map) = limits.as_object() {
-                for (dim, v) in map {
-                    let Some(limit) = v.as_i64() else { continue };
-                    if limit <= 0 {
-                        continue;
-                    }
-                    if usage_total(conn, grant_id, dim)? >= limit {
-                        return Ok(Some(dim.clone()));
+    // P2-2（评审修复）：与 reserve 同受 SIXGATES_UNIFIED_RISK 门控——flag=0 时
+    // 完全恢复 WP-1 前行为（RDWS-003 探针：flag 关后 ledger 只读）。
+    let exhausted_dim = if crate::risk_model::enabled() {
+        store
+            .with_conn(|conn| -> Result<Option<String>, Error> {
+                let limits = limits_of(conn, grant_id)?;
+                if let Some(map) = limits.as_object() {
+                    for (dim, v) in map {
+                        let Some(limit) = v.as_i64() else { continue };
+                        if limit <= 0 {
+                            continue;
+                        }
+                        if usage_total(conn, grant_id, dim)? >= limit {
+                            return Ok(Some(dim.clone()));
+                        }
                     }
                 }
-            }
-            Ok(None)
-        })
-        .unwrap_or(None)
-    {
+                Ok(None)
+            })
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    if let Some(_dim) = exhausted_dim {
         let _ = store.with_conn(|conn| {
             conn.execute(
                 "UPDATE autonomy_grants SET status='exhausted', updated_at=?1 WHERE id=?2 AND status='active'",
@@ -572,6 +578,10 @@ pub fn reconcile_run_residues(store: &Store, run_id: &str) -> Result<i64, Error>
 
 /// 启动恢复扫描（挂 main.rs，automation 先例）：全部终态 run 的 reserved 残留。
 pub fn reconcile_all_terminal_runs(store: &Store) -> Result<i64, Error> {
+    if !crate::risk_model::enabled() {
+        // P2-2：flag 关后 ledger 只读（保留未对账占用，不改写行）。
+        return Ok(0);
+    }
     let run_ids: Vec<String> = store.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT l.run_id FROM grant_usage_ledger l

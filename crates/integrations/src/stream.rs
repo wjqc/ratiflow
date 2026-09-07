@@ -213,6 +213,7 @@ fn acc_to_response(acc: &StreamAcc, req: &CompletionRequest) -> CompletionRespon
             .collect(),
         cached_tokens: acc.usage.cached_input,
         reasoning_tokens: acc.usage.reasoning_output,
+        usage_present: acc.usage.measured,
         reasoning_state_encrypted: None,
         reasoning_state_status: "none".into(),
     }
