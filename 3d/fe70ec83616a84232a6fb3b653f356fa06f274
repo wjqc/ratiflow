@@ -1,0 +1,12 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "3dfe70ec83616a84232a6fb3b653f356fa06f274",
+  "prompts": {},
+  "humans": {
+    "h_1322bbd099c804": {
+      "author": "wenjian3 <wenjian3@asiainfo.com>"
+    }
+  }
+}
