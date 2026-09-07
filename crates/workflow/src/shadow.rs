@@ -162,6 +162,40 @@ pub fn record(store: &Store, input: &SuggestionInput<'_>) -> Result<Suggestion, 
     })
 }
 
+/// 按 id 取建议（WP-8 应用钩子定位用）。
+pub fn get(store: &Store, suggestion_id: &str) -> Result<Suggestion, Error> {
+    store.with_conn(|conn| {
+        conn.query_row(
+            &format!("SELECT {SUGGESTION_COLS} FROM shadow_suggestions WHERE id=?1"),
+            [suggestion_id],
+            suggestion_from,
+        )
+        .map_err(|_| Error::Message(format!("shadow_suggestion_missing: {suggestion_id}")))
+    })
+}
+
+/// 指定来源+工作项、且已获指定决定的建议（新→旧；WP-8 fast-track 应用判定用）。
+pub fn decided_suggestions(
+    store: &Store,
+    source: &str,
+    workitem_id: &str,
+    decision: &str,
+) -> Result<Vec<Suggestion>, Error> {
+    store.with_conn(|conn| {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SUGGESTION_COLS} FROM shadow_suggestions s
+             JOIN shadow_decisions d ON d.suggestion_id = s.id
+             WHERE s.source=?1 AND s.workitem_id=?2 AND d.decision=?3
+             ORDER BY s.generated_at DESC, s.rowid DESC"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![source, workitem_id, decision],
+            suggestion_from,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    })
+}
+
 /// 决定（append-only，一建议一终局）：重放同决定幂等返回既有行；不一致 = Conflict。
 pub fn decide(
     store: &Store,

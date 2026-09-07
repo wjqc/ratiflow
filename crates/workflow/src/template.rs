@@ -94,6 +94,29 @@ pub struct WaivedDeliverable {
     pub substitute_evidence_kind: String,
 }
 
+/// fast-track 受控枚举（WP-8；计划文本称"六因素"，具名五项以此为准）：
+/// 全真才可生成快通道建议（落 shadow，不自动执行）。schema 严格；
+/// 受保护路径/接口变更等语义核验由提案方断言，服务端深化核验随 WP-10/12。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FastTrackFactors {
+    pub no_protected_path: bool,
+    pub api_schema_unchanged: bool,
+    pub effect_class_read_only: bool,
+    pub provenance_complete: bool,
+    pub test_evidence_present: bool,
+}
+
+impl FastTrackFactors {
+    pub fn all_true(&self) -> bool {
+        self.no_protected_path
+            && self.api_schema_unchanged
+            && self.effect_class_read_only
+            && self.provenance_complete
+            && self.test_evidence_present
+    }
+}
+
 /// 部署/迁移类交付物 kind：含此类 deliverable 的关恒 forbidden，不可放宽
 /// （skip_policy 声明 manual_approval 在创建即拒）。
 pub fn is_deployment_class_kind(kind: &str) -> bool {

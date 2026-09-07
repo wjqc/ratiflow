@@ -144,6 +144,7 @@ export type RpcMethodName =
   | 'gate.requestManualConfirmation'
   | 'gate.manualConfirmations'
   | 'gate.requestSkip'
+  | 'gate.evaluateFastTrack'
   | 'stage.attempts'
   | 'stage.package'
   | 'snapshot.get'
@@ -266,6 +267,11 @@ export type RpcMethodName =
   | 'goal.autoReleaseCheck'
   | 'notification.list'
   | 'skill.importFromRegistry'
+  | 'skill.marketList'
+  | 'skill.marketImport'
+  | 'skill.marketSourceSave'
+  | 'skill.marketSourceRemove'
+  | 'skill.marketPluginSkills'
   | 'autonomy.createGrant'
   | 'autonomy.revokeGrant'
   | 'mcp.importAdd'
@@ -418,6 +424,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'gate.requestManualConfirmation',
   'gate.manualConfirmations',
   'gate.requestSkip',
+  'gate.evaluateFastTrack',
   'stage.attempts',
   'stage.package',
   'snapshot.get',
@@ -540,6 +547,11 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'goal.autoReleaseCheck',
   'notification.list',
   'skill.importFromRegistry',
+  'skill.marketList',
+  'skill.marketImport',
+  'skill.marketSourceSave',
+  'skill.marketSourceRemove',
+  'skill.marketPluginSkills',
   'autonomy.createGrant',
   'autonomy.revokeGrant',
   'mcp.importAdd',
@@ -1385,6 +1397,12 @@ export interface GateRequestSkipParams {
   substituteEvidenceIds: unknown[];
 }
 
+export interface GateEvaluateFastTrackParams {
+  workItemId: string;
+  gate: string;
+  factors: unknown;
+}
+
 export interface StageAttemptsParams {
   workItemId: string;
 }
@@ -2054,6 +2072,35 @@ export type NotificationListParams = Record<string, never>;
 export interface SkillImportFromRegistryParams {
   repoUrl: string;
   pinSha: string;
+}
+
+export type SkillMarketListParams = Record<string, never>;
+
+export interface SkillMarketImportParams {
+  sourceId: string;
+  plugin: string;
+  version: string;
+  skillName: string;
+}
+
+export interface SkillMarketSourceSaveParams {
+  kind: string;
+  name: string;
+  rootPath: string;
+  sourceId?: string;
+  marketplaceId?: string;
+  enabled?: boolean;
+  expectedRevision?: number;
+}
+
+export interface SkillMarketSourceRemoveParams {
+  sourceId: string;
+  expectedRevision: number;
+}
+
+export interface SkillMarketPluginSkillsParams {
+  sourceId: string;
+  plugin: string;
 }
 
 export interface AutonomyCreateGrantParams {

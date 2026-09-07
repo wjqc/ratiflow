@@ -2362,6 +2362,27 @@
       "result": "value"
     },
     {
+      "name": "gate.evaluateFastTrack",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "factors",
+          "type": "object",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "stage.attempts",
       "params": [
         {
@@ -4650,6 +4671,115 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "skill.marketList",
+      "params": [],
+      "result": "value",
+      "description": "浏览技能市场源：返回可编辑源列表+每源可导入技能清单（远程 git 源浏览拉取市场仓库清单；本机源只读本地目录）"
+    },
+    {
+      "name": "skill.marketImport",
+      "params": [
+        {
+          "name": "sourceId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "plugin",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "version",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "skillName",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value",
+      "description": "从市场源导入 SKILL.md：enabled 技能（source=market，同名幂等）+ draft 版本；仅读文本，正文过秘密扫描，审计留痕"
+    },
+    {
+      "name": "skill.marketSourceSave",
+      "params": [
+        {
+          "name": "sourceId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "rootPath",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "marketplaceId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value",
+      "description": "新增/编辑市场源。kind=zcode_local（rootPath 为本机插件市场目录）或 remote_git（rootPath 为 https 市场仓库，保存时 ls-remote 预检；编辑须 CAS）"
+    },
+    {
+      "name": "skill.marketSourceRemove",
+      "params": [
+        {
+          "name": "sourceId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "number",
+          "required": true
+        }
+      ],
+      "result": "value",
+      "description": "删除市场源（CAS）"
+    },
+    {
+      "name": "skill.marketPluginSkills",
+      "params": [
+        {
+          "name": "sourceId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "plugin",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value",
+      "description": "按需拉取远程清单插件内的技能列表：克隆市场仓库命中插件 → 按 catalog pin SHA/ref 克隆插件仓库 → 仅扫描 skills/*/SKILL.md"
     },
     {
       "name": "autonomy.createGrant",

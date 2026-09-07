@@ -191,6 +191,89 @@ async function main() {
     }
   }
 
+  // ============ 场景三：fast-track 全链（flag 开启，独立工作项）============
+  {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sg-ft-on-'));
+    const c = new CoreClient(dataDir, {
+      RATIFLOW_WORKFLOW_TEMPLATE_V2: '1',
+      RATIFLOW_GATE_SKIP: '1',
+      RATIFLOW_AUTOMATIONS: '1',
+    });
+    try {
+      await c.call('project.create', { gitlabInstance: 'local', namespace: 'e2e', project: 'ft', name: 'FT' });
+      const pj = (await c.call('project.list', {})).items[0].id;
+      const FT_GATES = [
+        {
+          gateId: 'build', title: '构建关', purpose: '', deliverables: ['code'],
+          fastTrackPolicy: {
+            skippable_activities: ['execution'],
+            waived_deliverables: [{ kind: 'code', substitute_evidence_kind: 'manual' }],
+            reduced_approval: true,
+          },
+        },
+      ];
+      const created = await c.call('workflowTemplate.create', { key: 'ft-tpl', name: '快通道模板', gates: FT_GATES, idempotencyKey: 'ft-1' });
+      await c.call('workflowTemplate.activate', { versionId: created.version.id, idempotencyKey: 'ft-2' });
+      const wi = await c.call('workitem.create', { projectId: pj, title: '快通道任务', templateId: 'ft-tpl' });
+
+      // 1) 六因素非全真 → 拒（不产生建议）。
+      const FACTORS = {
+        no_protected_path: true, api_schema_unchanged: true, effect_class_read_only: true,
+        provenance_complete: true, test_evidence_present: true,
+      };
+      await expectErrorContains(
+        () => c.call('gate.evaluateFastTrack', { workItemId: wi.id, gate: 'build', factors: { ...FACTORS, api_schema_unchanged: false } }),
+        'fast_track_factors_not_all_true',
+        '六因素非全真拒绝',
+      );
+      // 2) 全真 → 建议落 shadow；重放幂等返回同一建议。
+      const s1 = await c.call('gate.evaluateFastTrack', { workItemId: wi.id, gate: 'build', factors: FACTORS });
+      assert(s1.source === 'fast_track' && s1.id, '建议落 shadow（source=fast_track）');
+      const s2 = await c.call('gate.evaluateFastTrack', { workItemId: wi.id, gate: 'build', factors: FACTORS });
+      assert(s2.id === s1.id, '同因素重放幂等返回同一建议');
+      const obs = await c.call('automation.observations', { source: 'fast_track' });
+      assert(obs.items.some((x) => x.id === s1.id), '观察面可见 fast_track 建议');
+
+      // 3) 未采纳：交付物豁免不生效（code kind 照常要求工件冻结）。
+      const st0 = await c.call('gate.deliverableStatus', { workItemId: wi.id, gate: 'build' });
+      assert(st0.satisfied === false && st0.entries[0].waived === undefined, '未采纳：无豁免');
+
+      // 4) 采纳 → 应用缩减；交付物豁免生效但替代证据强制。
+      const decided = await c.call('automation.decideSuggestion', { suggestionId: s1.id, decision: 'accepted', decidedBy: 'owner', note: '采纳快通道' });
+      assert(decided.fastTrack && decided.fastTrack.applied === true, `采纳后应用缩减（实际 ${JSON.stringify(decided.fastTrack)}）`);
+      const st1 = await c.call('gate.deliverableStatus', { workItemId: wi.id, gate: 'build' });
+      assert(st1.entries[0].waived === true && st1.entries[0].satisfied === false, '豁免生效但替代证据缺失 → 不满足');
+      assert(st1.entries[0].missing === 'substitute_evidence_missing', '缺失指明 substitute_evidence_missing');
+      // 替代证据补齐（verified）→ 满足，且无需创建 code 工件。
+      const keys = await activeKeys(c, wi.id);
+      const subst = await c.call('evidence.record', { workItemId: wi.id, gate: 'build', kind: 'manual', title: '替代核验', source: 'local', requirementKeys: keys });
+      await c.call('evidence.verify', { evidenceId: subst.id, verifiedBy: 'qa' });
+      const st2 = await c.call('gate.deliverableStatus', { workItemId: wi.id, gate: 'build' });
+      assert(st2.satisfied === true && st2.entries[0].waived === true, '替代证据在案 → 豁免满足');
+
+      // 5) Policy 审批不被豁免：放行仍须走 gate_release 审批链（快通道不自动放行）。
+      const keys2 = await activeKeys(c, wi.id);
+      const art = await c.call('artifact.create', { workItemId: wi.id, kind: 'code', title: '构建产物' });
+      const rev = await c.call('artifact.createDraft', {
+        artifactId: art.id,
+        content: `# build\n- [${keys2[0]}] 覆盖`, requirementKeys: keys2,
+      });
+      await c.call('artifact.addReview', { revisionId: rev.id, reviewer: 't', verdict: 'approved' });
+      await c.call('artifact.freezeBaseline', { workItemId: wi.id, gate: 'build', revisionIds: [rev.id] });
+      const ev = await c.call('evidence.record', { workItemId: wi.id, gate: 'build', kind: 'test_report', title: '测试报告', source: 'local', requirementKeys: keys2 });
+      await c.call('evidence.verify', { evidenceId: ev.id, verifiedBy: 'qa' });
+      await c.call('gate.evaluate', { workItemId: wi.id, gate: 'build' });
+      const rr = await c.call('gate.requestRelease', { workItemId: wi.id, gate: 'build' });
+      assert(rr.approval_id, '放行审批照常创建（审批不被豁免）');
+      await c.call('gate.decideRelease', { approvalId: rr.approval_id, decision: 'approved', decidedBy: 'owner', reason: 'E2E' });
+
+      console.log('场景三（fast-track 全链）通过');
+    } finally {
+      c.kill();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }
+
   console.log('跳关协议 E2E 通过。');
 }
 

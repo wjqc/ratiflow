@@ -137,9 +137,15 @@ pub fn status(
     gate_id: &str,
 ) -> Result<Value, sg_store::Error> {
     let kinds = required_kinds_for(store, workitem_id, gate_id)?;
+    // WP-8 fast-track：已采纳建议的 waived_deliverables 以替代证据替代
+    //（verified 证据 kind 匹配）；替代证据缺失照实不满足（fail-closed）。
+    let waived = crate::fast_track::waived_deliverables(store, workitem_id, gate_id)?;
     let entries = kinds
         .iter()
-        .map(|k| kind_status(store, workitem_id, gate_id, k))
+        .map(|k| match waived.iter().find(|w| &w.kind == k) {
+            Some(w) => waived_kind_status(store, workitem_id, k, w),
+            None => kind_status(store, workitem_id, gate_id, k),
+        })
         .collect::<Result<Vec<Value>, _>>()?;
     let satisfied = entries.iter().all(|e| e["satisfied"] == json!(true));
     let first_unsatisfied = entries.iter().find(|e| e["satisfied"] != json!(true));
@@ -160,6 +166,25 @@ pub fn status(
         "revisionId": first["revisionId"].clone(),
         "revisionNo": first["revisionNo"].clone(),
         "baselineId": first["baselineId"].clone(),
+    }))
+}
+
+/// fast-track 豁免 kind 的满足判定：存在 verified 的替代证据 kind 即满足。
+fn waived_kind_status(
+    store: &sg_store::Store,
+    workitem_id: &str,
+    kind: &str,
+    w: &sg_workflow::template::WaivedDeliverable,
+) -> Result<Value, sg_store::Error> {
+    let substitute_ok = sg_evidence::list(store, workitem_id, None)?
+        .iter()
+        .any(|e| e.verified && e.kind == w.substitute_evidence_kind);
+    Ok(json!({
+        "kind": kind,
+        "satisfied": substitute_ok,
+        "missing": if substitute_ok { Value::Null } else { json!("substitute_evidence_missing") },
+        "waived": true,
+        "substituteEvidenceKind": w.substitute_evidence_kind,
     }))
 }
 

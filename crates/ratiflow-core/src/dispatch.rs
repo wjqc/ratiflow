@@ -751,6 +751,22 @@ fn trace_link_items(
     Ok(())
 }
 
+/// WP-8a：shadow 域错误分类（确定性码，不落 InternalError=Transient 面）。
+/// （automation_rpc 内另有同名闭包，语义一致。）
+fn shadow_err(e: &sg_store::Error) -> RpcError {
+    let msg = e.to_string();
+    let code = if msg.contains("shadow_decision_conflict") {
+        ErrorCode::Conflict
+    } else if msg.contains("shadow_suggestion_missing") || msg.contains("shadow_decision_missing") {
+        ErrorCode::NotFound
+    } else if msg.contains("shadow_decision_invalid") || msg.contains("shadow_suggestion_invalid") {
+        ErrorCode::InvalidParams
+    } else {
+        ErrorCode::InternalError
+    };
+    RpcError::new(code, msg.as_str())
+}
+
 /// 分发一个 RPC 请求（在 DB actor 线程上执行；store 由 actor 提供）。
 pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -> RpcResult {
     if let Some(result) = crate::settings_dispatch::dispatch(state, store, method, params) {
@@ -2498,6 +2514,37 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 "state": "requested",
                 "risk": approval.risk,
             }))
+        }
+        // --- WP-8 fast-track：六因素全真 → 建议落 shadow（不自动执行）；
+        //     采纳后的缩减经 decideSuggestion 钩子应用（活动缩减+交付物豁免）---
+        "gate.evaluateFastTrack" => {
+            if std::env::var("RATIFLOW_GATE_SKIP").ok().as_deref() != Some("1") {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_GATE_SKIP 未开启",
+                ));
+            }
+            let workitem_id = str_param(params, "workItemId")?;
+            let gate_name = str_param(params, "gate")?;
+            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
+                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
+            }
+            let factors: sg_workflow::template::FastTrackFactors = params
+                .get("factors")
+                .cloned()
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "missing param: factors"))
+                .and_then(|v| {
+                    serde_json::from_value(v)
+                        .map_err(|e| err(ErrorCode::InvalidParams, format!("factors 非法：{e}")))
+                })?;
+            let suggestion = sg_workitem::fast_track::evaluate_and_suggest(
+                store,
+                &workitem_id,
+                &gate_name,
+                &factors,
+            )
+            .map_err(|e| shadow_err(&e))?;
+            Ok(serde_json::to_value(suggestion).unwrap_or_default())
         }
         "stage.attempts" => {
             let workitem_id = str_param(params, "workItemId")?;
@@ -4886,7 +4933,32 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                 &str_param("note")?,
             )
             .map_err(|e| shadow_err(&e))?;
-            Ok(serde_json::to_value(out).unwrap_or_default())
+            // WP-8：fast-track 建议被采纳 → 应用缩减（活动缩减；交付物豁免在
+            // deliverable 检查时按已采纳状态消费）。未采纳/非 fast-track → 幂等跳过。
+            let mut fast_track_applied = Value::Null;
+            if out.decision == "accepted" {
+                if let Ok(s) = sg_workflow::shadow::get(store, &out.suggestion_id) {
+                    if s.source == "fast_track" {
+                        if let Some(wi) = &s.workitem_id {
+                            let gate = s.content.get("gate").and_then(|g| g.as_str()).unwrap_or("");
+                            let applied =
+                                sg_workitem::fast_track::apply_if_accepted(store, wi, gate)
+                                    .map_err(|e| shadow_err(&e))?;
+                            fast_track_applied =
+                                json!({"workItemId": wi, "gate": gate, "applied": applied});
+                            let _ = sg_store::audit::append(
+                                store,
+                                &str_param("decidedBy")?,
+                                "fast_track.applied",
+                                "workitem",
+                                wi,
+                                json!({"gate": gate, "applied": applied}),
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(json!({ "decision": out, "fastTrack": fast_track_applied }))
         }
         "automation.reviewSuggestion" => {
             if !automation_flag {

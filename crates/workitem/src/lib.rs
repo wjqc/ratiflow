@@ -4,6 +4,7 @@ pub mod acceptance_eval;
 pub mod attempt;
 pub mod deliverable;
 pub mod docs;
+pub mod fast_track;
 pub mod gate;
 pub mod manual_confirm;
 pub mod progress;
