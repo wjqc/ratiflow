@@ -1,4 +1,4 @@
-.PHONY: help install codegen typecheck test test-rust test-web e2e build build-core build-desktop run package clean fmt clippy ci
+.PHONY: help install codegen codegen-drift fmt fmt-check typecheck test test-rust test-web e2e build build-core build-desktop run package clean clippy ci
 
 .DEFAULT_GOAL := help
 
@@ -11,11 +11,25 @@ install: ## Install JS dependencies (Electron via npmmirror)
 codegen: ## Generate TS protocol types from contracts/rpc
 	node packages/protocol/generate.mjs
 
+codegen-drift: ## codegen 重生成必须幂等（生成物被手改/契约与实现脱节即失败）
+	@mkdir -p target
+	@cp packages/protocol/src/generated.ts target/gen-before-protocol.ts
+	@cp apps/desktop/src/main/rpcMethods.generated.ts target/gen-before-rpcmethods.ts
+	node packages/protocol/generate.mjs
+	@cmp -s packages/protocol/src/generated.ts target/gen-before-protocol.ts || \
+		{ echo "codegen drift: generated.ts 与既有生成物不一致（契约先行被破坏或生成物被手改）"; exit 1; }
+	@cmp -s apps/desktop/src/main/rpcMethods.generated.ts target/gen-before-rpcmethods.ts || \
+		{ echo "codegen drift: rpcMethods.generated.ts 与既有生成物不一致"; exit 1; }
+	@echo "codegen 幂等检查通过" 
+
 typecheck: ## TypeScript typecheck (renderer + main + preload + protocol)
 	npm run typecheck
 
-fmt: ## cargo fmt
+fmt: ## cargo fmt (rewrite)
 	cargo fmt --all
+
+fmt-check: ## cargo fmt --check (CI gate, no rewrite)
+	cargo fmt --all -- --check
 
 clippy: ## cargo clippy (warnings as errors)
 	cargo clippy --all-targets -- -D warnings
@@ -34,22 +48,22 @@ test-electron: ## Electron E2E scenarios A/D/E/F (Playwright)
 
 e2e: ## Protocol E2E golden flow + agent lifecycle + settings + trace + gate release race + rollback + memory + mcp (requires release core build)
 	cargo build --release -p sixgates-core
-	node tests/e2e-protocol/e2e.mjs
-	node tests/e2e-protocol/agent-e2e.mjs
-	node tests/e2e-protocol/settings-e2e.mjs
-	node tests/e2e-protocol/trace-e2e.mjs
-	node tests/e2e-protocol/gate-release-race-e2e.mjs
-	node tests/e2e-protocol/rollback-e2e.mjs
-	node tests/e2e-protocol/agent-routing-e2e.mjs
-	node tests/e2e-protocol/memory-e2e.mjs
-	node tests/e2e-protocol/mcp-e2e.mjs
-	node tests/e2e-protocol/workflow-template-e2e.mjs
-	node tests/e2e-protocol/plan-dag-e2e.mjs
-	node tests/e2e-protocol/plan-execution-e2e.mjs
-	node tests/e2e-protocol/partial-replan-e2e.mjs
-	node tests/e2e-protocol/team-context-e2e.mjs
-	node tests/e2e-protocol/trace-command-e2e.mjs
-	node tests/e2e-protocol/automation-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 agent-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 settings-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 trace-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 gate-release-race-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 rollback-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 agent-routing-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 memory-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 mcp-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 workflow-template-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 plan-dag-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 plan-execution-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 partial-replan-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 team-context-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 trace-command-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 automation-e2e.mjs
 
 test-contract: ## Contract fixtures + decoders + secret probe (F11/M4)
 	node tests/contract/run.mjs
@@ -68,7 +82,7 @@ run: build ## Launch desktop app
 package: build ## Package desktop app (dir, unsigned)
 	npm --workspace @sixgates/desktop run package
 
-ci: fmt clippy codegen typecheck test test-contract e2e test-electron ## Local CI sequence
+ci: fmt-check clippy codegen-drift typecheck test test-contract e2e test-electron ## Local CI sequence
 
 clean: ## Clean build outputs
 	cargo clean

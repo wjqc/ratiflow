@@ -47,6 +47,7 @@ function assert(c, label) {
 async function main() {
   const dataDir = await mkdtempSync(join(tmpdir(), 'sg-set-e2e-'));
   const c = new CoreClient(dataDir);
+  const credentialIds = []; // { id, revision }——remove 需 expectedRevision
   try {
     for (let i = 0; i < 50 && !c.hello; i++) await new Promise((r) => setTimeout(r, 100));
     assert(c.hello?.protocolVersion === '1', 'hello 握手');
@@ -58,12 +59,20 @@ async function main() {
 
     // 2. 凭据：真实 Keychain 写入（mac）+ DTO 无明文。
     const cred = await c.call('credentialRef.create', { name: 'E2E Key', kind: 'model_api_key', provider: 'openai', secret: 'sk-e2e-test-12345678' });
+    credentialIds.push({ id: cred.id, revision: cred.revision });
     assert(cred.id && cred.status === 'active', '凭据创建（Keychain）');
     assert(!JSON.stringify(cred).includes('sk-e2e-test'), 'DTO 不回显明文');
 
-    // 3. revision 冲突。
+    // 3. revision 冲突 + 轮换主路径（缺陷审计：轮换后旧 secret 失效此前无覆盖）+ 清理。
+    //    此前每轮 CI 向真实 Keychain 泄漏一条测试凭据且 remove 从未被测。
     const conflict = await c.call('credentialRef.replace', { refId: cred.id, secret: 'x', expectedRevision: 99 }).catch((e) => e);
-    assert(['REVISION_CONFLICT', 'CONFLICT', 'conflict'].includes(conflict.code), `revision 冲突（${conflict.code}）`);
+    // 缺陷审计：错误码契约钉死（settings codes::REVISION_CONFLICT 唯一），不再三选一。
+    // 缺陷审计：错误码契约钉死（REVISION_CONFLICT 经 RPC envelope 映射为 conflict），不再三选一。
+    assert(conflict.code === 'conflict', `revision 冲突（${conflict.code}）`);
+    const rotated = await c.call('credentialRef.replace', { refId: cred.id, secret: 'sk-e2e-rotated-98765', expectedRevision: cred.revision });
+    assert(rotated.status === 'active' && rotated.revision > cred.revision, '凭据轮换 revision 前进');
+    assert(!JSON.stringify(rotated).includes('sk-e2e-rotated'), '轮换 DTO 不回显明文');
+    credentialIds[0].revision = rotated.revision;
 
     // 4. 模型 Profile + 路由 → 阻塞解除。
     const mp = await c.call('modelProfile.create', { name: 'E2E', providerKind: 'fake', credentialRefId: cred.id });
@@ -121,6 +130,16 @@ async function main() {
     console.error(`设置域 E2E 失败：${e.message}`);
     process.exitCode = 1;
   } finally {
+    // Keychain 清理（缺陷审计：测试凭据不得滞留真实 Keychain）。
+    // remove 放在 finally：即便后续断言失败，测试凭据也会被删除。
+    for (const cred of credentialIds) {
+      try {
+        await c.call('credentialRef.remove', { refId: cred.id, expectedRevision: cred.revision, force: true });
+        console.log('  ✓ Keychain 清理:', cred.id);
+      } catch (e) {
+        console.error(`  ! Keychain 清理失败（需手工删除）: ${cred.id} — ${e.message ?? e}`);
+      }
+    }
     c.kill();
     rmSync(dataDir, { recursive: true, force: true });
   }

@@ -314,7 +314,15 @@ mod tests {
         let spec = sg_artifact::create_artifact(&store, &wi.id, "spec", "规格").unwrap();
         let spec_rev = sg_artifact::create_draft(&store, &spec.id, "# spec\n").unwrap();
         sg_artifact::add_review(&store, &spec_rev.id, "r", "approved", "", None).unwrap();
-        sg_artifact::freeze(&store, &wi.id, "build", std::slice::from_ref(&spec_rev.id), "", "").unwrap();
+        sg_artifact::freeze(
+            &store,
+            &wi.id,
+            "build",
+            std::slice::from_ref(&spec_rev.id),
+            "",
+            "",
+        )
+        .unwrap();
         let s = status(&store, &wi.id, "build").unwrap();
         assert_eq!(s["satisfied"], json!(false), "patch 缺失则不放行");
         let err = require_for_release(&store, &wi.id, "build").unwrap_err();

@@ -109,24 +109,16 @@ async function main() {
     assert(notes.some((n) => n.kind === 'automation_blocked'), 'automation_blocked 通知落 outbox');
 
     // --- 3. 有效 grant → intent_created ---
+    // 缺陷审计：.catch 兼容路径会把 expiresAt 被拒（契约破坏）静默降级为通过——
+    // 契约钉死：createGrant 必须接受 expiresAt，失败即失败。
     const grant = await c.call('autonomy.createGrant', {
       workItemId: wi.id,
       allowedTools: ['read_file', 'search_knowledge'],
       allowedRisks: ['low'],
       expiresAt: '2099-01-01T00:00:00.000Z',
-    }).catch(() => null);
-    let grantId;
-    if (grant?.grantId) {
-      grantId = grant.grantId;
-    } else {
-      // 兼容：直接 SQL 语义不可用——用 autonomy.previewGrant/createGrant 之上的既有 RPC。
-      const g = await c.call('autonomy.createGrant', {
-        workItemId: wi.id,
-        allowedTools: ['read_file', 'search_knowledge'],
-        allowedRisks: ['low'],
-      });
-      grantId = g.grantId ?? g.id;
-    }
+    });
+    const grantId = grant.grantId;
+    assert(grantId, 'autonomy.createGrant 返回 grantId');
     const auto2 = await c.call('automation.create', {
       key: 'auto-with-grant',
       workItemId: wi.id,

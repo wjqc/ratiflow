@@ -113,8 +113,13 @@ async function main() {
   watchdog.unref();
   if (!existsSync(CORE)) throw new Error('先构建 release core');
   if (!python3Available()) {
-    console.log('（跳过：本机无 python3）');
-    return;
+    // 缺陷审计：无 python3 时整个 MCP 域 e2e 无断言 PASS 属静默假绿。
+    // 显式设置 SG_SKIP_MCP_E2E=1 才允许跳过（输出必须可见 SKIPPED）。
+    if (process.env.SG_SKIP_MCP_E2E === '1') {
+      console.log('SKIPPED: SG_SKIP_MCP_E2E=1 且本机无 python3 —— MCP 域 e2e 未执行');
+      return;
+    }
+    throw new Error('本机无 python3，MCP 域 e2e 无法执行（fail-loud；确需跳过请设 SG_SKIP_MCP_E2E=1）');
   }
   const script = ensureFakeServer();
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-mcp-e2e-'));

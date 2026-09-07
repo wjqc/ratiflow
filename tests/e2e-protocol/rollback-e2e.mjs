@@ -218,13 +218,12 @@ async function main() {
     const snap4 = await client.call('snapshot.get', { snapshotId: target4 });
     const sha = snap4.control_manifest_sha256;
     const objPath = join(dataDir, 'objects', sha.slice(0, 2), sha);
-    if (existsSync(objPath)) {
-      unlinkSync(objPath);
-      const err4 = await client.call('rollback.preview', { workItemId: wi4.id, targetSnapshotId: target4 }).catch((e) => e);
-      assert(/snapshot_failed/.test(err4.code ?? err4.message), '故障注入：清单对象缺失 → snapshot_failed');
-    } else {
-      console.log('  ○ 对象分片路径未命中，跳过删除注入');
-    }
+    // 缺陷审计：注入包装在 existsSync 里，对象布局一变唯一崩溃场景静默蒸发。
+    // 布局漂移必须让本测试失败（提示更新注入路径），而不是跳过后继续绿。
+    assert(existsSync(objPath), `对象分片路径布局变化: ${objPath} 不存在——请更新故障注入路径`);
+    unlinkSync(objPath);
+    const err4 = await client.call('rollback.preview', { workItemId: wi4.id, targetSnapshotId: target4 }).catch((e) => e);
+    assert(/snapshot_failed/.test(err4.code ?? err4.message), '故障注入：清单对象缺失 → snapshot_failed');
 
     // 9. 主工作区只读（SG-RBK-005）：带 git localRoot 的项目回滚不动工作区。
     const repoDir = join(tmpdir(), `sg-rbk-repo-${Date.now()}`);
