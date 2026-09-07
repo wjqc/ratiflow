@@ -9,7 +9,27 @@ use serde_json::{json, Value};
 use sg_store::{outbox, Error, Store};
 
 /// 消费一个到期 automation。返回 (status, note)。
+/// 认领 receipt 后任何步骤出错都必须推进调度（缺陷审计：否则 next_fire_at
+/// 不再前进且 receipt 永占，每个 tick 返回 deduped，automation 永久哑火）。
 pub fn fire_one(
+    store: &Store,
+    automation_id: &str,
+    scheduled_for: &str,
+) -> Result<(String, String), Error> {
+    match fire_one_inner(store, automation_id, scheduled_for) {
+        Ok(out) => Ok(out),
+        Err(e) => {
+            let _ = sg_workflow::automation::reschedule(
+                store,
+                automation_id,
+                &sg_store::timefmt::now(),
+            );
+            Err(e)
+        }
+    }
+}
+
+fn fire_one_inner(
     store: &Store,
     automation_id: &str,
     scheduled_for: &str,

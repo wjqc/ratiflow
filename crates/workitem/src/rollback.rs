@@ -575,6 +575,27 @@ fn execute(
         )));
     }
 
+    // 受管 worktree 恢复前移（缺陷审计）：先恢复后改控制面——恢复失败时
+    // 控制面零变更（op 保持 executing 可 resume 重试），不再出现"关卡指针已回退、
+    // attempt 全 superseded、worktree 未恢复"的半回滚死态。
+    // （SG-RBK-005：仅 SixGates 隔离区；主工作区不参与。）
+    // 受管 worktree 恢复（SG-RBK-005：仅 SixGates 隔离区；主工作区不参与）。
+    if let Some(head) = snapshot::resources(store, &target.id)?
+        .into_iter()
+        .find(|r| {
+            r.resource_type == "worktree_head" && r.metadata_json.contains("\"managed\":true")
+        })
+        .map(|r| r.version_ref)
+        .filter(|h| !h.is_empty())
+    {
+        if let Err(e) = crate::worktree::restore(store, &workitem_id, &head) {
+            mark_failed(store, &op.id, &workitem_id, "worktree_restore")?;
+            return Err(Error::Message(format!(
+                "snapshot_failed: 受管 worktree 恢复失败 {e}"
+            )));
+        }
+    }
+
     // 控制面恢复（回滚应用服务特权写，ADR-030 决策 2）。
     let now = timefmt::now();
     for g in affected_gates(store, &workitem_id, &target_gate) {
@@ -629,22 +650,6 @@ fn execute(
         )?;
         Ok(())
     })?;
-    // 受管 worktree 恢复（SG-RBK-005：仅 SixGates 隔离区；主工作区不参与）。
-    if let Some(head) = snapshot::resources(store, &target.id)?
-        .into_iter()
-        .find(|r| {
-            r.resource_type == "worktree_head" && r.metadata_json.contains("\"managed\":true")
-        })
-        .map(|r| r.version_ref)
-        .filter(|h| !h.is_empty())
-    {
-        if let Err(e) = crate::worktree::restore(store, &workitem_id, &head) {
-            mark_failed(store, &op.id, &workitem_id, "worktree_restore")?;
-            return Err(Error::Message(format!(
-                "snapshot_failed: 受管 worktree 恢复失败 {e}"
-            )));
-        }
-    }
     // 目标关新建 attempt（含关前快照，SG-RBK-007：回滚后重算门禁输入）。
     let predecessor = attempt::latest_for_gate(store, &workitem_id, &target_gate)?.map(|a| a.id);
     let fresh = attempt::create(store, &workitem_id, &target_gate, predecessor.as_deref())?;

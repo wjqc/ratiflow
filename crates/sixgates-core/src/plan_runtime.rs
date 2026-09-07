@@ -14,21 +14,26 @@ use sg_workflow::scheduler;
 
 /// 准备阶段：ready → preparing_workspace →（写任务挂工作区）→ ready。
 /// 只读任务直接就绪（无工作区）。幂等：非 ready 态拒绝重复准备。
+/// 准备失败回退 ready（缺陷审计）：否则 attempt 永卡 preparing_workspace
+/// 占派发容量，DAG 停摆且无 RPC 可恢复。
 pub fn prepare_task(
     store: &Store,
     task_attempt_id: &str,
 ) -> Result<Option<workspace::TaskWorkspaceRecord>, Error> {
     transition_state(store, task_attempt_id, "ready", "preparing_workspace")?;
-    let rec = workspace::prepare(store, task_attempt_id)?;
-    match rec {
+    match workspace::prepare(store, task_attempt_id) {
         // 只读任务：无工作区，留在 ready（可被派发执行）。
-        None => {
+        Ok(None) => {
             transition_state(store, task_attempt_id, "preparing_workspace", "ready")?;
             Ok(None)
         }
-        Some(rec) => {
+        Ok(Some(rec)) => {
             transition_state(store, task_attempt_id, "preparing_workspace", "ready")?;
             Ok(Some(rec))
+        }
+        Err(e) => {
+            let _ = transition_state(store, task_attempt_id, "preparing_workspace", "ready");
+            Err(e)
         }
     }
 }

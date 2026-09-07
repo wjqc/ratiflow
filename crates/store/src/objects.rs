@@ -75,6 +75,17 @@ pub fn put(store: &Store, mut reader: impl Read, opts: PutOptions) -> Result<Obj
 
     let content_type = sniff_content_type(&body);
     let now = timefmt::now();
+    // 先落对象文件再登记 DB 行（缺陷审计）：反向顺序会留下"有行无文件"的
+    // object_not_found 态；先文件后行的崩溃残骸只是待 GC 的孤儿文件（无害）。
+    let final_path = object_path(store, &sum);
+    if !final_path.exists() {
+        if let Some(parent) = final_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&tmp_path, &final_path)?;
+    } else {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
     let created = store.with_tx(|tx| {
         tx.execute(
             "INSERT INTO objects(sha256, size, content_type, secret_findings, created_at)
@@ -94,16 +105,6 @@ pub fn put(store: &Store, mut reader: impl Read, opts: PutOptions) -> Result<Obj
         )?;
         Ok(created)
     })?;
-
-    let final_path = object_path(store, &sum);
-    if !final_path.exists() {
-        if let Some(parent) = final_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::rename(&tmp_path, &final_path)?;
-    } else {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
 
     Ok(ObjectInfo {
         sha256: sum,

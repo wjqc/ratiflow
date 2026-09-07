@@ -137,7 +137,8 @@ pub fn project_state(
     current_gate_id: &str,
 ) -> Result<(), Error> {
     let now = timefmt::now();
-    store.with_conn(|conn| {
+    // 单事务（缺陷审计）：投影两段 UPDATE 与实例读取原子化。
+    store.with_tx(|conn| {
         let instance: Option<(String, String)> = conn
             .query_row(
                 "SELECT id, template_version_id FROM workflow_instances WHERE workitem_id=?1",
@@ -216,7 +217,8 @@ pub fn migrate(
     }
     let first_gate = target_defs[0].gate_id.clone();
     let now = timefmt::now();
-    store.with_conn(|conn| {
+    // 单事务（缺陷审计）：版本切换/旧投影删除/新投影重建非原子会出现"0 投影实例"。
+    store.with_tx(|conn| {
         conn.execute(
             "UPDATE workflow_instances SET template_version_id=?1, current_gate_id=?2, state='migrated', updated_at=?3 WHERE id=?4",
             rusqlite::params![target_version_id, first_gate, now, instance.id],

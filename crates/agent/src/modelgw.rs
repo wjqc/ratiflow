@@ -821,7 +821,9 @@ fn record_inner(store: &Store, run_id: &str, stats: &CallStats<'_>) -> Result<()
         stats.latency_ms,
         stats.redactions,
     );
-    store.with_conn(|conn| {
+    // 单事务 + 立即写锁（缺陷审计）：model_calls/model_turns 原子落库；
+    // MAX+1 取号在 BEGIN IMMEDIATE 下进行，双开进程不再撞唯一索引（run, seq）。
+    store.with_tx_immediate(|conn| {
         conn.execute(
             "INSERT INTO model_calls(id, agent_run_id, provider, model, tokens_in, tokens_out, cost_micros, latency_ms, redactions, status, created_at, cached_tokens, reasoning_tokens)
              VALUES (?1,?2,?3,'default',?4,?5,0,?6,?7,?8,?9,?10,?11)",

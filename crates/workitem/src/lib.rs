@@ -467,7 +467,8 @@ pub fn set_stage(
     }
     let next = next_gate_id(store, workitem_id, gate_id)?;
     let now = timefmt::now();
-    store.with_conn(|conn| {
+    // 单事务（缺陷审计）：stage 状态与 current_gate 指针原子推进。
+    store.with_tx(|conn| {
         conn.execute(
             "UPDATE workitem_stages SET state=?1, input_baseline_sha=?2, updated_at=?3 WHERE workitem_id=?4 AND gate=?5",
             rusqlite::params![to.as_str(), baseline_sha, now, workitem_id, gate_id],
