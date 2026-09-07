@@ -3,6 +3,7 @@
 
 pub mod autonomy;
 pub mod plan_guard;
+pub mod risk_model;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -313,6 +313,56 @@ fn autonomy_check(
     Ok(())
 }
 
+/// Run 快照中的 grant id（WP-1 工具消费记账归属；空 = 无 grant 不记账）。
+fn grant_of_run(store: &Store, run_id: &str) -> String {
+    let snap: String = store
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT COALESCE(policy_snapshot,'') FROM agent_runs WHERE id=?1",
+                [run_id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default())
+        })
+        .unwrap_or_default();
+    sg_policy::autonomy::grant_id_of_snapshot(&snap)
+}
+
+/// WP-1（RDWS v1.4）：工具每 proposal 独立消费行（tool_calls 维度）。
+/// 超限 → autonomy_budget_exhausted（拒绝执行，零消耗）；执行后按结果 settle：
+/// 正常/确定性失败 → 1；outcome unknown（对账面）→ 保留 reserve 进 reconciliation。
+fn ledger_tool_consume(store: &Store, p: &sg_agent::Proposal) -> Result<Option<String>, String> {
+    if !sg_policy::risk_model::enabled() {
+        return Ok(None); // 回退 = WP-1 前行为；已落行仍由 settle/启动对账照实收尾
+    }
+    let grant = grant_of_run(store, &p.run_id);
+    if grant.is_empty() {
+        return Ok(None);
+    }
+    sg_policy::autonomy::reserve(
+        store,
+        &grant,
+        &p.run_id,
+        &p.id,
+        &[("tool_calls", 1)],
+        &serde_json::json!({"proposal": p.id, "tool": p.tool, "digest": p.action_digest}),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(Some(grant))
+}
+
+fn ledger_tool_settle(store: &Store, grant: &str, p: &sg_agent::Proposal, outcome_unknown: bool) {
+    let actual: Option<i64> = if outcome_unknown { None } else { Some(1) };
+    let _ = sg_policy::autonomy::settle(
+        store,
+        grant,
+        &p.run_id,
+        &p.id,
+        &[("tool_calls", actual)],
+        &serde_json::json!({"source": "tool_exec", "tool": p.tool}).to_string(),
+    );
+}
+
 /// 构建注入 execute_run 的工具执行器（Run 任务内使用，经 run_store 访问库）。
 pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> SharedToolExecutor {
     Arc::new(move |p: &sg_agent::Proposal| -> Result<String, String> {
@@ -336,8 +386,25 @@ pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> Sha
             )?;
             // Autonomy 步（评审 P0-1）：Ask 只读边界 + Grant 白名单/scope。
             autonomy_check(&store, &p.run_id, &p.tool, Some(effect))?;
+            // WP-1：Grant tool_calls 消费行（超限拒绝执行）。
+            let ledger = ledger_tool_consume(&store, p)?;
             let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
-            let out = mcp_invoke(&ctx, &store, p, rest, &args)?;
+            let out = match mcp_invoke(&ctx, &store, p, rest, &args) {
+                Ok(out) => {
+                    if let Some(g) = &ledger {
+                        ledger_tool_settle(&store, g, p, false);
+                    }
+                    out
+                }
+                Err(e) => {
+                    // unknown/indeterminate 是对账面：不 settle 1，保留 reserve。
+                    let unknown = e.contains("unknown") || e.contains("indeterminate");
+                    if let Some(g) = &ledger {
+                        ledger_tool_settle(&store, g, p, unknown);
+                    }
+                    return Err(e);
+                }
+            };
             return Ok(tools::truncate_output(&out, 64 * 1024));
         }
         let def = tools::find(&p.tool).ok_or_else(|| format!("unknown tool: {}", p.tool))?;
@@ -345,40 +412,63 @@ pub fn make_executor(ctx: ToolCtx, store: Arc<Store>, project_id: String) -> Sha
         plan_guard_check(&store, &p.run_id, &p.tool, parse_effect(def.effect_class))?;
         // Autonomy 步（评审 P0-1）：Ask 只读边界 + Grant 白名单/scope。
         autonomy_check(&store, &p.run_id, &p.tool, parse_effect(def.effect_class))?;
+        // WP-1：Grant tool_calls 消费行（超限拒绝执行）。
+        let ledger = ledger_tool_consume(&store, p)?;
         let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
-        let out = match p.tool.as_str() {
-            "write_file" => tools::write_draft(&ctx, &args)?,
-            "apply_patch" => apply_patch_exec(&ctx, p, &args)?,
-            "search_knowledge" => {
-                let query = args
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing argument: query")?;
-                let limit = args
-                    .get("limit")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(5)
-                    .clamp(1, 20);
-                let hits = sg_knowledge::search_v2(&store, &project_id, query, false, limit)
-                    .map_err(|e| e.to_string())?;
-                serde_json::to_string(&hits).map_err(|e| e.to_string())?
-            }
-            _ => {
-                // P0-4：隔离执行域不可用时拒绝可写命令（read_file/search_knowledge 只读放行）。
-                if ctx.read_only && p.tool == "run_command" {
-                    return Err(
-                        "action_denied: 隔离 worktree 不可用，拒绝在用户主工作区执行命令".into(),
-                    );
-                }
-                let manifest = tools::build_manifest(def, &args, &ctx)?;
-                // 取消面（缺陷审计 P1-9）：在途子进程随 CancelToken 即时中止。
-                let result =
-                    sg_executor::execute_with_cancel(ctx.mode, &manifest, ctx.cancel.as_deref())
+        let executed = (|| -> Result<String, String> {
+            match p.tool.as_str() {
+                "write_file" => tools::write_draft(&ctx, &args),
+                "apply_patch" => apply_patch_exec(&ctx, p, &args),
+                "search_knowledge" => {
+                    let query = args
+                        .get("query")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing argument: query")?;
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(5)
+                        .clamp(1, 20);
+                    let hits = sg_knowledge::search_v2(&store, &project_id, query, false, limit)
                         .map_err(|e| e.to_string())?;
-                if result.cancelled {
-                    return Err("run_cancelled: 取消请求已中止在途工具执行".into());
+                    serde_json::to_string(&hits).map_err(|e| e.to_string())
                 }
-                serde_json::to_string(&result).map_err(|e| e.to_string())?
+                _ => {
+                    // P0-4：隔离执行域不可用时拒绝可写命令（read_file/search_knowledge 只读放行）。
+                    if ctx.read_only && p.tool == "run_command" {
+                        return Err(
+                            "action_denied: 隔离 worktree 不可用，拒绝在用户主工作区执行命令"
+                                .into(),
+                        );
+                    }
+                    let manifest = tools::build_manifest(def, &args, &ctx)?;
+                    // 取消面（缺陷审计 P1-9）：在途子进程随 CancelToken 即时中止。
+                    let result = sg_executor::execute_with_cancel(
+                        ctx.mode,
+                        &manifest,
+                        ctx.cancel.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if result.cancelled {
+                        return Err("run_cancelled: 取消请求已中止在途工具执行".into());
+                    }
+                    serde_json::to_string(&result).map_err(|e| e.to_string())
+                }
+            }
+        })();
+        let out = match executed {
+            Ok(out) => {
+                if let Some(g) = &ledger {
+                    ledger_tool_settle(&store, g, p, false);
+                }
+                out
+            }
+            Err(e) => {
+                let unknown = e.contains("unknown") || e.contains("indeterminate");
+                if let Some(g) = &ledger {
+                    ledger_tool_settle(&store, g, p, unknown);
+                }
+                return Err(e);
             }
         };
         // 输出截断（F05）：进模型消息的是截断版。

@@ -191,6 +191,16 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
             eprintln!("{{\"level\":\"warn\",\"msg\":\"agent run reconcile failed: {e}\"}}");
         }
     }
+    // WP-1（RDWS v1.4 §1.4）：Grant 计量残留对账——终态 run 仍有 reserved 消费行 →
+    // 按 model_calls/tool_proposals 权威事实回填 settle；无法对账 →
+    // reconciliation_required + outbox 告警（人工处置后置 manual_action_required）。
+    match sg_policy::autonomy::reconcile_all_terminal_runs(&store) {
+        Ok(n) if n > 0 => {
+            eprintln!("{{\"level\":\"info\",\"msg\":\"grant ledger reconcile: {n} residues\"}}");
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("{{\"level\":\"warn\",\"msg\":\"grant ledger reconcile: {e}\"}}"),
+    }
     let schema_version = store.schema_version().unwrap_or(0);
     let initial_seq = outbox::latest_sequence(&store).unwrap_or(0);
 

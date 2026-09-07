@@ -84,6 +84,7 @@ protocol-e2e:
     - node tests/e2e-protocol/agent-routing-e2e.mjs
     - node tests/e2e-protocol/memory-e2e.mjs
     - node tests/e2e-protocol/rpc-receipt-e2e.mjs
+    - node tests/e2e-protocol/risk-ledger-e2e.mjs
 
 electron-e2e:
   stage: e2e

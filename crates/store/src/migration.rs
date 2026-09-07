@@ -79,6 +79,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         41,
         include_str!("../migrations/0041_receipt_scoping_single_active.sql"),
     ),
+    (
+        42,
+        include_str!("../migrations/0042_risk_grant_approvals_mcp.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

@@ -1996,6 +1996,7 @@ export interface AutonomyCreateGrantParams {
   allowedTools?: unknown[];
   allowedRisks?: unknown[];
   expiresAt?: string;
+  limits?: unknown;
 }
 
 export interface AutonomyRevokeGrantParams {

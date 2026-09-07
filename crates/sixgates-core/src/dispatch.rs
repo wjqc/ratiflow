@@ -4183,16 +4183,43 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            // WP-1（RDWS v1.4）：限额声明进 limits_json，grant_usage_ledger 逐消费行
+            // 校验（维度键 = model_calls/tokens_in/tokens_out/reasoning_tokens/
+            // tool_calls/cost_micros；缺省/≤0 = 该维不限）。
+            let limits = params.get("limits").cloned().filter(|v| v.is_object());
+            if let Some(l) = &limits {
+                for key in l
+                    .as_object()
+                    .map(|o| o.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default()
+                {
+                    if !matches!(
+                        key.as_str(),
+                        "model_calls"
+                            | "tokens_in"
+                            | "tokens_out"
+                            | "reasoning_tokens"
+                            | "tool_calls"
+                            | "cost_micros"
+                    ) {
+                        return Err(err(
+                            ErrorCode::InvalidParams,
+                            format!("autonomy_limits_invalid: 未知限额维度 {key}"),
+                        ));
+                    }
+                }
+            }
             store.with_conn(|conn| {
                 conn.execute(
                     "INSERT INTO autonomy_grants(id, workitem_id, allowed_tools_json, allowed_risks_json,
-                        expires_at, granted_at, created_at, updated_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?6,?6)",
+                        limits_json, expires_at, granted_at, created_at, updated_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?7)",
                     rusqlite::params![
                         id,
                         workitem_id,
                         serde_json::to_string(&allowed_tools).unwrap_or_default(),
                         serde_json::to_string(&allowed_risks).unwrap_or_default(),
+                        limits.map(|l| l.to_string()).unwrap_or_else(|| "{}".into()),
                         params.get("expiresAt").and_then(|v| v.as_str()).unwrap_or(""),
                         now
                     ],

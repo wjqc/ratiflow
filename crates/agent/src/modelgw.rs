@@ -666,7 +666,7 @@ struct CallStats<'a> {
 
 /// 流打开期失败判定（call_turn 非流式兜底的准入）：传输层/限流/打开即中断，
 /// 且未产出任何 delta（已见 delta 的中断不兜底，禁止同一响应双重消费）。
-fn open_phase_failure(err: &str) -> bool {
+pub(crate) fn open_phase_failure(err: &str) -> bool {
     let code = err.split(':').next().unwrap_or("");
     matches!(
         code,

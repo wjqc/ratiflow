@@ -4532,6 +4532,12 @@
           "name": "expiresAt",
           "type": "string",
           "required": false
+        },
+        {
+          "name": "limits",
+          "type": "object",
+          "required": false,
+          "description": "限额声明（WP-1）：键=grant_usage_ledger 维度（model_calls/tokens_in/tokens_out/reasoning_tokens/tool_calls/cost_micros），值≥1=上限，缺省=不限"
         }
       ],
       "result": "value"

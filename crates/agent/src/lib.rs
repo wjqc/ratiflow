@@ -283,6 +283,27 @@ pub fn execute_run(
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_secs(budget.max_duration_sec.max(1) as u64);
 
+    // WP-1（RDWS v1.4）：Grant 计量归属——Run 快照中的 autonomyGrantId。
+    // 空 = 无 grant（默认人工路径）或 SIXGATES_UNIFIED_RISK=0（回退 = WP-1 前行为，
+    // 不做限额校验；已落 ledger 行仍由 settle/启动对账照实收尾）。
+    let grant_ledger_id = {
+        let snap: String = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COALESCE(policy_snapshot,'') FROM agent_runs WHERE id=?1",
+                    [run_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap_or_default())
+            })
+            .unwrap_or_default();
+        if sg_policy::risk_model::enabled() {
+            sg_policy::autonomy::grant_id_of_snapshot(&snap)
+        } else {
+            String::new()
+        }
+    };
+
     // 恢复：先执行挂起提案（digest 绑定再验一次，fail-closed；通过则追加 developer 通知而非改写历史）。
     if let Some(proposal_id) = pending_proposal.take() {
         let proposal = get_proposal(store, &proposal_id)?;
@@ -389,6 +410,40 @@ pub fn execute_run(
             "model_request",
             json!({"messages": messages.len(), "estTokens": estimate_tokens(&request)}),
         );
+        // WP-1（RDWS v1.4）：模型每 model_call 独立消费行（每次重试/压缩后新 key）。
+        // 保留量用 utf8_bytes_upper_v1 上界（bytes/4 对中文是低估、非上界，禁用）；
+        // tokens_out 按请求 max_tokens 保留。超限 → autonomy_budget_exhausted（零消耗）。
+        let ledger_key = if grant_ledger_id.is_empty() {
+            String::new()
+        } else {
+            ids::new_id("mc")
+        };
+        if !ledger_key.is_empty() {
+            let est_in = tokens_upper_v1(&request);
+            let evidence = json!({
+                "estimator": "utf8_bytes_upper_v1",
+                "tokensInUpper": est_in,
+                "maxTokens": request.max_tokens,
+                "iteration": iteration,
+            });
+            if let Err(e) = sg_policy::autonomy::reserve(
+                store,
+                &grant_ledger_id,
+                run_id,
+                &ledger_key,
+                &[
+                    ("model_calls", 1),
+                    ("tokens_in", est_in),
+                    ("tokens_out", request.max_tokens.max(0)),
+                ],
+                &evidence,
+            ) {
+                run.result = e.to_string();
+                set_status(store, &mut run, "failed", "run.failed")?;
+                finish(store, &run)?;
+                return Err(e);
+            }
+        }
         let response = match gateway.call_turn(
             store,
             run_id,
@@ -400,8 +455,52 @@ pub fn execute_run(
                 prompt_cache_key: cache_key.clone(),
             },
         ) {
-            Ok(resp) => resp,
+            Ok(resp) => {
+                // 实际用量 settle（Provider usage 权威；actual 超 reserve 由 ledger
+                // 判 reconciliation_required，不写 0 冒充）。
+                if !ledger_key.is_empty() {
+                    let _ = sg_policy::autonomy::settle(
+                        store,
+                        &grant_ledger_id,
+                        run_id,
+                        &ledger_key,
+                        &[
+                            ("model_calls", Some(1)),
+                            ("tokens_in", Some(resp.tokens_in)),
+                            ("tokens_out", Some(resp.tokens_out)),
+                        ],
+                        &json!({"source": "call_turn", "finishReason": resp.finish_reason})
+                            .to_string(),
+                    );
+                }
+                resp
+            }
             Err(e) => {
+                // usage 缺失面：预算预检失败或打开期失败（请求未送达/无任何产出，
+                // 与网关「禁止双重消费」同界）→ 全维 settle 0；已发起（取消/协议/
+                // 已见输出后中断）→ model_calls 按实消费 1，tokens 保留 reserve 进
+                // reconciliation（Provider 是否计费未知，不估 0）。
+                if !ledger_key.is_empty() {
+                    let preflight =
+                        e.contains("budget_exceeded") || modelgw::open_phase_failure(&e);
+                    let _ = sg_policy::autonomy::settle(
+                        store,
+                        &grant_ledger_id,
+                        run_id,
+                        &ledger_key,
+                        if preflight {
+                            &[
+                                ("model_calls", Some(0)),
+                                ("tokens_in", Some(0)),
+                                ("tokens_out", Some(0)),
+                            ]
+                        } else {
+                            &[("model_calls", Some(1))]
+                        },
+                        &json!({"source": "call_turn_failed", "error": e, "preflight": preflight})
+                            .to_string(),
+                    );
+                }
                 // M2 §4.3：本地 abort → cancelled 终态（恰好一条 run.cancelled），
                 // 已显示 delta 作废，不重放（Provider 是否继续计费未知）。
                 if e.starts_with("model_cancelled") {
@@ -791,6 +890,17 @@ fn estimate_tokens(req: &CompletionRequest) -> usize {
     chars / 4 + 64
 }
 
+/// WP-1（RDWS v1.4 Grant 计量）token 上界估算 `utf8_bytes_upper_v1`：
+/// UTF-8 字节数 + 每消息边界固定 overhead。任何 token 至少 1 字节 → 真上界；
+/// bytes/4 对 CJK（3 字节 ≈ 1-2 token）是低估，禁止用于保留量。
+/// estimator kind 随 reserve evidence 冻结进 Run policy snapshot 语义。
+fn tokens_upper_v1(req: &CompletionRequest) -> i64 {
+    let bytes = req.system_prompt.len()
+        + req.messages.iter().map(|m| m.content.len()).sum::<usize>()
+        + req.tools_json.as_ref().map(|t| t.len()).unwrap_or(0);
+    bytes as i64 + 16 * (req.messages.len() as i64 + 1)
+}
+
 fn log_rollout(rollout: &mut Option<crate::rollout::Rollout>, kind: &str, data: Value) {
     if let Some(r) = rollout {
         // rollout 是观测数据：写失败不中断 Run（记录 stderr）。
@@ -872,6 +982,47 @@ fn propose_and_execute(
             mark_proposal(store, &proposal, "rejected", &e.to_string())?;
             return Ok(StepOutcome::Continue(format!("工具被策略拒绝：{e}")));
         }
+    };
+
+    // WP-1（RDWS v1.4 A4）：统一风险评估——SIXGATES_UNIFIED_RISK 开启时服务端派生、
+    // 审计 risk.assessment，且 auto_approvable=false 强制人工审批（只收紧：硬规则命中的
+    // irreversible/manual/无键链外部写不得因 ToolRule 低档被自动放行）。
+    // MCP 在 WP-2 ToolProvider adapter 证据落地前按外部写保守评估（只升不降）。
+    let needs_approval = if needs_approval || !sg_policy::risk_model::enabled() {
+        needs_approval
+    } else {
+        let assessment = match crate::tools::find(&decision.action) {
+            Some(def) => sg_policy::risk_model::assess_registry_tool(
+                &decision.action,
+                def.effect_class,
+                def.reversibility,
+                def.protected_target,
+                None,
+                false,
+                None,
+                None,
+            ),
+            None => sg_policy::risk_model::assess_registry_tool(
+                &decision.action,
+                "external_write",
+                "manual",
+                false,
+                None,
+                false,
+                None,
+                None,
+            ),
+        };
+        let auto = sg_policy::risk_model::auto_approvable(&assessment);
+        let _ = sg_store::audit::append(
+            store,
+            "system",
+            "risk.assessment",
+            "tool_proposal",
+            &proposal.id,
+            json!({"autoApprovable": auto, "digest": digest, "assessment": assessment.to_json()}),
+        );
+        needs_approval || !auto
     };
 
     if needs_approval

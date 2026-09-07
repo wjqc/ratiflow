@@ -153,6 +153,36 @@ pub fn validate_grant(
     if !grant.allowed_risks.is_empty() && !grant.allowed_risks.iter().any(|r| r == risk) {
         return Err(GrantError::RiskNotAllowed);
     }
+    // WP-1（RDWS v1.4）：ledger 耗尽闭合——任一限额维度的累计占用已达上限 →
+    // 状态位写实为 exhausted（治理可见）并拒绝。逐消费行的零消耗校验在 reserve。
+    if let Some(_dim) = store
+        .with_conn(|conn| -> Result<Option<String>, Error> {
+            let limits = limits_of(conn, grant_id)?;
+            if let Some(map) = limits.as_object() {
+                for (dim, v) in map {
+                    let Some(limit) = v.as_i64() else { continue };
+                    if limit <= 0 {
+                        continue;
+                    }
+                    if usage_total(conn, grant_id, dim)? >= limit {
+                        return Ok(Some(dim.clone()));
+                    }
+                }
+            }
+            Ok(None)
+        })
+        .unwrap_or(None)
+    {
+        let _ = store.with_conn(|conn| {
+            conn.execute(
+                "UPDATE autonomy_grants SET status='exhausted', updated_at=?1 WHERE id=?2 AND status='active'",
+                rusqlite::params![sg_store::timefmt::now(), grant_id],
+            )
+            .map_err(Error::from)?;
+            Ok(())
+        });
+        return Err(GrantError::Exhausted);
+    }
     Ok(grant)
 }
 
@@ -239,6 +269,326 @@ pub fn mode_of_snapshot(policy_snapshot: &str) -> AutonomyMode {
                 .and_then(AutonomyMode::parse)
         })
         .unwrap_or(AutonomyMode::Agent)
+}
+
+/// 从 policy_snapshot JSON 读 grant id（WP-1：模型/工具消费记账的归属键）。
+pub fn grant_id_of_snapshot(policy_snapshot: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(policy_snapshot)
+        .ok()
+        .and_then(|v| {
+            v.get("autonomyGrantId")
+                .and_then(|g| g.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Grant 计量（RDWS 实施计划 v1.4 WP-1 / 0042 grant_usage_ledger）
+//
+// consumption_key 粒度：模型每 model_call、工具每 proposal 各自独立行——
+// 一个 Run 多次消费互不撞键；UNIQUE(grant,run,dimension,consumption_key) 是领域幂等键。
+//
+// 占用公式 = SUM(COALESCE(settled_amount, reserved_amount))；超限即
+// autonomy_budget_exhausted（零消耗：单事务任一维超限全部不占用）。
+// settle 只接受 actual ≤ reserved（CAS state='reserved'）；actual 超 reserve、
+// Provider 未返回用量或价格未知 → reconciliation_required 并保留 reserved 占用，
+// 禁止写 0 冒充。TTL/状态位不在此层——事实只追加，回填走 reconcile。
+// ---------------------------------------------------------------------------
+
+/// 一次消费的维度与数量（多维必须同事务原子 reserve）。
+pub type ConsumptionDims<'a> = &'a [(&'a str, i64)];
+
+fn limits_of(conn: &rusqlite::Connection, grant_id: &str) -> Result<serde_json::Value, Error> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT limits_json FROM autonomy_grants WHERE id=?1",
+            [grant_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| Error::Message("autonomy_grant_required: grant 不存在".into()))?;
+    Ok(serde_json::from_str(&raw.unwrap_or_default()).unwrap_or(serde_json::Value::Null))
+}
+
+fn usage_total(conn: &rusqlite::Connection, grant_id: &str, dimension: &str) -> Result<i64, Error> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(settled_amount, reserved_amount)),0)
+         FROM grant_usage_ledger WHERE grant_id=?1 AND dimension=?2",
+        [grant_id, dimension],
+        |r| r.get(0),
+    )?)
+}
+
+/// reserve：多维同一 BEGIN IMMEDIATE 事务内校验并写入。
+/// 幂等：同 (grant,run,dimension,consumption_key) 已有 reserved/settled 行且数量一致 → Ok；
+/// 数量不一致 → grant_ledger_conflict。任一维超限 → autonomy_budget_exhausted（零消耗）。
+pub fn reserve(
+    store: &Store,
+    grant_id: &str,
+    run_id: &str,
+    consumption_key: &str,
+    dims: ConsumptionDims,
+    evidence: &serde_json::Value,
+) -> Result<(), Error> {
+    if dims.is_empty() {
+        return Err(Error::Message("grant_ledger_invalid: 空 reserve".into()));
+    }
+    store.with_tx_immediate(|tx| {
+        let limits = limits_of(tx, grant_id)?;
+        let now = sg_store::timefmt::now();
+        // 幂等复查：同消费行已存在——数量一致且状态为 reserved/settled → 直接成功
+        // （网络/上游重放）；数量不一致或状态为对账/人工面 → 冲突（不静默改写事实）。
+        let mut all_present = true;
+        for (dim, amount) in dims {
+            let row: Option<(i64, i64)> = tx
+                .query_row(
+                    "SELECT reserved_amount, CASE WHEN state IN ('reserved','settled')
+                              THEN 0 ELSE 1 END FROM grant_usage_ledger
+                     WHERE grant_id=?1 AND run_id=?2 AND dimension=?3 AND consumption_key=?4",
+                    rusqlite::params![grant_id, run_id, dim, consumption_key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(Error::from)?;
+            match row {
+                Some((reserved, bad_state)) => {
+                    if bad_state == 1 {
+                        return Err(Error::Message(format!(
+                            "grant_ledger_conflict: {dim}/{consumption_key} 处于对账/人工状态"
+                        )));
+                    }
+                    if reserved != *amount {
+                        return Err(Error::Message(format!(
+                            "grant_ledger_conflict: {dim}/{consumption_key} 已保留 {reserved}，重放量 {amount}"
+                        )));
+                    }
+                }
+                None => all_present = false,
+            }
+        }
+        if all_present {
+            return Ok(());
+        }
+        for (dim, amount) in dims {
+            if *amount < 0 {
+                return Err(Error::Message(format!(
+                    "grant_ledger_invalid: {dim} 保留量不可为负"
+                )));
+            }
+            // limits_json 键与 ledger 维度同名；缺省/≤0 = 该维不限。
+            let limit = limits.get(*dim).and_then(|v| v.as_i64()).unwrap_or(0);
+            if limit > 0 {
+                let total = usage_total(tx, grant_id, dim)?;
+                if total + amount > limit {
+                    return Err(Error::Message(format!(
+                        "autonomy_budget_exhausted: {dim} 占用 {total} + 本次 {amount} 超限额 {limit}（零消耗）"
+                    )));
+                }
+            }
+            tx.execute(
+                "INSERT INTO grant_usage_ledger(id, grant_id, run_id, dimension, consumption_key,
+                     reserved_amount, reservation_evidence_json, state, reserved_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,'reserved',?8)",
+                rusqlite::params![
+                    sg_store::ids::new_id("gul"),
+                    grant_id,
+                    run_id,
+                    dim,
+                    consumption_key,
+                    amount,
+                    evidence.to_string(),
+                    now
+                ],
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// settle：消费结束落实际用量（CAS state='reserved'）。
+/// actual=None（usage 未知）或 actual>reserved → reconciliation_required（保留 reserved 占用）。
+/// 幂等：已 settled 同值 → Ok；不一致 → grant_ledger_conflict。
+pub fn settle(
+    store: &Store,
+    grant_id: &str,
+    run_id: &str,
+    consumption_key: &str,
+    actuals: &[(&str, Option<i64>)],
+    evidence_json: &str,
+) -> Result<(), Error> {
+    store.with_tx_immediate(|tx| {
+        let now = sg_store::timefmt::now();
+        for (dim, actual) in actuals {
+            let row: Option<(i64, String, Option<i64>)> = tx
+                .query_row(
+                    "SELECT reserved_amount, state, settled_amount FROM grant_usage_ledger
+                     WHERE grant_id=?1 AND run_id=?2 AND dimension=?3 AND consumption_key=?4",
+                    rusqlite::params![grant_id, run_id, dim, consumption_key],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(Error::from)?;
+            let Some((reserved, state, settled)) = row else {
+                // 未 reserve 先 settle：无法对账（保留占用事实缺失），记告警语义错误。
+                return Err(Error::Message(format!(
+                    "grant_ledger_conflict: {dim}/{consumption_key} 无 reserved 行"
+                )));
+            };
+            match (&state[..], actual) {
+                ("settled", Some(a)) if settled == Some(*a) => continue, // 幂等重放
+                ("settled", _) => {
+                    return Err(Error::Message(format!(
+                        "grant_ledger_conflict: {dim}/{consumption_key} 已 settled 为 {settled:?}"
+                    )))
+                }
+                _ => {}
+            }
+            let (new_state, settled_val) = match actual {
+                Some(a) if *a >= 0 && *a <= reserved => ("settled", Some(*a)),
+                // 超 reserve 或用量未知：不写 0 冒充，进对账并保留 reserved 占用。
+                _ => ("reconciliation_required", None),
+            };
+            let n = tx.execute(
+                "UPDATE grant_usage_ledger SET state=?5, settled_amount=?6, settled_at=?7,
+                        settlement_evidence_json=?8
+                 WHERE grant_id=?1 AND run_id=?2 AND dimension=?3 AND consumption_key=?4
+                   AND state='reserved'",
+                rusqlite::params![
+                    grant_id,
+                    run_id,
+                    dim,
+                    consumption_key,
+                    new_state,
+                    settled_val,
+                    now,
+                    evidence_json
+                ],
+            )?;
+            if n != 1 {
+                return Err(Error::Message(format!(
+                    "grant_ledger_conflict: {dim}/{consumption_key} CAS 未命中（并发 settle）"
+                )));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// 崩溃恢复（§1.4）：run 已终态但仍有 reserved 行 → 按权威事实回填：
+/// - consumption_key 命中 model_calls 行 → 按 tokens_in/out 实际 settle；
+/// - 命中 tool_proposals 且 decision=executed → settle 1；
+/// - 无法对账 → reconciliation_required + notification_outbox 告警（人工处置后
+///   置 manual_action_required）。
+///
+/// 返回处理行数。幂等可重入。
+pub fn reconcile_run_residues(store: &Store, run_id: &str) -> Result<i64, Error> {
+    let rows: Vec<(String, String, String, i64)> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT l.dimension, l.consumption_key, l.id, l.reserved_amount
+             FROM grant_usage_ledger l
+             JOIN agent_runs r ON r.id = l.run_id
+             WHERE l.run_id=?1 AND l.state='reserved'
+               AND r.status IN ('completed_execution','failed','cancelled')",
+        )?;
+        let out = stmt
+            .query_map([run_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(out)
+    })?;
+    let now = sg_store::timefmt::now();
+    let mut handled = 0i64;
+    for (dimension, key, row_id, reserved) in rows {
+        // model_calls 权威行：tokens 维度按实际用量 settle；model_calls 维度 settle 1。
+        let model_row: Option<(i64, i64, String)> = store.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT tokens_in, tokens_out, status FROM model_calls WHERE id=?1",
+                    [&key],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .ok())
+        })?;
+        let tool_row: Option<String> = store.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT decision FROM tool_proposals WHERE id=?1",
+                    [&key],
+                    |r| r.get(0),
+                )
+                .ok())
+        })?;
+        let actual = match (dimension.as_str(), model_row, tool_row) {
+            ("model_calls", Some((_, _, status)), _) if status == "ok" => Some(1),
+            ("tokens_in", Some((tin, _, status)), _) if status == "ok" => Some(tin),
+            ("tokens_out", Some((_, tout, status)), _) if status == "ok" => Some(tout),
+            ("tool_calls", _, Some(decision)) if decision == "executed" => Some(1),
+            _ => None,
+        };
+        let (state, settled) = match actual {
+            Some(a) if a >= 0 && a <= reserved => ("settled", Some(a)),
+            _ => ("reconciliation_required", None),
+        };
+        store.with_conn(|conn| {
+            conn.execute(
+                "UPDATE grant_usage_ledger SET state=?2, settled_amount=?3, settled_at=?4,
+                        settlement_evidence_json=?5
+                 WHERE id=?1 AND state='reserved'",
+                rusqlite::params![
+                    row_id,
+                    state,
+                    settled,
+                    now,
+                    serde_json::json!({"source": "startup_reconcile", "run": run_id}).to_string()
+                ],
+            )?;
+            if state == "reconciliation_required" {
+                sg_store::outbox::emit_at(
+                    conn,
+                    "grant_usage",
+                    &row_id,
+                    "grant.reconciliation_required",
+                    serde_json::json!({
+                        "runId": run_id, "dimension": dimension, "consumptionKey": key,
+                        "reserved": reserved,
+                    }),
+                )?;
+            }
+            Ok(())
+        })?;
+        handled += 1;
+    }
+    Ok(handled)
+}
+
+/// 启动恢复扫描（挂 main.rs，automation 先例）：全部终态 run 的 reserved 残留。
+pub fn reconcile_all_terminal_runs(store: &Store) -> Result<i64, Error> {
+    let run_ids: Vec<String> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT l.run_id FROM grant_usage_ledger l
+             JOIN agent_runs r ON r.id = l.run_id
+             WHERE l.state='reserved'
+               AND r.status IN ('completed_execution','failed','cancelled')",
+        )?;
+        let out = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(out)
+    })?;
+    let mut total = 0i64;
+    for run_id in run_ids {
+        total += reconcile_run_residues(store, &run_id)?;
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -621,5 +971,396 @@ mod goal_tests {
             );
         }
         std::env::remove_var(AUTO_GATE_RELEASE_FLAG);
+    }
+
+    // --- WP-1 Grant 计量（RDWS v1.4 / 0042 grant_usage_ledger）---
+    mod ledger_tests {
+        use super::*;
+
+        fn setup() -> Store {
+            let dir = std::env::temp_dir().join(format!(
+                "sg-ledger-{}-{}",
+                std::process::id(),
+                sg_store::ids::new_id("t")
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Store::open(&dir, "test").unwrap()
+        }
+
+        fn seed(store: &Store, limits: &serde_json::Value) -> (String, String) {
+            store
+                .with_conn(|c| {
+                    c.execute_batch(
+                        "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                         VALUES ('pj','u','n','p','main','t');
+                         INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                         VALUES ('wi','pj','t','','[]','requirements','t','t');
+                         INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                         VALUES ('ctx1','wi','{}','standard','t');
+                         INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                             tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+                         VALUES ('run1','wi','','g','sha','ctx1','[]','{}','default','ik','queued','t','t');",
+                    )
+                    .map_err(Error::from)?;
+                    Ok(())
+                })
+                .unwrap();
+            store
+                .with_conn(|c| {
+                    c.execute(
+                        "INSERT INTO autonomy_grants(id, workitem_id, limits_json, status, granted_at, expires_at, created_at, updated_at)
+                         VALUES ('g1','wi',?1,'active','t','','t','t')",
+                        [limits.to_string()],
+                    )
+                    .map_err(Error::from)?;
+                    Ok(())
+                })
+                .unwrap();
+            ("g1".into(), "run1".into())
+        }
+
+        fn row_state(store: &Store, dim: &str, key: &str) -> (String, Option<i64>, i64) {
+            store
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT state, settled_amount, reserved_amount FROM grant_usage_ledger
+                         WHERE dimension=?1 AND consumption_key=?2",
+                        [dim, key],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .unwrap())
+                })
+                .unwrap()
+        }
+
+        #[test]
+        fn multi_dimension_atomic_reserve_and_limit_zero_consumption() {
+            let store = setup();
+            let _ = seed(
+                &store,
+                &serde_json::json!({"model_calls": 2, "tokens_in": 100}),
+            );
+            let (g, r) = ("g1", "run1");
+            // 多维原子 reserve：model_calls=1 + tokens_in=80。
+            reserve(
+                &store,
+                g,
+                r,
+                "mc1",
+                &[("model_calls", 1), ("tokens_in", 80)],
+                &serde_json::json!({"estimator": "utf8_bytes_upper_v1"}),
+            )
+            .unwrap();
+            // 第二次消费：model_calls 到 2（达限不超），tokens_in 80+30 超 100 → 整体拒绝（零消耗）。
+            let err = reserve(
+                &store,
+                g,
+                r,
+                "mc2",
+                &[("model_calls", 1), ("tokens_in", 30)],
+                &serde_json::json!({}),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("autonomy_budget_exhausted"),
+                "{err}"
+            );
+            let count: i64 = store
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT COUNT(*) FROM grant_usage_ledger WHERE consumption_key='mc2'",
+                        [],
+                        |x| x.get(0),
+                    )
+                    .unwrap())
+                })
+                .unwrap();
+            assert_eq!(count, 0, "超限零消耗：mc2 任何维度都不落行");
+            // tokens_in 单独达限内仍可（换 key）。
+            reserve(
+                &store,
+                g,
+                r,
+                "mc2",
+                &[("model_calls", 1), ("tokens_in", 20)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn reserve_idempotent_replay_and_conflict() {
+            let store = setup();
+            let _ = seed(&store, &serde_json::json!({"tokens_in": 1000}));
+            reserve(
+                &store,
+                "g1",
+                "run1",
+                "mc1",
+                &[("tokens_in", 50)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            // 同 key 同量重放 → Ok，不重复占行。
+            reserve(
+                &store,
+                "g1",
+                "run1",
+                "mc1",
+                &[("tokens_in", 50)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            let n: i64 = store
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT COUNT(*) FROM grant_usage_ledger WHERE consumption_key='mc1'",
+                        [],
+                        |x| x.get(0),
+                    )
+                    .unwrap())
+                })
+                .unwrap();
+            assert_eq!(n, 1, "重放幂等不追加行");
+            // 同 key 异量 → 冲突。
+            let err = reserve(
+                &store,
+                "g1",
+                "run1",
+                "mc1",
+                &[("tokens_in", 60)],
+                &serde_json::json!({}),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("grant_ledger_conflict"), "{err}");
+        }
+
+        #[test]
+        fn settle_cas_actual_over_or_unknown_to_reconciliation() {
+            let store = setup();
+            let _ = seed(
+                &store,
+                &serde_json::json!({"tokens_in": 1000, "tokens_out": 500}),
+            );
+            reserve(
+                &store,
+                "g1",
+                "run1",
+                "mc1",
+                &[("tokens_in", 80), ("tokens_out", 90)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            // 正常 settle：actual ≤ reserved。
+            settle(
+                &store,
+                "g1",
+                "run1",
+                "mc1",
+                &[("tokens_in", Some(70)), ("tokens_out", Some(90))],
+                "{}",
+            )
+            .unwrap();
+            let (s1, v1, _) = row_state(&store, "tokens_in", "mc1");
+            assert_eq!((s1.as_str(), v1), ("settled", Some(70)));
+            // settled 幂等重放（同值）。
+            settle(
+                &store,
+                "g1",
+                "run1",
+                "mc1",
+                &[("tokens_in", Some(70))],
+                "{}",
+            )
+            .unwrap();
+            // settled 异值 → 冲突。
+            let err = settle(
+                &store,
+                "g1",
+                "run1",
+                "mc1",
+                &[("tokens_in", Some(60))],
+                "{}",
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("grant_ledger_conflict"), "{err}");
+            // usage 未知（None）→ reconciliation_required，不写 0。
+            reserve(
+                &store,
+                "g1",
+                "run1",
+                "mc2",
+                &[("tokens_out", 50)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            settle(&store, "g1", "run1", "mc2", &[("tokens_out", None)], "{}").unwrap();
+            let (s2, v2, reserved) = row_state(&store, "tokens_out", "mc2");
+            assert_eq!(
+                (s2.as_str(), v2),
+                ("reconciliation_required", None),
+                "不写 0 冒充"
+            );
+            assert_eq!(reserved, 50, "保留 reserved 占用");
+            // actual 超 reserve → 同样 reconciliation。
+            reserve(
+                &store,
+                "g1",
+                "run1",
+                "mc3",
+                &[("tokens_in", 10)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            settle(
+                &store,
+                "g1",
+                "run1",
+                "mc3",
+                &[("tokens_in", Some(99))],
+                "{}",
+            )
+            .unwrap();
+            assert_eq!(
+                row_state(&store, "tokens_in", "mc3").0,
+                "reconciliation_required"
+            );
+            // 未 reserve 先 settle → 冲突。
+            let err = settle(
+                &store,
+                "g1",
+                "run1",
+                "ghost",
+                &[("tokens_in", Some(1))],
+                "{}",
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("grant_ledger_conflict"), "{err}");
+        }
+
+        #[test]
+        fn concurrent_reserves_respect_limit() {
+            let store = std::sync::Arc::new(setup());
+            let _ = seed(&store, &serde_json::json!({"tool_calls": 20}));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let mut handles = Vec::new();
+            for i in 0..8 {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    reserve(
+                        &store,
+                        "g1",
+                        "run1",
+                        &format!("tp{i}"),
+                        &[("tool_calls", 3)],
+                        &serde_json::json!({}),
+                    )
+                }));
+            }
+            let outcomes: Vec<bool> = handles
+                .into_iter()
+                .map(|h| h.join().unwrap().is_ok())
+                .collect();
+            let ok = outcomes.iter().filter(|o| **o).count();
+            assert!(ok >= 6, "8×3=24 对限额 20：至少 6 个成功（实际 {ok}）");
+            let total: i64 = store.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COALESCE(SUM(COALESCE(settled_amount,reserved_amount)),0) FROM grant_usage_ledger WHERE dimension='tool_calls'",
+                    [], |x| x.get(0)).unwrap())
+            }).unwrap();
+            assert!(total <= 20, "并发不超 Grant（实际 {total}）");
+        }
+
+        #[test]
+        fn reconcile_terminal_run_from_authoritative_rows() {
+            let store = setup();
+            let _ = seed(
+                &store,
+                &serde_json::json!({"model_calls": 10, "tokens_in": 1000, "tool_calls": 10}),
+            );
+            // mc1：崩溃残留（reserved）+ model_calls 权威行 ok → 按 tokens settle。
+            reserve(
+                &store,
+                "g1",
+                "run1",
+                "mc1",
+                &[("model_calls", 1), ("tokens_in", 80)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            store.with_conn(|c| {
+                c.execute(
+                    "INSERT INTO model_calls(id, agent_run_id, provider, model, tokens_in, tokens_out, cost_micros, latency_ms, redactions, status, created_at)
+                     VALUES ('mc1','run1','p','default',70,10,0,1,0,'ok','t')",
+                    [],
+                ).map_err(Error::from)?;
+                Ok(())
+            }).unwrap();
+            // tp1：工具残留 + proposal executed → settle 1。
+            reserve(
+                &store,
+                "g1",
+                "run1",
+                "tp1",
+                &[("tool_calls", 1)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            store.with_conn(|c| {
+                c.execute(
+                    "INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest, requires_approval, decision, created_at)
+                     VALUES ('tp1','run1','read_file','{}','low','d',0,'executed','t')",
+                    [],
+                ).map_err(Error::from)?;
+                Ok(())
+            }).unwrap();
+            // mc2：无权威行（调用中断）→ reconciliation_required + 告警。
+            reserve(
+                &store,
+                "g1",
+                "run1",
+                "mc2",
+                &[("tokens_in", 50)],
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            // run 未终态 → 不动。
+            assert_eq!(reconcile_run_residues(&store, "run1").unwrap(), 0);
+            store
+                .with_conn(|c| {
+                    c.execute(
+                        "UPDATE agent_runs SET status='completed_execution' WHERE id='run1'",
+                        [],
+                    )
+                    .map_err(Error::from)?;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                reconcile_run_residues(&store, "run1").unwrap(),
+                4,
+                "mc1×2 维度 + tp1 + mc2"
+            );
+            let (s, v, _) = row_state(&store, "tokens_in", "mc1");
+            assert_eq!(
+                (s.as_str(), v),
+                ("settled", Some(70)),
+                "按权威行实际用量回填"
+            );
+            assert_eq!(row_state(&store, "model_calls", "mc1").1, Some(1));
+            assert_eq!(row_state(&store, "tool_calls", "tp1").1, Some(1));
+            assert_eq!(
+                row_state(&store, "tokens_in", "mc2").0,
+                "reconciliation_required"
+            );
+            let alerts: i64 = store.with_conn(|c| {
+                Ok(c.query_row("SELECT COUNT(*) FROM events_outbox WHERE type='grant.reconciliation_required'", [], |x| x.get(0)).unwrap())
+            }).unwrap();
+            assert_eq!(alerts, 1, "对账告警恰好一条");
+            // 幂等重入。
+            assert_eq!(reconcile_run_residues(&store, "run1").unwrap(), 0);
+        }
     }
 }

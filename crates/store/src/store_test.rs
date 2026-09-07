@@ -869,4 +869,270 @@ mod tests {
         });
         assert!(bad_phase.is_err(), "agent_runs phase CHECK 应拒绝 idle");
     }
+    /// 0042（RDWS v1.4 §1.6）：新列/新表 CHECK 语义 + 存量数据迁移验证。
+    /// 迁移验证按计划要求做行数/分类数断言：手搭 schema≤41 旧库插入旧行 → 开 Store
+    /// 触发 0042 → approvals/tool_proposals 行数与 mcp/builtin 分类数一致。
+    #[test]
+    fn migration_0042_risk_grant_semantics() {
+        let (store, _guard) = open();
+        seed_minimal_fixtures(&store);
+        // approvals：五个新 subject_type 可写，非法值拒绝；三新列存在且默认值正确。
+        for subject in [
+            "mcp_import_probe",
+            "mcp_import_activate",
+            "gate_manual_confirm",
+            "gate_skip",
+            "rework",
+        ] {
+            store
+                .with_conn(|c| {
+                    Ok(c.execute(
+                        "INSERT INTO approvals(id, subject_type, subject_id, action_digest, risk, expires_at, created_at)
+                         VALUES (?1,?2,'s','d','low','t','t')",
+                        [format!("apr-{subject}"), subject.to_string()],
+                    )?)
+                })
+                .unwrap();
+        }
+        let bad_subject: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO approvals(id, subject_type, subject_id, action_digest, risk, expires_at, created_at)
+                 VALUES ('apr-bad','weird','s','d','low','t','t')",
+                [],
+            )?)
+        });
+        assert!(
+            bad_subject.is_err(),
+            "approvals subject_type CHECK 应拒绝 weird"
+        );
+        let (impact, scope, ver): (String, String, i64) = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT impact_digest, scope_facts_digest, digest_schema_version
+                     FROM approvals WHERE id='apr-rework'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(
+            (impact.as_str(), scope.as_str(), ver),
+            ("", "", 0),
+            "新列 legacy 默认"
+        );
+
+        // tool_proposals：send_phase/tool_provider 列 + CHECK。
+        store
+            .with_conn(|c| {
+                Ok(c.execute(
+                    "INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
+                         requires_approval, decision, created_at, tool_provider, send_phase)
+                     VALUES ('tp1','run1','mcp:srv:t','{}','low','d',0,'proposed','t','mcp','not_sent')",
+                    [],
+                )?)
+            })
+            .unwrap();
+        let bad_phase: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "UPDATE tool_proposals SET send_phase='flushed' WHERE id='tp1'",
+                [],
+            )?)
+        });
+        assert!(bad_phase.is_err(), "send_phase CHECK 应拒绝 flushed");
+
+        // grant_usage_ledger：dimension/state CHECK + 消费行唯一键。
+        store
+            .with_conn(|c| {
+                Ok(c.execute(
+                    "INSERT INTO grant_usage_ledger(id, grant_id, run_id, dimension, consumption_key,
+                         reserved_amount, state, reserved_at)
+                     VALUES ('gl1','ag1','run1','tokens_in','mc1',100,'reserved','t')",
+                    [],
+                )?)
+            })
+            .unwrap();
+        let dup_consumption: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO grant_usage_ledger(id, grant_id, run_id, dimension, consumption_key,
+                     reserved_amount, state, reserved_at)
+                 VALUES ('gl2','ag1','run1','tokens_in','mc1',50,'reserved','t')",
+                [],
+            )?)
+        });
+        assert!(
+            dup_consumption.is_err(),
+            "UNIQUE(grant,run,dimension,consumption) 应拒绝重复消费行"
+        );
+        let bad_dim: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "INSERT INTO grant_usage_ledger(id, grant_id, run_id, dimension, consumption_key,
+                     reserved_amount, state, reserved_at)
+                 VALUES ('gl3','ag1','run1','widgets','mc1',1,'reserved','t')",
+                [],
+            )?)
+        });
+        assert!(bad_dim.is_err(), "dimension CHECK 应拒绝 widgets");
+
+        // gate_manual_confirmations：state CHECK + approval/action digest 唯一。
+        store
+            .with_conn(|c| {
+                Ok(c.execute(
+                    "INSERT INTO gate_manual_confirmations(id, workitem_id, gate, stage_attempt_id,
+                         acceptance_item_digest, approval_id, action_digest, state, created_at, updated_at)
+                     VALUES ('gmc1','wi','requirements','att1','ad1','apr-gate_skip','adg1','requested','t','t')",
+                    [],
+                )?)
+            })
+            .unwrap();
+        let bad_confirm: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "UPDATE gate_manual_confirmations SET state='done' WHERE id='gmc1'",
+                [],
+            )?)
+        });
+        assert!(bad_confirm.is_err(), "confirmation state CHECK 应拒绝 done");
+
+        // mcp_repo_imports：八态 CHECK + 内容三元组唯一。
+        store
+            .with_conn(|c| {
+                Ok(c.execute(
+                    "INSERT INTO mcp_repo_imports(id, repo_url, ref_name, pinned_sha, manifest_digest,
+                         status, created_at, updated_at)
+                     VALUES ('imp1','https://example.test/repo.git','main','aa','md','imported','t','t')",
+                    [],
+                )?)
+            })
+            .unwrap();
+        let bad_import: Result<usize, crate::Error> = store.with_conn(|c| {
+            Ok(c.execute(
+                "UPDATE mcp_repo_imports SET status='cloning' WHERE id='imp1'",
+                [],
+            )?)
+        });
+        assert!(bad_import.is_err(), "import status CHECK 应拒绝 cloning");
+    }
+
+    /// 存量库升级到 0042：行数与 tool_provider 分类数迁移前后一致。
+    #[test]
+    fn migration_0042_populated_upgrade_preserves_rows() {
+        use crate::migration::MIGRATIONS;
+        let dir = tempdir::make("sg-0042-upgrade");
+        // 手搭 schema≤41：逐条应用 1..=41 并登记版本（复制 runner 的登记纪律）。
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("sixgates-v3.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            for (v, sql) in MIGRATIONS.iter() {
+                if *v > 41 {
+                    break;
+                }
+                conn.execute_batch(sql).unwrap();
+                conn.execute("INSERT INTO schema_migrations(version) VALUES (?1)", [v])
+                    .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            // 旧形态数据：approvals 旧行 ×2、tool_proposals 含 mcp__/builtin 两类。
+            conn.execute_batch(
+                "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                 VALUES ('pj','u','n','p','main','t');
+                 INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                 VALUES ('wi','pj','t','','[]','requirements','t','t');
+                 INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                 VALUES ('ctx1','wi','{}','standard','t');
+                 INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                     tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+                 VALUES ('run1','wi','','g','sha','ctx1','[]','{}','default','ik','queued','t','t');
+                 INSERT INTO approvals(id, subject_type, subject_id, action_digest, risk, status, expires_at, created_at)
+                 VALUES ('a1','tool_proposal','s1','d','low','approved','t','t');
+                 INSERT INTO approvals(id, subject_type, subject_id, action_digest, risk, status, expires_at, created_at)
+                 VALUES ('a2','gate_release','s2','d','high','requested','t','t');
+                 INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
+                     requires_approval, decision, created_at)
+                 VALUES ('t1','run1','mcp__srv__tool','{}','high','d',1,'approved','t');
+                 INSERT INTO tool_proposals(id, agent_run_id, tool, arguments, risk, action_digest,
+                     requires_approval, decision, created_at)
+                 VALUES ('t2','run1','read_file','{}','low','d',0,'executed','t');",
+            )
+            .unwrap();
+        }
+        // 开 Store → 补跑 0042。
+        let store = Store::open(dir.path(), "test").unwrap();
+        let (approvals, mcp, builtin): (i64, i64, i64) = store
+            .with_conn(|c| {
+                Ok((
+                    c.query_row("SELECT COUNT(*) FROM approvals", [], |r| r.get(0))?,
+                    c.query_row(
+                        "SELECT COUNT(*) FROM tool_proposals WHERE tool_provider='mcp'",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                    c.query_row(
+                        "SELECT COUNT(*) FROM tool_proposals WHERE tool_provider='builtin'",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(approvals, 2, "approvals 迁移前后行数一致");
+        assert_eq!((mcp, builtin), (1, 1), "存量 mcp__/builtin 分类回填精确");
+        let (impact, scope): (String, String) = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT impact_digest, scope_facts_digest FROM approvals WHERE id='a1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(
+            (impact.as_str(), scope.as_str()),
+            ("", ""),
+            "存量审批 digest 列为 legacy 空"
+        );
+        let phase: String = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT send_phase FROM tool_proposals WHERE id='t1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(phase, "not_sent", "存量提案 send_phase 默认 not_sent");
+    }
+
+    fn seed_minimal_fixtures(store: &Store) {
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main','t');
+                     INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi','pj','t','','[]','requirements','t','t');
+                     INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('ctx1','wi','{}','standard','t');
+                     INSERT INTO stage_attempts(id, workitem_id, gate, attempt_no, branch_no, state, entry_snapshot_id,
+                         input_package_sha256, active_output_package_id, predecessor_attempt_id, created_at, updated_at)
+                     VALUES ('att1','wi','requirements',1,1,'prepared','','',NULL,NULL,'t','t');
+                     INSERT INTO autonomy_grants(id, workitem_id, gate_id, plan_digest, limits_json, granted_at, expires_at, created_at, updated_at)
+                     VALUES ('ag1','wi','requirements','pd1','{}','t','t','t','t');
+                     INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                         tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+                     VALUES ('run1','wi','','g','sha','ctx1','[]','{}','default','ik','queued','t','t');",
+                )
+                .map_err(crate::Error::from)?;
+                Ok(())
+            })
+            .unwrap();
+    }
 }

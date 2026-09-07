@@ -17,6 +17,11 @@ pub struct ToolDef {
     pub parameters: fn() -> Value,
     /// M2-08：副作用分类（PlanGuard phase 判定输入；ADR-037 §6.6）。
     pub effect_class: &'static str,
+    /// WP-1（RDWS v1.4 A4）：可恢复性声明（0018 词汇），进统一风险评估。
+    pub reversibility: &'static str,
+    /// WP-1：静态受保护目标声明（部署交付物/迁移/依赖锁/CI 配置类写入）；
+    /// 运行时路径级保护判定由 Policy protected-target registry 承接（WP-8）。
+    pub protected_target: bool,
 }
 
 fn params_read_file() -> Value {
@@ -57,6 +62,8 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 60,
         parameters: params_apply_patch,
+        reversibility: "logical_restore",
+        protected_target: false,
         effect_class: "local_write",
     };
     static READ_FILE: ToolDef = ToolDef {
@@ -67,6 +74,8 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 60,
         parameters: params_read_file,
+        reversibility: "logical_restore",
+        protected_target: false,
         effect_class: "read",
     };
     static RUN_COMMAND: ToolDef = ToolDef {
@@ -77,6 +86,8 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 120,
         parameters: params_run_command,
+        reversibility: "manual",
+        protected_target: false,
         effect_class: "local_write",
     };
     static SEARCH_KNOWLEDGE: ToolDef = ToolDef {
@@ -87,6 +98,8 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 30,
         parameters: params_search_knowledge,
+        reversibility: "logical_restore",
+        protected_target: false,
         effect_class: "read",
     };
     static WRITE_FILE: ToolDef = ToolDef {
@@ -97,6 +110,8 @@ pub fn registry() -> Vec<&'static ToolDef> {
         max_result_bytes: MIB,
         timeout_sec: 60,
         parameters: params_write_file,
+        reversibility: "logical_restore",
+        protected_target: false,
         effect_class: "local_write",
     };
     // 字典序：apply_patch < read_file < run_command < search_knowledge < write_file

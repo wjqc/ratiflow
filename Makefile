@@ -59,6 +59,7 @@ e2e: ## Protocol E2E golden flow + agent lifecycle + settings + trace + gate rel
 	node tests/e2e-protocol/with-timeout.mjs 300 mcp-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 workflow-template-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 rpc-receipt-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 risk-ledger-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 plan-dag-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 plan-execution-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 partial-replan-e2e.mjs
