@@ -2602,6 +2602,28 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             sg_workflow::metrics::overview(store, &scope).map_err(store_err)
         }
         "triage.list" => sg_workflow::metrics::triage_list(store).map_err(store_err),
+        // --- WP-11：A6 判重（FTS5 trigram；flag=RATIFLOW_WORKITEM_FTS；仅提示禁自动合并）---
+        "workitem.searchRebuild" => {
+            if std::env::var("RATIFLOW_WORKITEM_FTS").ok().as_deref() != Some("1") {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_WORKITEM_FTS 未开启",
+                ));
+            }
+            let indexed = sg_workitem::search::reindex_all(store).map_err(store_err)?;
+            Ok(json!({ "indexed": indexed }))
+        }
+        "workitem.similar" => {
+            if std::env::var("RATIFLOW_WORKITEM_FTS").ok().as_deref() != Some("1") {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_WORKITEM_FTS 未开启",
+                ));
+            }
+            let items = sg_workitem::search::similar(store, &str_param(params, "workItemId")?)
+                .map_err(store_err)?;
+            Ok(json!({ "items": items }))
+        }
         "stage.attempts" => {
             let workitem_id = str_param(params, "workItemId")?;
             let attempts = sg_workitem::attempt::list(store, &workitem_id).map_err(store_err)?;

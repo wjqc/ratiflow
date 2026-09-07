@@ -149,6 +149,8 @@ export const RPC_METHODS: readonly string[] = [
   'rework.list',
   'metrics.overview',
   'triage.list',
+  'workitem.searchRebuild',
+  'workitem.similar',
   'stage.attempts',
   'stage.package',
   'snapshot.get',

@@ -2509,6 +2509,22 @@
       "result": "value"
     },
     {
+      "name": "workitem.searchRebuild",
+      "params": [],
+      "result": "value"
+    },
+    {
+      "name": "workitem.similar",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "stage.attempts",
       "params": [
         {

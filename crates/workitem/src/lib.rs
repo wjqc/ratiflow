@@ -13,6 +13,7 @@ pub mod release_events;
 pub mod requirements;
 pub mod rework;
 pub mod rollback;
+pub mod search;
 pub mod snapshot;
 pub mod stages;
 pub mod worktree;
@@ -334,6 +335,8 @@ pub fn create_with_template(
         "workflow.instance_created",
         serde_json::json!({"templateKey": template_key.unwrap_or(sg_workflow::template::DEFAULT_TEMPLATE_KEY)}),
     )?;
+    // WP-11：判重检索增量索引（flag 关闭 no-op）。
+    search::index_workitem(store, &id, title, description)?;
     get(store, &id)
 }
 
