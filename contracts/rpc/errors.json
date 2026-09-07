@@ -1,23 +1,130 @@
 {
   "$schema": "./methods.schema.json",
   "families": {
-    "VALIDATION": { "codes": ["INVALID_PARAMS", "PARSE_ERROR", "METHOD_NOT_FOUND"], "retryable": false },
-    "REVISION": { "codes": ["REVISION_CONFLICT"], "retryable": false },
-    "MANAGED": { "codes": ["MANAGED_READ_ONLY"], "retryable": false },
-    "CREDENTIAL": { "codes": ["CREDENTIAL_MISSING", "CREDENTIAL_EXPIRED", "CREDENTIAL_AUTH_FAILED", "CREDENTIAL_STORE_UNAVAILABLE"], "retryable": false },
-    "TLS": { "codes": ["TLS_ERROR", "TLS_CERT_UNTRUSTED"], "retryable": false },
-    "HOST_KEY": { "codes": ["HOST_KEY_FIRST_USE", "HOST_KEY_CHANGED"], "retryable": false },
-    "MODEL": { "codes": ["MODEL_UNAVAILABLE", "MODEL_CAPABILITY_MISSING", "MODEL_RATE_LIMITED", "BUDGET_EXCEEDED"], "retryable": "MODEL_UNAVAILABLE,MODEL_RATE_LIMITED" },
-    "APPROVAL": { "codes": ["APPROVAL_REQUIRED", "APPROVAL_INVALID", "APPROVAL_EXPIRED", "ACTION_DENIED"], "retryable": false },
-    "BACKUP": { "codes": ["BACKUP_INCOMPATIBLE", "BACKUP_CORRUPT", "BACKUP_VERIFY_FAILED"], "retryable": false },
-    "CORE": { "codes": ["CORE_UNAVAILABLE", "TIMEOUT"], "retryable": true },
-    "NOT_FOUND": { "codes": ["NOT_FOUND"], "retryable": false },
-    "CONFLICT": { "codes": ["CONFLICT", "ETAG_MISMATCH", "REVISION_FROZEN", "INVALID_STAGE_TRANSITION", "DIGEST_DRIFT"], "retryable": false },
-    "MEMORY": { "codes": ["MEMORY_DISABLED", "MEMORY_CONFLICT", "MEMORY_SECRET_DETECTED", "MEMORY_INVALID_STATE", "MEMORY_OBJECT_MISSING", "MEMORY_PURGE_BLOCKED", "MEMORY_CAPTURE_UNKNOWN", "MEMORY_QUOTA_EXCEEDED"], "retryable": false }
+    "VALIDATION": {
+      "codes": [
+        "INVALID_PARAMS",
+        "PARSE_ERROR",
+        "METHOD_NOT_FOUND"
+      ],
+      "retryable": false
+    },
+    "REVISION": {
+      "codes": [
+        "REVISION_CONFLICT"
+      ],
+      "retryable": false
+    },
+    "MANAGED": {
+      "codes": [
+        "MANAGED_READ_ONLY"
+      ],
+      "retryable": false
+    },
+    "CREDENTIAL": {
+      "codes": [
+        "CREDENTIAL_MISSING",
+        "CREDENTIAL_EXPIRED",
+        "CREDENTIAL_AUTH_FAILED",
+        "CREDENTIAL_STORE_UNAVAILABLE"
+      ],
+      "retryable": false
+    },
+    "TLS": {
+      "codes": [
+        "TLS_ERROR",
+        "TLS_CERT_UNTRUSTED"
+      ],
+      "retryable": false
+    },
+    "HOST_KEY": {
+      "codes": [
+        "HOST_KEY_FIRST_USE",
+        "HOST_KEY_CHANGED"
+      ],
+      "retryable": false
+    },
+    "MODEL": {
+      "codes": [
+        "MODEL_UNAVAILABLE",
+        "MODEL_CAPABILITY_MISSING",
+        "MODEL_RATE_LIMITED",
+        "BUDGET_EXCEEDED"
+      ],
+      "retryable": "MODEL_UNAVAILABLE,MODEL_RATE_LIMITED"
+    },
+    "APPROVAL": {
+      "codes": [
+        "APPROVAL_REQUIRED",
+        "APPROVAL_INVALID",
+        "APPROVAL_EXPIRED",
+        "ACTION_DENIED"
+      ],
+      "retryable": false
+    },
+    "BACKUP": {
+      "codes": [
+        "BACKUP_INCOMPATIBLE",
+        "BACKUP_CORRUPT",
+        "BACKUP_VERIFY_FAILED"
+      ],
+      "retryable": false
+    },
+    "CORE": {
+      "codes": [
+        "CORE_UNAVAILABLE",
+        "TIMEOUT"
+      ],
+      "retryable": true
+    },
+    "NOT_FOUND": {
+      "codes": [
+        "NOT_FOUND"
+      ],
+      "retryable": false
+    },
+    "CONFLICT": {
+      "codes": [
+        "CONFLICT",
+        "ETAG_MISMATCH",
+        "REVISION_FROZEN",
+        "INVALID_STAGE_TRANSITION",
+        "DIGEST_DRIFT"
+      ],
+      "retryable": false
+    },
+    "MEMORY": {
+      "codes": [
+        "MEMORY_DISABLED",
+        "MEMORY_CONFLICT",
+        "MEMORY_SECRET_DETECTED",
+        "MEMORY_INVALID_STATE",
+        "MEMORY_OBJECT_MISSING",
+        "MEMORY_PURGE_BLOCKED",
+        "MEMORY_CAPTURE_UNKNOWN",
+        "MEMORY_QUOTA_EXCEEDED"
+      ],
+      "retryable": false
+    },
+    "RECEIPT": {
+      "codes": [
+        "IDEMPOTENCY_KEY_REQUIRED",
+        "RECEIPT_FINGERPRINT_MISMATCH"
+      ],
+      "retryable": false
+    }
   },
   "envelope": {
-    "required": ["code", "message", "retryable"],
-    "optional": ["fieldErrors", "correlationId", "details"],
+    "required": [
+      "code",
+      "message",
+      "retryable"
+    ],
+    "optional": [
+      "fieldErrors",
+      "correlationId",
+      "details"
+    ],
     "note": "message 可本地化；前端逻辑只允许依赖 code。correlationId 贯穿审计与外部集成。"
   }
 }

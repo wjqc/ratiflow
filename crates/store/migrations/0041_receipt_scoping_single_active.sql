@@ -1,15 +1,37 @@
--- 0041：schema 约束修复（缺陷审计 2026-09-07）。
--- 1) rpc_receipts 主键从全局 idem_key 改为 (method, idem_key)——跨方法复用 key
---    不再串台返回无关响应；response_json 同时承载错误 envelope（空串 = 执行中占位）。
+-- 0041：schema 约束修复（缺陷审计 2026-09-07）+ receipt lease 三态
+-- （RDWS 实施计划 v1.4 §1.3 最终结构）。
+-- 1) rpc_receipts 重建：
+--    - 主键 (method, idem_key)——跨方法复用 key 不再串台返回无关响应；
+--    - request_fingerprint = sha256(canonical params 去除 idempotencyKey)——同 key 异参重放
+--      在执行前被拒（rpc_receipt_fingerprint_mismatch），不返回无关响应；
+--    - owner/lease_revision/lease_expires_at/lease_state —— 认领、retryable_failed→in_flight、
+--      过期接管都必须条件 UPDATE 命中 1 行才获得执行权（CAS）；
+--    - lease_state：in_flight（执行者持有）/ retryable_failed（transient 错误释放执行语义）/
+--      completed（成功或 deterministic 错误终态，错误 envelope 可重放）；
+--    - response_json 同时承载错误 envelope（空串 = 执行中占位）。
+--    存量行迁移语义：response_json 非空 → completed（保持可重放）；空占位（旧 crash 占位，
+--    无 owner 事实）→ retryable_failed（owner=''，可被下一次请求 CAS 认领，不永久阻塞）。
+--    request_fingerprint=''（legacy）= 跳过指纹比对，维持旧重放行为。
 CREATE TABLE rpc_receipts_v41 (
     method TEXT NOT NULL,
     idem_key TEXT NOT NULL,
-    response_json TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT '',
+    lease_revision INTEGER NOT NULL DEFAULT 1,
+    lease_expires_at TEXT,
+    lease_state TEXT NOT NULL CHECK(lease_state IN ('in_flight','retryable_failed','completed')),
+    response_json TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     PRIMARY KEY (method, idem_key)
 );
-INSERT INTO rpc_receipts_v41 (method, idem_key, response_json, created_at)
-    SELECT method, idem_key, response_json, created_at FROM rpc_receipts;
+INSERT INTO rpc_receipts_v41
+    (method, idem_key, request_fingerprint, owner, lease_revision, lease_state,
+     response_json, created_at, updated_at)
+SELECT method, idem_key, '', '', 1,
+       CASE WHEN response_json != '' THEN 'completed' ELSE 'retryable_failed' END,
+       response_json, created_at, created_at
+FROM rpc_receipts;
 DROP TABLE rpc_receipts;
 ALTER TABLE rpc_receipts_v41 RENAME TO rpc_receipts;
 CREATE INDEX idx_rpc_receipts_method ON rpc_receipts(method, created_at);

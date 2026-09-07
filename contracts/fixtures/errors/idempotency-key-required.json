@@ -1,0 +1,8 @@
+{
+  "code": "IDEMPOTENCY_KEY_REQUIRED",
+  "message": "receipt 门控 mutation 必须携带 idempotencyKey",
+  "retryable": false,
+  "details": {
+    "method": "workflowTemplate.create"
+  }
+}

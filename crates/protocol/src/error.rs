@@ -48,6 +48,9 @@ pub enum ErrorCode {
     MemoryCaptureUnknown,
     MemoryQuotaExceeded,
     CoreUnavailable,
+    // RPC 回执（RDWS 实施计划 v1.4 §1.3）：receipt 门控 mutation 的传输层拒绝码。
+    IdempotencyKeyRequired,
+    ReceiptFingerprintMismatch,
 }
 
 impl ErrorCode {
@@ -96,6 +99,8 @@ impl ErrorCode {
             ErrorCode::MemoryCaptureUnknown => 1907,
             ErrorCode::MemoryQuotaExceeded => 1908,
             ErrorCode::CoreUnavailable => -32000,
+            ErrorCode::IdempotencyKeyRequired => 2001,
+            ErrorCode::ReceiptFingerprintMismatch => 2002,
         }
     }
 
@@ -144,6 +149,8 @@ impl ErrorCode {
             ErrorCode::MemoryCaptureUnknown => "memory_capture_unknown",
             ErrorCode::MemoryQuotaExceeded => "memory_quota_exceeded",
             ErrorCode::CoreUnavailable => "core_unavailable",
+            ErrorCode::IdempotencyKeyRequired => "idempotency_key_required",
+            ErrorCode::ReceiptFingerprintMismatch => "receipt_fingerprint_mismatch",
         }
     }
 
@@ -153,6 +160,79 @@ impl ErrorCode {
             ErrorCode::ModelRateLimited | ErrorCode::GitlabUnreachable | ErrorCode::CoreUnavailable
         )
     }
+
+    /// 数值码 → 枚举（receipt 层按码归类，不解析错误字符串）。
+    pub fn from_code(code: i64) -> Option<Self> {
+        use ErrorCode::*;
+        Some(match code {
+            -32700 => ParseError,
+            -32600 => InvalidRequest,
+            -32601 => MethodNotFound,
+            -32602 => InvalidParams,
+            -32603 => InternalError,
+            1001 => NotFound,
+            1002 => Unauthorized,
+            1003 => Forbidden,
+            1004 => Conflict,
+            1101 => EtagMismatch,
+            1102 => RevisionFrozen,
+            1103 => InvalidStageTransition,
+            1201 => ApprovalRequired,
+            1202 => ApprovalInvalid,
+            1203 => ApprovalExpired,
+            1204 => ActionDenied,
+            1301 => GitlabUnconfigured,
+            1302 => GitlabUnreachable,
+            1401 => ModelUnavailable,
+            1402 => ModelRateLimited,
+            1403 => ContextTooLarge,
+            1404 => BudgetExceeded,
+            1405 => ResponseInvalid,
+            1501 => UnsafeExecutionDisabled,
+            1502 => ManifestRejected,
+            1503 => ObjectSecrets,
+            1504 => VisionUnsupported,
+            1505 => PathOutsideProject,
+            1601 => TraceIncomplete,
+            1701 => SnapshotFailed,
+            1702 => RollbackDrift,
+            1703 => RollbackManualActionRequired,
+            1801 => AgentProfileUnavailable,
+            1802 => AgentCapabilityMismatch,
+            1901 => MemoryDisabled,
+            1902 => MemoryConflict,
+            1903 => MemorySecretDetected,
+            1904 => MemoryInvalidState,
+            1905 => MemoryObjectMissing,
+            1906 => MemoryPurgeBlocked,
+            1907 => MemoryCaptureUnknown,
+            1908 => MemoryQuotaExceeded,
+            2001 => IdempotencyKeyRequired,
+            2002 => ReceiptFingerprintMismatch,
+            -32000 => CoreUnavailable,
+            _ => return None,
+        })
+    }
+
+    /// 重试分类（RDWS 实施计划 v1.4 §1.3）：错误在构造处按码归类，receipt 层禁按字符串分类。
+    /// Deterministic = 参数/状态/校验/策略拒绝——同请求重放必然同样失败，envelope 落 completed 可重放；
+    /// Transient = IO/内部/网络/超时——原子落 retryable_failed 释放执行语义，后续请求按 CAS 重新认领。
+    /// 未知码（未登记的内部码）按 Transient 处理：IO/内部错误是 receipt 层的默认面。
+    pub fn err_class(&self) -> ErrClass {
+        use ErrorCode::*;
+        match self {
+            InternalError | ModelUnavailable | ModelRateLimited | GitlabUnreachable
+            | CoreUnavailable | SnapshotFailed => ErrClass::Transient,
+            _ => ErrClass::Deterministic,
+        }
+    }
+}
+
+/// 错误重试类别（sg_protocol 层标注，见 `ErrorCode::err_class`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrClass {
+    Deterministic,
+    Transient,
 }
 
 /// JSON-RPC error 对象。
@@ -173,6 +253,13 @@ impl RpcError {
             retryable: kind.retryable(),
             data: Some(serde_json::json!({ "detail": safe_message.into() })),
         }
+    }
+
+    /// 按 numeric code 归类（未知码 → Transient，与 `ErrorCode::err_class` 一致）。
+    pub fn err_class(&self) -> ErrClass {
+        ErrorCode::from_code(self.code)
+            .map(|k| k.err_class())
+            .unwrap_or(ErrClass::Transient)
     }
 }
 

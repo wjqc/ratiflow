@@ -21,7 +21,9 @@ fn err_invalid(msg: impl Into<String>) -> RpcError {
 }
 
 fn store_err(e: sg_store::Error) -> RpcError {
-    RpcError::new(ErrorCode::InternalError, e.to_string().as_str())
+    // 委托 dispatch 统一分类（WP-0：校验类错误落 InvalidParams=deterministic，
+    // 不得全部落 InternalError=Transient 误开 receipt 重执行窗口）。
+    crate::dispatch::store_err(e)
 }
 
 fn str_param(params: &Value, key: &str) -> Result<String, RpcError> {
@@ -147,76 +149,102 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
             let gates = parse_gates(params)?;
             let idem = opt_str(params, "idempotencyKey");
             // 幂等回执（评审 P1）：同 key 重放返回首次响应，不追加新版本。
-            crate::dispatch::with_rpc_receipt(store, &idem, "workflowTemplate.create", || {
-                // 语义：key 不存在 → 建模板 + draft v1；已存在 → 追加下一个 draft 版本
-                // （版本只追加，active 不可原地编辑——ADR-036 决策 3）。
-                let existing = sg_workflow::template::list_templates(store)
-                    .map_err(store_err)?
-                    .into_iter()
-                    .find(|(t, _)| t.key == key);
-                match existing {
-                    None => {
-                        let t = sg_workflow::template::create_template(store, &key, &name)
+            crate::dispatch::with_rpc_receipt(
+                store,
+                &idem,
+                "workflowTemplate.create",
+                params,
+                || {
+                    // 语义：key 不存在 → 建模板 + draft v1；已存在 → 追加下一个 draft 版本
+                    // （版本只追加，active 不可原地编辑——ADR-036 决策 3）。
+                    let existing = sg_workflow::template::list_templates(store)
+                        .map_err(store_err)?
+                        .into_iter()
+                        .find(|(t, _)| t.key == key);
+                    match existing {
+                        None => {
+                            let t = sg_workflow::template::create_template(store, &key, &name)
+                                .map_err(store_err)?;
+                            let version = sg_workflow::template::create_version(
+                                store, &t.id, &gates, "local",
+                            )
                             .map_err(store_err)?;
-                        let version =
-                            sg_workflow::template::create_version(store, &t.id, &gates, "local")
-                                .map_err(store_err)?;
-                        Ok(
-                            json!({"template": serde_json::to_value(t).unwrap_or_default(),
+                            Ok(
+                                json!({"template": serde_json::to_value(t).unwrap_or_default(),
                                   "version": version_json(&version)}),
-                        )
-                    }
-                    Some((t, _)) => {
-                        let version =
-                            sg_workflow::template::create_version(store, &t.id, &gates, "local")
-                                .map_err(store_err)?;
-                        Ok(
-                            json!({"template": serde_json::to_value(t).unwrap_or_default(),
+                            )
+                        }
+                        Some((t, _)) => {
+                            let version = sg_workflow::template::create_version(
+                                store, &t.id, &gates, "local",
+                            )
+                            .map_err(store_err)?;
+                            Ok(
+                                json!({"template": serde_json::to_value(t).unwrap_or_default(),
                                   "version": version_json(&version)}),
-                        )
+                            )
+                        }
                     }
-                }
-            })
+                },
+            )
         }
         "workflowTemplate.updateDraft" => {
             let version_id = str_param(params, "versionId")?;
             let gates = parse_gates(params)?;
             let idem = opt_str(params, "idempotencyKey");
             // 幂等回执：同 key 重放返回首次响应，不重复覆盖草稿。
-            crate::dispatch::with_rpc_receipt(store, &idem, "workflowTemplate.updateDraft", || {
-                let version = sg_workflow::template::update_draft(store, &version_id, &gates)
-                    .map_err(store_err)?;
-                Ok(version_json(&version))
-            })
+            crate::dispatch::with_rpc_receipt(
+                store,
+                &idem,
+                "workflowTemplate.updateDraft",
+                params,
+                || {
+                    let version = sg_workflow::template::update_draft(store, &version_id, &gates)
+                        .map_err(store_err)?;
+                    Ok(version_json(&version))
+                },
+            )
         }
         "workflowTemplate.activate" => {
             let version_id = str_param(params, "versionId")?;
             let idem = opt_str(params, "idempotencyKey");
             // 幂等回执：同 key 重放返回首次响应，不重复换 active/发事件。
-            crate::dispatch::with_rpc_receipt(store, &idem, "workflowTemplate.activate", || {
-                let version =
-                    sg_workflow::template::activate(store, &version_id).map_err(store_err)?;
-                sg_store::outbox::emit(
-                    store,
-                    "workflow",
-                    &version.template_id,
-                    "workflow.template_activated",
-                    json!({"templateId": version.template_id, "versionId": version.id,
+            crate::dispatch::with_rpc_receipt(
+                store,
+                &idem,
+                "workflowTemplate.activate",
+                params,
+                || {
+                    let version =
+                        sg_workflow::template::activate(store, &version_id).map_err(store_err)?;
+                    sg_store::outbox::emit(
+                        store,
+                        "workflow",
+                        &version.template_id,
+                        "workflow.template_activated",
+                        json!({"templateId": version.template_id, "versionId": version.id,
                            "versionNo": version.version_no, "digest": version.content_digest}),
-                )
-                .map_err(store_err)?;
-                Ok(version_json(&version))
-            })
+                    )
+                    .map_err(store_err)?;
+                    Ok(version_json(&version))
+                },
+            )
         }
         "workflowTemplate.deprecate" => {
             let version_id = str_param(params, "versionId")?;
             let idem = opt_str(params, "idempotencyKey");
             // 幂等回执：同 key 重放返回首次响应，不重复迁移状态。
-            crate::dispatch::with_rpc_receipt(store, &idem, "workflowTemplate.deprecate", || {
-                let version =
-                    sg_workflow::template::deprecate(store, &version_id).map_err(store_err)?;
-                Ok(version_json(&version))
-            })
+            crate::dispatch::with_rpc_receipt(
+                store,
+                &idem,
+                "workflowTemplate.deprecate",
+                params,
+                || {
+                    let version =
+                        sg_workflow::template::deprecate(store, &version_id).map_err(store_err)?;
+                    Ok(version_json(&version))
+                },
+            )
         }
         "workflow.getInstance" => {
             let workitem_id = str_param(params, "workItemId")?;
@@ -246,7 +274,7 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
             let target = str_param(params, "targetVersionId")?;
             let idem = opt_str(params, "idempotencyKey");
             // 幂等回执：同 key 重放返回首次实例投影，不重复 DELETE/INSERT 投影。
-            crate::dispatch::with_rpc_receipt(store, &idem, "workflow.migrate", || {
+            crate::dispatch::with_rpc_receipt(store, &idem, "workflow.migrate", params, || {
                 let instance = sg_workflow::instance::migrate(store, &workitem_id, &target)
                     .map_err(store_err)?;
                 sg_store::outbox::emit(

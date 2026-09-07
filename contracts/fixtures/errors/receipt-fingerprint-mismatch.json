@@ -1,0 +1,9 @@
+{
+  "code": "RECEIPT_FINGERPRINT_MISMATCH",
+  "message": "同幂等键参数指纹不一致",
+  "retryable": false,
+  "details": {
+    "expectedPrefix": "9af15b3d",
+    "actualPrefix": "c05f0f1a"
+  }
+}

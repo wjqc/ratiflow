@@ -14,11 +14,17 @@ fn err(kind: ErrorCode, msg: impl Into<String>) -> RpcError {
     RpcError::new(kind, msg)
 }
 
-fn store_err(e: Error) -> RpcError {
+pub(crate) fn store_err(e: Error) -> RpcError {
     let msg = e.to_string();
     for (needle, kind) in [
         ("etag_mismatch", ErrorCode::EtagMismatch),
         ("revision_frozen", ErrorCode::RevisionFrozen),
+        // receipt 门控域的校验类错误（WP-0 错误分类补齐）：确定性失败，落 completed envelope，
+        // 不得落入 InternalError=Transient 面（否则 receipt 误开重执行窗口）。
+        ("workflow_template_invalid", ErrorCode::InvalidParams),
+        ("plan_validation_failed", ErrorCode::InvalidParams),
+        ("task_outcome_invalid", ErrorCode::InvalidParams),
+        ("workflow_version_not_active", ErrorCode::InvalidParams),
         (
             "invalid_stage_transition",
             ErrorCode::InvalidStageTransition,
@@ -154,118 +160,392 @@ pub(crate) fn trace_writes_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// 显式幂等回执（评审 P1 修复，缺陷审计 2026-09-07 二次加固）：
-/// 1) 认领式防并发重放：先 INSERT OR IGNORE 占位（response_json=''），占位失败 =
-///    已有同 key 请求——正在执行则拒绝（rpc_receipt_in_flight），已完成则原样重放，
-///    不再出现"查-执-插三段都 miss、并发重放重复执行 mutation"。
-/// 2) 错误也落回执：重放返回首次错误 envelope，不重执行（原实现只存成功响应）。
-/// 3) crash 自愈：占位行超过 IN_FLIGHT_TTL 视为执行方已死，刷新时间戳后接管重执行。
-///    （mutation 与回执写入仍非跨进程原子，接管窗口是 SQLite 单文件下的已知边界。）
-/// 4) scoping：回执按 (method, idem_key) 唯一（0041），跨方法复用 key 不再串台。
-const RPC_RECEIPT_IN_FLIGHT_TTL_SECS: i64 = 300;
+/// 显式幂等回执——lease 三态语义（RDWS 实施计划 v1.4 §1.3，0041 最终结构）：
+/// 1) 门控 mutation 缺 idempotencyKey 一律拒绝（idempotency_key_required），不退化为直接执行；
+/// 2) 指纹门：request_fingerprint = sha256(canonical params 剔除 idempotencyKey)，
+///    同 (method,idem_key) 异指纹重放在执行前被拒（rpc_receipt_fingerprint_mismatch）；
+/// 3) lease CAS：认领（新行 INSERT、retryable_failed→in_flight、in_flight 过期接管）必须
+///    条件 UPDATE 命中 1 行才获得执行权；执行权由 (owner,lease_revision,lease_state) 三元组锁定；
+/// 4) 终态：成功/deterministic 错误 → completed（revision+1，envelope 可重放）；
+///    transient 错误（IO/内部/超时，构造处按码标注 ErrClass）→ retryable_failed 原子释放
+///    执行语义，后续请求按 CAS 重新认领，不再收到 in_flight 假象；
+/// 5) TTL 只解决崩溃租约（in_flight 超时接管自愈），不替代领域幂等——本层只防网络/UI 重放。
+const RPC_RECEIPT_LEASE_TTL_SECS: i64 = 300;
 const RPC_RECEIPT_ERROR_KEY: &str = "__sg_rpc_error";
+
+/// 认领令牌：进程 id + 启动标识 + 进程内单调计数，每次认领唯一，CAS 可精确归因。
+fn receipt_owner() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STARTUP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let base =
+        STARTUP.get_or_init(|| format!("{}:{}", std::process::id(), sg_store::ids::new_id("boot")));
+    format!("{base}:{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// 指纹参数 canonical 形态：递归键排序，剔除 idempotencyKey 本身（key 不同不构成参数漂移）。
+fn receipt_fingerprint(params: &Value) -> String {
+    fn sort_json(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut sorted = serde_json::Map::new();
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for key in keys {
+                    sorted.insert(key.clone(), sort_json(&map[key]));
+                }
+                Value::Object(sorted)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sort_json).collect()),
+            other => other.clone(),
+        }
+    }
+    let mut params = params.clone();
+    if let Some(obj) = params.as_object_mut() {
+        obj.remove("idempotencyKey");
+    }
+    let canonical = serde_json::to_string(&sort_json(&params)).unwrap_or_default();
+    use sha2::Digest;
+    sg_store::ids::hex(&sha2::Sha256::digest(canonical.as_bytes()))
+}
+
+/// 已持有的执行权（写终态的 CAS 凭据）。
+struct ReceiptClaim {
+    owner: String,
+    lease_revision: i64,
+}
+
+/// 认领结果：获得执行权，或直接重放首次终态。
+enum ReceiptGate {
+    Claimed(ReceiptClaim),
+    Replay(Result<Value, RpcError>),
+}
+
+fn receipt_in_flight_err() -> RpcError {
+    RpcError::new(
+        ErrorCode::Conflict,
+        "rpc_receipt_in_flight: 同幂等键请求正在执行，请稍后重试",
+    )
+}
+
+fn replay_body(body: &str) -> Result<Value, RpcError> {
+    if let Ok(env) = serde_json::from_str::<Value>(body) {
+        if let Some(err_env) = env.get(RPC_RECEIPT_ERROR_KEY) {
+            let rpc_err: RpcError = serde_json::from_value(err_env.clone())
+                .map_err(|_| RpcError::new(ErrorCode::InternalError, "rpc_receipt_corrupt"))?;
+            return Err(rpc_err);
+        }
+    }
+    serde_json::from_str(body)
+        .map_err(|_| RpcError::new(ErrorCode::InternalError, "rpc_receipt_corrupt"))
+}
+
+/// 认领（或读出可重放终态）。行不存在 → INSERT 新行；已存在 → 校验指纹后按 lease_state 分派。
+fn receipt_claim(
+    store: &Store,
+    method: &str,
+    idem_key: &str,
+    fingerprint: &str,
+) -> Result<ReceiptGate, RpcError> {
+    let owner = receipt_owner();
+    let now = sg_store::timefmt::now();
+    let lease_until = sg_store::timefmt::now_plus_minutes(RPC_RECEIPT_LEASE_TTL_SECS / 60);
+    let inserted = store
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO rpc_receipts
+                   (method, idem_key, request_fingerprint, owner, lease_revision,
+                    lease_expires_at, lease_state, response_json, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,1,?5,'in_flight','',?6,?6)",
+                rusqlite::params![method, idem_key, fingerprint, owner, lease_until, now],
+            )
+            .map_err(sg_store::Error::from)?;
+            Ok(conn.changes() == 1)
+        })
+        .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
+    if inserted {
+        return Ok(ReceiptGate::Claimed(ReceiptClaim {
+            owner,
+            lease_revision: 1,
+        }));
+    }
+
+    let row = store
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT request_fingerprint, owner, lease_revision, lease_expires_at,
+                        lease_state, response_json
+                 FROM rpc_receipts WHERE method=?1 AND idem_key=?2",
+                [method, idem_key],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .map_err(|_| sg_store::Error::Message("rpc_receipt_missing".into()))
+        })
+        .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
+    let (row_fp, row_owner, row_revision, row_expires, row_state, row_body) = row;
+
+    // 指纹门：legacy 空指纹跳过（保持旧重放行为），非空且不一致 → 执行前拒绝。
+    if !row_fp.is_empty() && row_fp != fingerprint {
+        return Err(RpcError::new(
+            ErrorCode::ReceiptFingerprintMismatch,
+            format!(
+                "rpc_receipt_fingerprint_mismatch: 同幂等键 {method} 参数指纹不一致（期望 {}，实到 {}）",
+                &row_fp[..row_fp.len().min(8)],
+                &fingerprint[..fingerprint.len().min(8)]
+            ),
+        ));
+    }
+
+    // CAS 认领：命中 1 行才获得执行权；租约竞争 → in_flight 冲突。
+    let cas_claim = |set_state: bool, expect_state: &str| -> Result<bool, RpcError> {
+        let state_set = if set_state {
+            ", lease_state='in_flight'"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "UPDATE rpc_receipts SET owner=?3, lease_revision=lease_revision+1, \
+             lease_expires_at=?4, updated_at=?5{state_set} \
+             WHERE method=?1 AND idem_key=?2 AND owner=?6 AND lease_revision=?7 AND lease_state=?8"
+        );
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    sql.as_str(),
+                    rusqlite::params![
+                        method,
+                        idem_key,
+                        owner,
+                        lease_until,
+                        now,
+                        row_owner,
+                        row_revision,
+                        expect_state
+                    ],
+                )
+                .map_err(sg_store::Error::from)?;
+                Ok(conn.changes() == 1)
+            })
+            .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))
+    };
+
+    match row_state.as_str() {
+        "completed" => Ok(ReceiptGate::Replay(replay_body(&row_body))),
+        "retryable_failed" => match cas_claim(true, "retryable_failed")? {
+            true => Ok(ReceiptGate::Claimed(ReceiptClaim {
+                owner,
+                lease_revision: row_revision + 1,
+            })),
+            false => Err(receipt_in_flight_err()),
+        },
+        // in_flight：租约未过期 → 拒绝；过期（或无租期/损坏时间戳）→ 接管自愈。
+        _ => {
+            let expired = row_expires
+                .as_deref()
+                .map(|t| sg_store::timefmt::age_secs(t) > 0)
+                .unwrap_or(true);
+            if !expired {
+                return Err(receipt_in_flight_err());
+            }
+            match cas_claim(false, "in_flight")? {
+                true => Ok(ReceiptGate::Claimed(ReceiptClaim {
+                    owner,
+                    lease_revision: row_revision + 1,
+                })),
+                false => Err(receipt_in_flight_err()),
+            }
+        }
+    }
+}
+
+/// 终态写入（成功 / deterministic 错误 envelope）：completed + revision+1 + 清租期。
+/// CAS 锁定 (owner,revision)：租约被接管后原执行者不再有写权（0 行 = 已易主，放弃写）。
+fn receipt_complete(
+    store: &Store,
+    method: &str,
+    idem_key: &str,
+    claim: &ReceiptClaim,
+    response_body: &str,
+) -> Result<(), Error> {
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE rpc_receipts SET lease_state='completed', response_json=?4,
+                    lease_revision=lease_revision+1, lease_expires_at=NULL, updated_at=?5
+             WHERE method=?1 AND idem_key=?2 AND owner=?6 AND lease_revision=?7
+               AND lease_state='in_flight'",
+            rusqlite::params![
+                method,
+                idem_key,
+                "",
+                response_body,
+                sg_store::timefmt::now(),
+                claim.owner,
+                claim.lease_revision
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// 执行失败后的回执落库（领域结果已回滚/已失败，这里只写传输层事实）：
+/// Transient → retryable_failed（释放执行语义）；Deterministic → completed + 可重放 envelope。
+fn receipt_fail(
+    store: &Store,
+    method: &str,
+    idem_key: &str,
+    claim: &ReceiptClaim,
+    e: &RpcError,
+) -> Result<(), Error> {
+    let (state, body) = if e.err_class() == sg_protocol::ErrClass::Transient {
+        ("retryable_failed", String::new())
+    } else {
+        let env = json!({ RPC_RECEIPT_ERROR_KEY: serde_json::to_value(e).unwrap_or_default() });
+        ("completed", env.to_string())
+    };
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE rpc_receipts SET lease_state=?4, response_json=?5,
+                    lease_revision=lease_revision+1, lease_expires_at=NULL, updated_at=?6
+             WHERE method=?1 AND idem_key=?2 AND owner=?7 AND lease_revision=?8
+               AND lease_state='in_flight'",
+            rusqlite::params![
+                method,
+                idem_key,
+                "",
+                state,
+                body,
+                sg_store::timefmt::now(),
+                claim.owner,
+                claim.lease_revision
+            ],
+        )?;
+        Ok(())
+    })
+}
 
 pub(crate) fn with_rpc_receipt<F>(
     store: &Store,
     idem_key: &str,
     method: &str,
+    params: &Value,
     f: F,
 ) -> Result<Value, RpcError>
 where
     F: FnOnce() -> Result<Value, RpcError>,
 {
     if idem_key.is_empty() {
-        return f();
+        return Err(RpcError::new(
+            ErrorCode::IdempotencyKeyRequired,
+            format!("{method}: receipt 门控 mutation 必须携带 idempotencyKey"),
+        ));
     }
-    let claimed = store
-        .with_conn(|conn| {
-            conn.execute(
-                "INSERT OR IGNORE INTO rpc_receipts(idem_key, method, response_json, created_at)
-                 VALUES (?1,?2,'',?3)",
-                rusqlite::params![idem_key, method, sg_store::timefmt::now()],
-            )
-            .map_err(sg_store::Error::from)?;
-            Ok(conn.changes() == 1)
-        })
-        .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
-    if !claimed {
-        let (body, created_at): (String, String) = store
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT response_json, created_at FROM rpc_receipts
-                     WHERE idem_key=?1 AND method=?2",
-                    [idem_key, method],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .map_err(|_| sg_store::Error::Message("rpc_receipt_missing".into()))
-            })
-            .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
-        if body.is_empty() {
-            // 空占位：并发正在执行，或执行方已 crash。未超 TTL → 让客户端稍后重试；
-            // 已超 TTL → 刷新占位时间戳，落到底部接管重执行。
-            if sg_store::timefmt::age_secs(&created_at) < RPC_RECEIPT_IN_FLIGHT_TTL_SECS {
-                return Err(RpcError::new(
-                    ErrorCode::Conflict,
-                    "rpc_receipt_in_flight: 同幂等键请求正在执行，请稍后重试",
-                ));
-            }
-            store
-                .with_conn(|conn| {
-                    conn.execute(
-                        "UPDATE rpc_receipts SET created_at=?3
-                         WHERE idem_key=?1 AND method=?2 AND response_json=''",
-                        rusqlite::params![idem_key, method, sg_store::timefmt::now()],
-                    )
-                    .map_err(sg_store::Error::from)?;
-                    Ok(())
-                })
-                .map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string().as_str()))?;
-        } else {
-            // 已有首次结果：错误或成功都原样重放，不重执行 mutation。
-            if let Ok(env) = serde_json::from_str::<Value>(&body) {
-                if env.get(RPC_RECEIPT_ERROR_KEY).is_some() {
-                    let err: RpcError = serde_json::from_value(env[RPC_RECEIPT_ERROR_KEY].clone())
-                        .map_err(|_| {
-                            RpcError::new(ErrorCode::InternalError, "rpc_receipt_corrupt")
-                        })?;
-                    return Err(err);
-                }
-            }
-            return serde_json::from_str(&body)
-                .map_err(|_| RpcError::new(ErrorCode::InternalError, "rpc_receipt_corrupt"));
-        }
-    }
+    let fingerprint = receipt_fingerprint(params);
+    let claim = match receipt_claim(store, method, idem_key, &fingerprint)? {
+        ReceiptGate::Claimed(claim) => claim,
+        ReceiptGate::Replay(replay) => return replay,
+    };
     match f() {
         Ok(out) => {
-            store
-                .with_conn(|conn| {
-                    conn.execute(
-                        "UPDATE rpc_receipts SET response_json=?3
-                         WHERE idem_key=?1 AND method=?2",
-                        rusqlite::params![idem_key, method, out.to_string()],
-                    )
-                    .map_err(sg_store::Error::from)?;
-                    Ok(())
-                })
-                .map_err(|e| {
-                    RpcError::new(
-                        ErrorCode::InternalError,
-                        format!("rpc_receipt_write_failed: {e}").as_str(),
-                    )
-                })?;
+            receipt_complete(store, method, idem_key, &claim, &out.to_string()).map_err(|e| {
+                RpcError::new(
+                    ErrorCode::InternalError,
+                    format!("rpc_receipt_write_failed: {e}").as_str(),
+                )
+            })?;
             Ok(out)
         }
         Err(e) => {
-            let env =
-                json!({ RPC_RECEIPT_ERROR_KEY: serde_json::to_value(&e).unwrap_or_default() });
-            let _ = store.with_conn(|conn| {
-                conn.execute(
-                    "UPDATE rpc_receipts SET response_json=?3 WHERE idem_key=?1 AND method=?2",
-                    rusqlite::params![idem_key, method, env.to_string()],
-                )
-                .map_err(sg_store::Error::from)?;
-                Ok(())
+            let _ = receipt_fail(store, method, idem_key, &claim, &e);
+            Err(e)
+        }
+    }
+}
+
+/// 同事务回执变体（RDWS 实施计划 v1.4 §1.3 with_rpc_receipt_tx）：
+/// closure 接收领域事务连接——领域写与 receipt completed 终态同一 SQLite 事务，
+/// 任一失败整体回滚（领域状态零残留）；deterministic 错误的 envelope 在回滚后
+/// 独立小事务落库。closure 内禁止调用会 with_conn/with_tx 的领域函数（Mutex 不可重入），
+/// 只允许消费传入连接的 tx 变体；回执终态 UPDATE 命中 0 行（租约被接管）时整个事务
+/// 回滚——接管者重执行，本执行者不落任何领域写（不双执行）。
+/// 独立小事务落库（失败不掩盖原始错误，租约到期自愈）。
+/// 消费方为后续 WP 的 tx 变体改造（WP-4 导入 / WP-8 skip / WP-9 rework §1.3 清单），
+/// WP-0 批次先落地基础设施与测试向量。
+#[allow(dead_code)]
+pub(crate) fn with_rpc_receipt_tx<F>(
+    store: &Store,
+    idem_key: &str,
+    method: &str,
+    params: &Value,
+    f: F,
+) -> Result<Value, RpcError>
+where
+    F: FnOnce(&rusqlite::Connection) -> Result<Value, RpcError>,
+{
+    if idem_key.is_empty() {
+        return Err(RpcError::new(
+            ErrorCode::IdempotencyKeyRequired,
+            format!("{method}: receipt 门控 mutation 必须携带 idempotencyKey"),
+        ));
+    }
+    let fingerprint = receipt_fingerprint(params);
+    let claim = match receipt_claim(store, method, idem_key, &fingerprint)? {
+        ReceiptGate::Claimed(claim) => claim,
+        ReceiptGate::Replay(replay) => return replay,
+    };
+    let mut closure_err: Option<RpcError> = None;
+    let executed = store.with_tx_immediate(|tx| {
+        let out = match f(tx) {
+            Ok(out) => out,
+            Err(e) => {
+                closure_err = Some(e);
+                return Err(Error::Message("rpc_closure_failed".into()));
+            }
+        };
+        // 同事务写 completed 终态；0 行 = 租约已被接管 → 回滚领域写。
+        let n = tx
+            .execute(
+                "UPDATE rpc_receipts SET lease_state='completed', response_json=?4,
+                        lease_revision=lease_revision+1, lease_expires_at=NULL, updated_at=?5
+                 WHERE method=?1 AND idem_key=?2 AND owner=?6 AND lease_revision=?7
+                   AND lease_state='in_flight'",
+                rusqlite::params![
+                    method,
+                    idem_key,
+                    "",
+                    out.to_string(),
+                    sg_store::timefmt::now(),
+                    claim.owner,
+                    claim.lease_revision
+                ],
+            )
+            .map_err(Error::from)?;
+        if n != 1 {
+            return Err(Error::Message("rpc_receipt_lease_lost".into()));
+        }
+        Ok(out)
+    });
+    match executed {
+        Ok(out) => Ok(out),
+        Err(store_e) => {
+            let e = closure_err.take().unwrap_or_else(|| {
+                if store_e.to_string().contains("rpc_receipt_lease_lost") {
+                    receipt_in_flight_err()
+                } else {
+                    // 存储层失败（IO/内部面）：按 transient 语义释放租约，客户端可重试。
+                    RpcError::new(ErrorCode::InternalError, store_e.to_string().as_str())
+                }
             });
+            // 领域事务已回滚；回执事实独立小事务落库（失败不掩盖原始错误，租约到期自愈）。
+            let _ = receipt_fail(store, method, idem_key, &claim, &e);
             Err(e)
         }
     }
@@ -3991,5 +4271,286 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             Ok(json!({ "items": items }))
         }
         _ => Err(invalid(format!("unknown automation method: {method}"))),
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn setup() -> Store {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-receipt-{}-{}",
+            std::process::id(),
+            sg_store::ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Store::open(&dir, "test").unwrap()
+    }
+
+    fn receipt_row(store: &Store, method: &str, key: &str) -> (String, String, i64, String) {
+        store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT lease_state, COALESCE(response_json,''), lease_revision, COALESCE(request_fingerprint,'')
+                     FROM rpc_receipts WHERE method=?1 AND idem_key=?2",
+                    [method, key],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap())
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn missing_key_rejected_without_execution() {
+        let store = setup();
+        let executed = AtomicUsize::new(0);
+        let out = with_rpc_receipt(&store, "", "m.x", &json!({"a":1}), || {
+            executed.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"ok": true}))
+        });
+        assert!(out.is_err());
+        assert_eq!(
+            out.unwrap_err().message,
+            "idempotency_key_required",
+            "缺 key 必须 idempotency_key_required"
+        );
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            0,
+            "缺 key 不得执行 mutation"
+        );
+    }
+
+    #[test]
+    fn replay_same_fingerprint_executes_once() {
+        let store = setup();
+        let executed = AtomicUsize::new(0);
+        let run = || {
+            with_rpc_receipt(
+                &store,
+                "k1",
+                "m.x",
+                &json!({"b": 2, "idempotencyKey": "k1"}),
+                || {
+                    executed.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({"n": 1}))
+                },
+            )
+            .unwrap()
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "同 key 同参重放返回首次响应");
+        assert_eq!(executed.load(Ordering::SeqCst), 1, "重放不得重执行");
+        let (state, body, rev, _) = receipt_row(&store, "m.x", "k1");
+        assert_eq!(state, "completed");
+        assert_eq!(rev, 2, "成功后 lease_revision+1");
+        assert!(body.contains("\"n\":1"));
+    }
+
+    #[test]
+    fn fingerprint_mismatch_rejected_before_execution() {
+        let store = setup();
+        let executed = AtomicUsize::new(0);
+        let call = |params: Value| {
+            with_rpc_receipt(&store, "k1", "m.x", &params, || {
+                executed.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"n": 1}))
+            })
+        };
+        call(json!({"a": 1})).unwrap();
+        let err = call(json!({"a": 2})).unwrap_err();
+        assert_eq!(
+            err.message, "receipt_fingerprint_mismatch",
+            "同 key 异参执行前拒绝"
+        );
+        assert_eq!(executed.load(Ordering::SeqCst), 1, "指纹拒绝不得重执行");
+    }
+
+    #[test]
+    fn key_scoped_per_method() {
+        let store = setup();
+        let executed = AtomicUsize::new(0);
+        for method in ["m.a", "m.b"] {
+            with_rpc_receipt(&store, "shared", method, &json!({"v": 1}), || {
+                executed.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"m": method}))
+            })
+            .unwrap();
+        }
+        assert_eq!(executed.load(Ordering::SeqCst), 2, "同 key 跨方法不串台");
+    }
+
+    #[test]
+    fn deterministic_error_completed_and_replayable() {
+        let store = setup();
+        let executed = AtomicUsize::new(0);
+        let fail = |executed: &AtomicUsize| {
+            with_rpc_receipt(&store, "k2", "m.x", &json!({"a": 1}), || {
+                executed.fetch_add(1, Ordering::SeqCst);
+                Err(err(ErrorCode::InvalidParams, "参数非法"))
+            })
+        };
+        let e1 = fail(&executed).unwrap_err();
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
+        let (state, body, _, _) = receipt_row(&store, "m.x", "k2");
+        assert_eq!(state, "completed", "deterministic 错误落 completed");
+        assert!(body.contains("__sg_rpc_error"), "envelope 落库");
+        let e2 = fail(&executed).unwrap_err();
+        assert_eq!(e1.code, e2.code, "错误 envelope 原样重放");
+        assert_eq!(e1.message, e2.message);
+        assert_eq!(executed.load(Ordering::SeqCst), 1, "重放不重执行");
+    }
+
+    #[test]
+    fn transient_error_releases_lease_for_reclaim() {
+        let store = setup();
+        let attempts = AtomicUsize::new(0);
+        let call = || {
+            with_rpc_receipt(&store, "k3", "m.x", &json!({"a": 1}), || {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(err(ErrorCode::InternalError, "io 抖动"))
+                } else {
+                    Ok(json!({"n": 2}))
+                }
+            })
+        };
+        assert!(call().is_err(), "首次 transient 失败");
+        let (state, _, _, _) = receipt_row(&store, "m.x", "k3");
+        assert_eq!(state, "retryable_failed", "transient 错误释放执行语义");
+        let out = call().unwrap();
+        assert_eq!(out["n"], 2, "后续请求重新认领并执行");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let (state, _, _, _) = receipt_row(&store, "m.x", "k3");
+        assert_eq!(state, "completed");
+    }
+
+    #[test]
+    fn expired_lease_takeover_self_heals() {
+        let store = setup();
+        // 模拟崩溃残留：in_flight + 已过期租约 + 幽灵 owner。
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO rpc_receipts(method, idem_key, request_fingerprint, owner,
+                         lease_revision, lease_expires_at, lease_state, response_json,
+                         created_at, updated_at)
+                     VALUES ('m.x','k4','','ghost',1,'2000-01-01T00:00:00.000Z','in_flight','','2000-01-01T00:00:00.000Z','2000-01-01T00:00:00.000Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let out = with_rpc_receipt(&store, "k4", "m.x", &json!({"a": 1}), || {
+            Ok(json!({"healed": true}))
+        })
+        .expect("过期租约可接管");
+        assert_eq!(out["healed"], true);
+        let (state, _, rev, _) = receipt_row(&store, "m.x", "k4");
+        assert_eq!(state, "completed");
+        assert_eq!(rev, 3, "接管 revision+1、完成再 +1");
+    }
+
+    #[test]
+    fn concurrent_claim_grants_single_owner() {
+        let store = std::sync::Arc::new(setup());
+        let executed = std::sync::Arc::new(AtomicUsize::new(0));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let store = store.clone();
+            let executed = executed.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                with_rpc_receipt(&store, "k5", "m.x", &json!({"a": 1}), || {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    executed.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({"winner": true}))
+                })
+            }));
+        }
+        let mut ok = 0;
+        for h in handles {
+            match h.join().unwrap() {
+                Ok(v) => {
+                    assert_eq!(v["winner"], true);
+                    ok += 1;
+                }
+                Err(e) => assert_eq!(e.message, "conflict", "竞争失败方只允许 in_flight 冲突"),
+            }
+        }
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            1,
+            "并发只一 owner 获得执行权"
+        );
+        assert!(ok >= 1);
+    }
+
+    #[test]
+    fn tx_variant_commits_domain_and_receipt_atomically() {
+        let store = setup();
+        let out = with_rpc_receipt_tx(&store, "k6", "m.tx", &json!({"a": 1}), |conn| {
+            conn.execute(
+                "INSERT INTO app_meta(key, value) VALUES ('receipt_tx_probe','1')",
+                [],
+            )
+            .map_err(|e| err(ErrorCode::InternalError, e.to_string()))?;
+            Ok(json!({"committed": true}))
+        })
+        .unwrap();
+        assert_eq!(out["committed"], true);
+        let probe: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM app_meta WHERE key='receipt_tx_probe'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(probe, 1, "领域写已随事务提交");
+        let (state, _, _, _) = receipt_row(&store, "m.tx", "k6");
+        assert_eq!(state, "completed");
+    }
+
+    #[test]
+    fn tx_variant_rolls_back_domain_on_deterministic_error() {
+        let store = setup();
+        let attempts = AtomicUsize::new(0);
+        let call = || {
+            with_rpc_receipt_tx(&store, "k7", "m.tx", &json!({"a": 1}), |conn| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                conn.execute(
+                    "INSERT INTO app_meta(key, value) VALUES ('rollback_probe','1')",
+                    [],
+                )
+                .map_err(|e| err(ErrorCode::InternalError, e.to_string()))?;
+                Err(err(ErrorCode::InvalidParams, "校验失败"))
+            })
+        };
+        assert!(call().is_err());
+        let probe: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM app_meta WHERE key='rollback_probe'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(probe, 0, "closure 失败 → 领域事务回滚，状态零残留");
+        let (state, body, _, _) = receipt_row(&store, "m.tx", "k7");
+        assert_eq!(state, "completed", "deterministic envelope 回滚后独立落库");
+        assert!(body.contains("__sg_rpc_error"));
+        let e2 = call().unwrap_err();
+        assert_eq!(e2.message, "invalid_params", "envelope 重放");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "重放不重执行");
     }
 }

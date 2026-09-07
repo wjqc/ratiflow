@@ -28,7 +28,9 @@ fn invalid(msg: impl Into<String>) -> RpcError {
 }
 
 fn store_err(e: sg_store::Error) -> RpcError {
-    RpcError::new(ErrorCode::InternalError, e.to_string().as_str())
+    // 委托 dispatch 统一分类（WP-0：校验类错误落 InvalidParams=deterministic，
+    // 不得全部落 InternalError=Transient 误开 receipt 重执行窗口）。
+    crate::dispatch::store_err(e)
 }
 
 fn str_param(params: &Value, key: &str) -> Result<String, RpcError> {
@@ -254,7 +256,7 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 .unwrap_or("")
                 .to_string();
             // 幂等回执（评审 P1）：同 key 重放返回首次 revision，不重复建草稿。
-            crate::dispatch::with_rpc_receipt(store, &idem, "plan.createDraft", || {
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.createDraft", params, || {
                 let rev = plan::create_draft(
                     store,
                     &workitem_id,
@@ -278,7 +280,7 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 .unwrap_or("")
                 .to_string();
             // 幂等回执：同 key 重放返回首次响应，不重复覆盖草稿。
-            crate::dispatch::with_rpc_receipt(store, &idem, "plan.updateDraft", || {
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.updateDraft", params, || {
                 let rev = plan::update_draft(store, &revision_id, &tasks).map_err(store_err)?;
                 Ok(serde_json::to_value(&rev).unwrap_or_default())
             })
@@ -337,7 +339,7 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 .unwrap_or("")
                 .to_string();
             // 幂等回执：同 key 重放返回首次响应（start 非幂等，重执行会撞状态机）。
-            crate::dispatch::with_rpc_receipt(store, &idem, "plan.start", || {
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.start", params, || {
                 let (rev, attempts) = plan::start(store, &revision_id).map_err(store_err)?;
                 Ok(json!({
                     "revision": serde_json::to_value(&rev).unwrap_or_default(),
@@ -353,7 +355,7 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 .unwrap_or("")
                 .to_string();
             // 幂等回执：同 key 重放返回首次响应，不重复迁移/发事件。
-            crate::dispatch::with_rpc_receipt(store, &idem, "plan.cancel", || {
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.cancel", params, || {
                 let rev = plan::cancel(store, &revision_id).map_err(store_err)?;
                 Ok(serde_json::to_value(&rev).unwrap_or_default())
             })
@@ -411,7 +413,7 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 .unwrap_or("")
                 .to_string();
             // 幂等回执（评审 P1）：重放不重复生成新 revision。
-            crate::dispatch::with_rpc_receipt(store, &idem, "plan.replan", || {
+            crate::dispatch::with_rpc_receipt(store, &idem, "plan.replan", params, || {
                 let out = sg_workflow::replan::replan(store, &revision_id, &roots, &tasks, "local")
                     .map_err(store_err)?;
                 Ok(serde_json::to_value(&out).unwrap_or_default())
@@ -442,7 +444,7 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 .unwrap_or("")
                 .to_string();
             // 幂等回执：同 key 重放返回首次终态，不重复回填/发事件。
-            crate::dispatch::with_rpc_receipt(store, &idem, "planTask.transition", || {
+            crate::dispatch::with_rpc_receipt(store, &idem, "planTask.transition", params, || {
                 if !matches!(
                     outcome.as_str(),
                     "succeeded" | "failed" | "unknown" | "cancelled"
@@ -544,11 +546,17 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 .unwrap_or("")
                 .to_string();
             // 幂等回执：同 key 重放返回首次收尾结果，不重复迁移工作区状态。
-            crate::dispatch::with_rpc_receipt(store, &idem, "taskWorkspace.finalize", || {
-                let rec = sg_executor::workspace::finalize(store, &attempt_id, &outcome)
-                    .map_err(store_err)?;
-                Ok(json!({"workspace": rec}))
-            })
+            crate::dispatch::with_rpc_receipt(
+                store,
+                &idem,
+                "taskWorkspace.finalize",
+                params,
+                || {
+                    let rec = sg_executor::workspace::finalize(store, &attempt_id, &outcome)
+                        .map_err(store_err)?;
+                    Ok(json!({"workspace": rec}))
+                },
+            )
         }
         _ => Err(invalid(format!("unknown plan method: {method}"))),
     }
