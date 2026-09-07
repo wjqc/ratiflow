@@ -1157,6 +1157,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sg-integrations",
+ "sg-sandbox",
  "sg-store",
  "sg-workitem",
  "sha2",
@@ -1172,6 +1173,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sg-sandbox",
  "sha2",
  "thiserror",
  "tokio",
@@ -1245,6 +1247,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sg-sandbox"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "sg-settings"
 version = "0.1.0"
 dependencies = [
@@ -1253,6 +1266,7 @@ dependencies = [
  "serde_json",
  "sg-executor",
  "sg-integrations",
+ "sg-sandbox",
  "sg-store",
  "sha2",
  "time",

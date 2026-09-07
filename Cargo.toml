@@ -18,6 +18,7 @@ members = [
     "crates/eventlog",
     "crates/provenance",
     "crates/executor",
+    "crates/sandbox",
     "crates/integrations",
     "crates/timeline",
     "crates/sixgates-core",
@@ -63,6 +64,7 @@ sg-evidence = { path = "crates/evidence" }
 sg-eventlog = { path = "crates/eventlog" }
 sg-provenance = { path = "crates/provenance" }
 sg-executor = { path = "crates/executor" }
+sg-sandbox = { path = "crates/sandbox" }
 sg-integrations = { path = "crates/integrations" }
 sg-timeline = { path = "crates/timeline" }
 

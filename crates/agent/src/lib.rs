@@ -1163,8 +1163,9 @@ fn record_outcome(
     };
     store.with_conn(|conn| {
         conn.execute(
-            "INSERT INTO tool_execution_outcomes(id, proposal_id, outcome, reason, reconciliation, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO tool_execution_outcomes(id, proposal_id, outcome, reason, reconciliation, send_phase, created_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, COALESCE(p.send_phase,'not_sent'), ?6
+             FROM tool_proposals p WHERE p.id=?2
              ON CONFLICT(proposal_id) DO NOTHING",
             rusqlite::params![
                 ids::new_id("tout"),
@@ -1836,11 +1837,25 @@ fn reconcile_orphan_proposals(store: &Store) -> Result<usize, Error> {
             )?;
             Ok(())
         })?;
+        // WP-3：send_phase 携带进对账原因——phase≥send_intent_persisted 即
+        // 「intent 已落库、flush 是否发生不可知」窗口（非只读按 unknown 收敛）；
+        // not_sent 侧写明安全面（未送出，可新 proposal 重试）。
+        let phase: String = store
+            .with_conn(|conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT COALESCE(send_phase,'not_sent') FROM tool_proposals WHERE id=?1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_else(|_| "not_sent".into()))
+            })
+            .unwrap_or_else(|_| "not_sent".into());
         record_outcome(
             store,
             id,
             "unknown",
-            "run_interrupted_side_effect_unverified",
+            &format!("run_interrupted_side_effect_unverified(send_phase={phase})"),
         )?;
     }
     Ok(orphans.len())

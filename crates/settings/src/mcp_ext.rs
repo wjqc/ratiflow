@@ -10,7 +10,7 @@
 use serde_json::{json, Value};
 
 use crate::{store_err, SettingsError, SettingsResult};
-use sg_integrations::mcp::{canonical_schema, McpClient, McpToolDescriptor, StdioTransport};
+use sg_integrations::mcp::{canonical_schema, McpClient, McpToolDescriptor};
 use sg_store::{ids, timefmt, Store};
 
 const MAX_TOOLS_PER_SERVER: usize = 64;
@@ -35,6 +35,12 @@ pub fn server_add(
     }
     if command.trim().is_empty() {
         return Err(SettingsError::new("INVALID_PARAMS", "command 必填"));
+    }
+    if mcp_disabled() {
+        return Err(SettingsError::new(
+            "INVALID_REQUEST",
+            "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+        ));
     }
     if let Some(existing) = server_by_name(store, name)? {
         return Ok(existing);
@@ -73,11 +79,63 @@ pub fn server_add(
 }
 
 /// 探针（stdio）：本地命令每次拉起即进程级隔离；https 构建未启用 → 显式失败。
+/// WP-3（RDWS v1.4）：MCP 模式开关。sandboxed=默认（唯一安全值）；disabled=kill
+/// switch（全部 MCP RPC 拒绝）。**不提供 unsandboxed 取值**——禁用只能停止新执行。
+pub fn mcp_mode() -> &'static str {
+    match std::env::var("SIXGATES_MCP_MODE").as_deref() {
+        Ok("disabled") => "disabled",
+        _ => "sandboxed",
+    }
+}
+
+pub fn mcp_disabled() -> bool {
+    mcp_mode() == "disabled"
+}
+
+/// MCP 沙箱策略（§1.10/§2 WP-3）：禁网硬前提 + FS 只读白名单。
+/// 直启注册（无 manifest，WP-4 才有声明式 writableDirs）：读面 = 命令所在目录 +
+/// 形如绝对路径且实际存在的参数的父目录（脚本/配置）+ cwd；写面 = 空（临时目录
+/// 由 profile 模板内置）。路径全部进 policy digest。
+pub fn mcp_sandbox_policy(command: &str, args: &[String]) -> sg_sandbox::SandboxPolicy {
+    let mut read_paths = Vec::new();
+    let mut push_dir = |p: &str| {
+        let dir = std::path::Path::new(p)
+            .parent()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !dir.is_empty() && !read_paths.contains(&dir) {
+            read_paths.push(dir);
+        }
+    };
+    push_dir(command);
+    for a in args {
+        let path = std::path::Path::new(a);
+        if path.is_absolute() && path.exists() {
+            push_dir(a);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd = cwd.to_string_lossy().to_string();
+        if !cwd.is_empty() && !read_paths.contains(&cwd) {
+            read_paths.push(cwd);
+        }
+    }
+    sg_sandbox::SandboxPolicy {
+        read_paths,
+        write_paths: vec![],
+        network_off: true,
+    }
+}
+
 fn probe_server(
     command: &str,
     args: &[String],
 ) -> Result<(String, Vec<McpToolDescriptor>), String> {
-    let mut client = McpClient::new(StdioTransport::spawn(command, args)?);
+    // WP-3：探测经内核沙箱（禁网+FS 只读）；平台不支持 → fail-closed 前缀错误。
+    let policy = mcp_sandbox_policy(command, args);
+    let mut client = McpClient::new(sg_integrations::mcp::SandboxedTransport::spawn(
+        &policy, command, args,
+    )?);
     let info = client.initialize().map_err(|e| e.to_string())?;
     let tools = client.list_tools().map_err(|e| e.to_string())?;
     if tools.len() > MAX_TOOLS_PER_SERVER {

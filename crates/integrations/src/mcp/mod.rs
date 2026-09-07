@@ -11,7 +11,7 @@
 pub mod client;
 pub mod types;
 
-pub use client::{McpClient, McpTransport, ScriptedTransport, StdioTransport};
+pub use client::{McpClient, McpTransport, SandboxedTransport, ScriptedTransport, StdioTransport};
 pub use types::{
     canonical_schema, valid_tool_name, McpServerInfo, McpToolCallOutcome, McpToolDescriptor,
 };

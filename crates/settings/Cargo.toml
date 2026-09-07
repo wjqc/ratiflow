@@ -13,3 +13,4 @@ rusqlite = { workspace = true }
 sg-store = { workspace = true }
 sg-executor = { workspace = true }
 sg-integrations = { workspace = true }
+sg-sandbox = { workspace = true }

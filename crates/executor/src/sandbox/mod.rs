@@ -15,7 +15,6 @@ pub mod linux;
 pub mod macos;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// 沙箱后端（方案 §5 M3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,36 +47,7 @@ pub struct SandboxCapability {
     pub blocked_reason: String,
 }
 
-/// 沙箱策略（manifest + ToolCtx 装配）：
-/// - read：系统运行库由 profile 模板内置；输入路径 = 受管 worktree/work_dir；
-/// - write：受管 worktree、run 工件目录、必要临时目录；
-/// - network_off 按 manifest（默认 true）。
-#[derive(Debug, Clone, Default)]
-pub struct SandboxPolicy {
-    pub read_paths: Vec<String>,
-    pub write_paths: Vec<String>,
-    pub network_off: bool,
-}
-
-impl SandboxPolicy {
-    /// 规范 JSON（排序去重 + canonical 序列化）→ sha256。策略任何字节变化都会
-    /// 改变 digest，可被执行快照/审计固定与回查。
-    pub fn digest(&self) -> String {
-        let mut reads = self.read_paths.clone();
-        let mut writes = self.write_paths.clone();
-        reads.sort();
-        reads.dedup();
-        writes.sort();
-        writes.dedup();
-        let canonical = serde_json::json!({
-            "read": reads,
-            "write": writes,
-            "networkOff": self.network_off,
-        });
-        let hex = sg_store::ids::hex(&Sha256::digest(canonical.to_string().as_bytes()));
-        format!("sha256:{hex}")
-    }
-}
+pub use sg_sandbox::{spawn_sandboxed, ManagedChild, SandboxPolicy};
 
 /// 探测当前主机的内核沙箱能力（每次调用都真实执行一次探测命令，不缓存——
 /// 设置页自检与执行快照要求如实反映当下）。
@@ -127,7 +97,7 @@ pub(crate) fn backend_execute(
 pub fn policy_profile_text(backend: &SandboxBackend, policy: &SandboxPolicy) -> String {
     #[cfg(target_os = "macos")]
     if *backend == SandboxBackend::MacSeatbelt {
-        return macos::generate_profile(policy);
+        return sg_sandbox::seatbelt::generate_profile(policy);
     }
     #[cfg(target_os = "linux")]
     if *backend == SandboxBackend::LinuxLandlock {

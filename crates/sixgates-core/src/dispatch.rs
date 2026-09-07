@@ -2049,6 +2049,12 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
         // --- M6：受控 MCP ToolProvider（ADR-035）---
         "mcp.serverAdd" => {
+            if sg_settings::mcp_ext::mcp_disabled() {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+                ));
+            }
             let args_list = str_list_param(params, "args");
             sg_settings::mcp_ext::server_add(
                 store,
@@ -2058,12 +2064,20 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             )
             .map_err(serr)
         }
-        "mcp.serverApprove" => sg_settings::mcp_ext::server_approve(
-            store,
-            &str_param(params, "serverId")?,
-            &str_param(params, "decidedBy")?,
-        )
-        .map_err(serr),
+        "mcp.serverApprove" => {
+            if sg_settings::mcp_ext::mcp_disabled() {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+                ));
+            }
+            sg_settings::mcp_ext::server_approve(
+                store,
+                &str_param(params, "serverId")?,
+                &str_param(params, "decidedBy")?,
+            )
+            .map_err(serr)
+        }
         "mcp.serverList" => sg_settings::mcp_ext::server_list(store).map_err(serr),
         "mcp.serverRemove" => sg_settings::mcp_ext::server_revoke(
             store,
@@ -2073,15 +2087,29 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         )
         .map_err(serr),
         "mcp.serverRefresh" => {
+            if sg_settings::mcp_ext::mcp_disabled() {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+                ));
+            }
             sg_settings::mcp_ext::server_refresh(store, &str_param(params, "serverId")?)
                 .map_err(serr)
         }
-        "mcp.serverToggle" => sg_settings::mcp_ext::server_set_enabled(
-            store,
-            &str_param(params, "serverId")?,
-            bool_param(params, "enabled")?,
-        )
-        .map_err(serr),
+        "mcp.serverToggle" => {
+            if sg_settings::mcp_ext::mcp_disabled() {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: SIXGATES_MCP_MODE=disabled（MCP 已禁用）",
+                ));
+            }
+            sg_settings::mcp_ext::server_set_enabled(
+                store,
+                &str_param(params, "serverId")?,
+                bool_param(params, "enabled")?,
+            )
+            .map_err(serr)
+        }
         "mcp.toolsList" => mcp_tools_list(store, opt_str_param(params, "serverId").as_deref()),
 
         // M4：模型缓存与压缩观测（不含任何 reasoning 正文）。

@@ -14,3 +14,4 @@ futures-util = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 libc = "0.2"
+sg-sandbox = { workspace = true }

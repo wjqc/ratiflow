@@ -161,12 +161,29 @@ impl<T: McpTransport> McpClient<T> {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, McpError> {
+        self.request_phased(method, params, timeout, &|_| Ok(()), &|_| Ok(()))
+    }
+
+    /// WP-3（RDWS v1.4 §2）：带调用相位回调的请求——on_intent 在写入 stdin **前**
+    /// （此时落库即「intent 已持久化、flush 是否发生不可知」窗口的权威起点），
+    /// on_flushed 在 flush 成功后（副作用可能已发生的事实起点）。回调 Err = 中止调用
+    /// （transport 错误语义）。McpClient 不决定重试，相位终态由编排器定。
+    fn request_phased(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        on_intent: &dyn Fn(&str) -> Result<(), String>,
+        on_flushed: &dyn Fn(&str) -> Result<(), String>,
+    ) -> Result<Value, McpError> {
         let id = self.next_id;
         self.next_id += 1;
         let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
+        on_intent(method).map_err(McpError::Transport)?;
         self.transport
             .send_line(&line)
             .map_err(McpError::Transport)?;
+        on_flushed(method).map_err(McpError::Transport)?;
         loop {
             let raw = self.transport.recv_line(timeout).map_err(|e| {
                 if e == "timeout" {
@@ -246,10 +263,24 @@ impl<T: McpTransport> McpClient<T> {
         arguments: Value,
         timeout: Duration,
     ) -> Result<McpToolCallOutcome, McpError> {
-        let result = match self.request(
+        self.call_tool_phased(name, arguments, timeout, &|_| Ok(()), &|_| Ok(()))
+    }
+
+    /// WP-3：带 send_phase 回调的工具调用（相位语义见 request_phased）。
+    pub fn call_tool_phased(
+        &mut self,
+        name: &str,
+        arguments: Value,
+        timeout: Duration,
+        on_intent: &dyn Fn(&str) -> Result<(), String>,
+        on_flushed: &dyn Fn(&str) -> Result<(), String>,
+    ) -> Result<McpToolCallOutcome, McpError> {
+        let result = match self.request_phased(
             "tools/call",
             json!({"name": name, "arguments": arguments}),
             timeout,
+            on_intent,
+            on_flushed,
         ) {
             Ok(r) => r,
             Err(McpError::Timeout(_e)) => return Ok(McpToolCallOutcome::Timeout),
@@ -274,6 +305,116 @@ impl<T: McpTransport> McpClient<T> {
 
     pub fn shutdown(&mut self) {
         self.transport.shutdown();
+    }
+}
+
+/// WP-3（RDWS v1.4）流控上限：单帧 ≤4MiB、单次会话累计 ≤32MiB（超限 = transport
+/// 事件，由调用方按 send_phase + effect class 定终态，不得先行写死 failed）。
+pub const MCP_MAX_FRAME_BYTES: usize = 4 << 20;
+pub const MCP_MAX_SESSION_BYTES: usize = 32 << 20;
+
+/// 受管沙箱传输：MCP server 进程经 sg_sandbox::spawn_sandboxed 拉起（禁网 + FS
+/// 限制 + 进程组回收 + stderr 64KiB 环形）。平台不支持时返回
+/// mcp_platform_unsupported / mcp_sandbox_unavailable 前缀错误（调用方 fail-closed，
+/// 不得回退直启）。EOF 不再伪装 timeout：未主动 shutdown 的对端关闭是 transport 事件。
+pub struct SandboxedTransport {
+    managed: sg_sandbox::ManagedChild,
+    session_bytes: usize,
+}
+
+impl SandboxedTransport {
+    pub fn spawn(
+        policy: &sg_sandbox::SandboxPolicy,
+        command: &str,
+        args: &[String],
+    ) -> Result<Self, String> {
+        let argv = std::iter::once(command.to_string())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>();
+        let managed = sg_sandbox::spawn_sandboxed(policy, &argv)
+            .map_err(|e| format!("mcp_sandbox_unavailable: {e}"))?;
+        Ok(Self {
+            managed,
+            session_bytes: 0,
+        })
+    }
+
+    /// policy snapshot digest（审计 sandboxed:true + digest 证据）。
+    pub fn policy_digest(&self) -> String {
+        self.managed.policy_digest().to_string()
+    }
+
+    /// stderr 快照（环形最近内容 + 是否超限丢弃，进 provider_evidence）。
+    pub fn stderr_snapshot(&self) -> (String, bool) {
+        self.managed.stderr_snapshot()
+    }
+}
+
+impl McpTransport for SandboxedTransport {
+    fn send_line(&mut self, line: &str) -> Result<(), String> {
+        if line.len() > MCP_MAX_FRAME_BYTES {
+            return Err(format!(
+                "mcp_frame_too_long: 请求帧 {}B 超单帧上限 {MCP_MAX_FRAME_BYTES}B",
+                line.len()
+            ));
+        }
+        self.managed
+            .stdin()
+            .write_all(line.as_bytes())
+            .and_then(|_| self.managed.stdin().write_all(b"\n"))
+            .and_then(|_| self.managed.stdin().flush())
+            .map_err(|e| format!("mcp_transport_write: {e}"))
+    }
+
+    fn recv_line(&mut self, timeout: Duration) -> Result<String, String> {
+        // 同步读无超时：看门狗超时 kill 子进程（单 pid 即触发读端 EOF）打断阻塞；
+        // 成功读到行先 disarm 再 join。整组回收由 shutdown 的 kill_group 承担。
+        let pid = self.managed.pid();
+        let disarmed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = disarmed.clone();
+        let watchdog = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + timeout;
+            while std::time::Instant::now() < deadline {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            }
+        });
+        let mut line = String::new();
+        let r = self.managed.stdout().read_line(&mut line);
+        disarmed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watchdog.join();
+        match r {
+            Ok(0) => Err("mcp_transport_eof: 对端关闭（未主动 shutdown）".into()),
+            Err(e) => Err(format!("mcp_transport_read: {e}")),
+            Ok(_) => {
+                if line.len() > MCP_MAX_FRAME_BYTES {
+                    return Err(format!(
+                        "mcp_frame_too_long: 响应帧 {}B 超单帧上限 {MCP_MAX_FRAME_BYTES}B",
+                        line.len()
+                    ));
+                }
+                self.session_bytes += line.len();
+                if self.session_bytes > MCP_MAX_SESSION_BYTES {
+                    return Err(format!(
+                        "mcp_session_budget: 累计 {}B 超会话上限 {MCP_MAX_SESSION_BYTES}B",
+                        self.session_bytes
+                    ));
+                }
+                Ok(line)
+            }
+        }
+    }
+
+    fn shutdown(&mut self) {
+        // EOF 只在主动 shutdown 后是正常结束：整组 SIGTERM→5s→SIGKILL 回收。
+        self.managed.kill_group(Duration::from_secs(5));
     }
 }
 
