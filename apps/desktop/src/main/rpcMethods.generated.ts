@@ -140,6 +140,7 @@ export const RPC_METHODS: readonly string[] = [
   'gate.getRelease',
   'gate.requestManualConfirmation',
   'gate.manualConfirmations',
+  'gate.requestSkip',
   'stage.attempts',
   'stage.package',
   'snapshot.get',

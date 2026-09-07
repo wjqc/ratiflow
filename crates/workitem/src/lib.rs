@@ -83,6 +83,10 @@ pub enum StageState {
     Blocked,
     AwaitingApproval,
     Passed,
+    /// WP-8：关不执行的新终态（仅 (NotStarted, Skipped)；经 gate_skip 审批落态，
+    /// 指针推进条件与 Passed 同——但护照 outcome 记 skipped_with_waiver 且
+    /// passed:false，旧消费者保守视为未全通过）。
+    Skipped,
     Failed,
     Cancelled,
     Stale,
@@ -96,6 +100,7 @@ impl StageState {
             StageState::Blocked => "blocked",
             StageState::AwaitingApproval => "awaiting_approval",
             StageState::Passed => "passed",
+            StageState::Skipped => "skipped",
             StageState::Failed => "failed",
             StageState::Cancelled => "cancelled",
             StageState::Stale => "stale",
@@ -109,6 +114,7 @@ impl StageState {
             "blocked" => StageState::Blocked,
             "awaiting_approval" => StageState::AwaitingApproval,
             "passed" => StageState::Passed,
+            "skipped" => StageState::Skipped,
             "failed" => StageState::Failed,
             "cancelled" => StageState::Cancelled,
             "stale" => StageState::Stale,
@@ -116,13 +122,14 @@ impl StageState {
         })
     }
 
-    /// 合法迁移表（与 v2 Go transitions 等价）。
+    /// 合法迁移表（与 v2 Go transitions 等价；WP-8 增 (NotStarted, Skipped)）。
     pub fn can_transition(from: StageState, to: StageState) -> bool {
         use StageState::*;
         matches!(
             (from, to),
             (NotStarted, Running)
                 | (NotStarted, Cancelled)
+                | (NotStarted, Skipped)
                 | (Running, Blocked)
                 | (Running, AwaitingApproval)
                 | (Running, Passed)
@@ -475,7 +482,8 @@ pub fn set_stage(
             "UPDATE workitem_stages SET state=?1, input_baseline_sha=?2, updated_at=?3 WHERE workitem_id=?4 AND gate=?5",
             rusqlite::params![to.as_str(), baseline_sha, now, workitem_id, gate_id],
         )?;
-        if to == StageState::Passed {
+        // WP-8：指针推进条件 Passed | Skipped（skip 关同样进入下一关）。
+        if to == StageState::Passed || to == StageState::Skipped {
             if let Some(next) = &next {
                 conn.execute(
                     "UPDATE workitems SET current_gate=?1, updated_at=?2 WHERE id=?3",

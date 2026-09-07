@@ -73,6 +73,9 @@ pub fn can_transition(from: &str, to: &str) -> bool {
     matches!(
         (from, to),
         ("preparing", "prepared")
+            // WP-8：跳关批准后取消其未开工 attempt（单活跃约束不阻塞后续关）。
+            | ("preparing", "cancelled")
+            | ("prepared", "cancelled")
             | ("prepared", "running")
             | ("running", "review_ready")
             | ("review_ready", "awaiting_user_approval")

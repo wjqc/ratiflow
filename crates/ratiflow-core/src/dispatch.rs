@@ -96,6 +96,56 @@ pub(crate) fn release_policy_version(store: &Store) -> String {
     sg_policy::action_digest(&serde_json::to_value(&snapshot).unwrap_or_default())
 }
 
+/// WP-8：某关最近一次已批准的 gate_skip 豁免审批 id（护照 outcome 归因用）。
+fn gate_skip_waiver_approval_id(
+    store: &Store,
+    workitem_id: &str,
+    gate: &str,
+) -> Result<Option<String>, Error> {
+    store.with_conn(|conn| {
+        match conn.query_row(
+            "SELECT a.id FROM approvals a
+             WHERE a.subject_type='gate_skip' AND a.workitem_id=?1 AND a.status='approved'
+               AND a.stage_attempt_id IN
+                 (SELECT id FROM stage_attempts WHERE workitem_id=?1 AND gate=?2)
+             ORDER BY a.decided_at DESC, a.rowid DESC LIMIT 1",
+            rusqlite::params![workitem_id, gate],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(other) => Err(other.into()),
+        }
+    })
+}
+
+/// WP-8：按 action_digest 查既有 gate_skip 审批（幂等重放）。
+fn gate_skip_existing_approval(
+    store: &Store,
+    digest: &str,
+) -> Result<Option<serde_json::Value>, Error> {
+    store.with_conn(|conn| {
+        match conn.query_row(
+            "SELECT id, status, reason, created_at FROM approvals
+             WHERE subject_type='gate_skip' AND action_digest=?1",
+            [digest],
+            |r| {
+                Ok(serde_json::json!({
+                    "approvalId": r.get::<_, String>(0)?,
+                    "state": r.get::<_, String>(1)?,
+                    "reason": r.get::<_, String>(2)?,
+                    "createdAt": r.get::<_, String>(3)?,
+                    "idempotentReplay": true,
+                }))
+            },
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(other) => Err(other.into()),
+        }
+    })
+}
+
 /// gate.decideRelease 的 RPC 体（评审 P1 修复抽出共享）：
 /// approval.decide 对 gate_release 主体必须路由到这里——digest 漂移复检（AC-SW-03）
 /// 只存在于 decide_release 治理链，通用 sg_policy::decide 会旁路它。
@@ -2321,6 +2371,134 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             .map_err(store_err)?;
             Ok(json!({ "items": items }))
         }
+        // --- WP-8：gate.requestSkip——人工经审批跳关（flag=RATIFLOW_GATE_SKIP，
+        //     默认 0；=0 禁止新建，存量 skipped 关照实返回 outcome 不退化）---
+        "gate.requestSkip" => {
+            if std::env::var("RATIFLOW_GATE_SKIP").ok().as_deref() != Some("1") {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_GATE_SKIP 未开启",
+                ));
+            }
+            let workitem_id = str_param(params, "workItemId")?;
+            let gate_name = str_param(params, "gateId")?;
+            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
+                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
+            }
+            // 策略（实例冻结版本）：无声明或 forbidden → 拒；部署/迁移类恒 forbidden
+            //（创建面已拒，此处复核 = 纵深防御）。
+            let instance = sg_workflow::instance::for_workitem(store, &workitem_id)
+                .map_err(store_err)?
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "workflow instance missing"))?;
+            let defs =
+                sg_workflow::template::definitions_via_store(store, &instance.template_version_id)
+                    .map_err(store_err)?;
+            let def = defs
+                .iter()
+                .find(|d| d.gate_id == gate_name)
+                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
+            let manual_allowed = def
+                .skip_policy
+                .as_ref()
+                .map(|p| p.mode == sg_workflow::template::SkipMode::ManualApproval)
+                .unwrap_or(false);
+            let deployment_class = def
+                .deliverables
+                .iter()
+                .any(|k| sg_workflow::template::is_deployment_class_kind(k));
+            if !manual_allowed || deployment_class {
+                return Err(err(
+                    ErrorCode::ActionDenied,
+                    format!(
+                        "gate_skip_forbidden: 关 {gate_name} 的 skip 策略为 forbidden{}",
+                        if deployment_class {
+                            "（部署/迁移类恒 forbidden）"
+                        } else {
+                            ""
+                        }
+                    ),
+                ));
+            }
+            // 替代证据必填且须在案（本工作项证据面）。
+            let substitute_ids: Vec<String> = params
+                .get("substituteEvidenceIds")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if substitute_ids.is_empty() {
+                return Err(err(
+                    ErrorCode::InvalidParams,
+                    "substitute_evidence_missing: 替代证据必填",
+                ));
+            }
+            let known = sg_evidence::list(store, &workitem_id, None).map_err(store_err)?;
+            for id in &substitute_ids {
+                if !known.iter().any(|e| &e.id == id) {
+                    return Err(err(
+                        ErrorCode::InvalidParams,
+                        format!("substitute_evidence_missing: 证据 {id} 不存在"),
+                    ));
+                }
+            }
+            let waiver = opt_str_param(params, "waiver").unwrap_or_default();
+            // digest = sha256(gate_skip|workitem|gate|waiver|排序后替代证据 ids)；UNIQUE 幂等。
+            let mut sorted_ids = substitute_ids.clone();
+            sorted_ids.sort();
+            let action_digest = format!("sha256:{}", {
+                use sha2::Digest;
+                sg_store::ids::hex(&sha2::Sha256::digest(
+                    format!(
+                        "gate_skip|{workitem_id}|{gate_name}|{waiver}|{}",
+                        sorted_ids.join(",")
+                    )
+                    .as_bytes(),
+                ))
+            });
+            // 幂等重放优先：同 digest 已有 gate_skip 审批 → 原样返回
+            //（不受当前阶段状态影响——已批跳关的重放返回已批审批而非误报状态冲突）。
+            if let Some(existing) =
+                gate_skip_existing_approval(store, &action_digest).map_err(store_err)?
+            {
+                return Ok(existing);
+            }
+            // 阶段须未开工（仅 (NotStarted, Skipped) 迁移；已开工 → 状态已变）。
+            let stage_state = sg_workitem::stages(store, &workitem_id)
+                .map_err(store_err)?
+                .into_iter()
+                .find(|s| s.gate == gate_name)
+                .map(|s| s.state)
+                .unwrap_or_default();
+            if stage_state != "not_started" {
+                return Err(err(
+                    ErrorCode::Conflict,
+                    format!("gate_skip_state_changed: 关 {gate_name} 当前为 {stage_state}，仅未开工关可跳过"),
+                ));
+            }
+            let attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, &gate_name)
+                .map_err(store_err)?;
+            let approval = sg_policy::request_approval(
+                store,
+                "gate_skip",
+                &attempt.id,
+                &action_digest,
+                sg_policy::Risk::High,
+                &waiver,
+                0,
+                Some(&workitem_id),
+                Some(&attempt.id),
+            )
+            .map_err(store_err)?;
+            Ok(json!({
+                "approvalId": approval.id,
+                "actionDigest": action_digest,
+                "state": "requested",
+                "risk": approval.risk,
+            }))
+        }
         "stage.attempts" => {
             let workitem_id = str_param(params, "workItemId")?;
             let attempts = sg_workitem::attempt::list(store, &workitem_id).map_err(store_err)?;
@@ -2739,6 +2917,103 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     .map_err(store_err)?;
                     return Ok(out);
                 }
+                // WP-8：gate_skip——批准 → 阶段落 skipped 终态（指针随 Passed|Skipped
+                // 推进）；拒绝 → 仅审批落态。批准时阶段已开工 → gate_skip_state_changed。
+                "gate_skip" => {
+                    if !matches!(decision.as_str(), "approved" | "rejected") {
+                        return Err(err(
+                            ErrorCode::InvalidParams,
+                            "decision must be approved|rejected for gate_skip",
+                        ));
+                    }
+                    let workitem_id = subject.workitem_id.clone().ok_or_else(|| {
+                        err(
+                            ErrorCode::InternalError,
+                            "gate_skip approval missing workitem",
+                        )
+                    })?;
+                    let attempt_id = subject.stage_attempt_id.clone().ok_or_else(|| {
+                        err(
+                            ErrorCode::InternalError,
+                            "gate_skip approval missing attempt",
+                        )
+                    })?;
+                    let gate_name: String = store
+                        .with_conn(|conn| {
+                            conn.query_row(
+                                "SELECT gate FROM stage_attempts WHERE id=?1",
+                                [&attempt_id],
+                                |r| r.get(0),
+                            )
+                            .map_err(Error::from)
+                        })
+                        .map_err(store_err)?;
+                    if decision == "approved" {
+                        // 仅当前关可跳（跳关语义 = 跳过眼前这关；未来关须依次到达）。
+                        let wi = sg_workitem::get(store, &workitem_id).map_err(store_err)?;
+                        if wi.current_gate != gate_name {
+                            return Err(err(
+                                ErrorCode::Conflict,
+                                format!(
+                                    "gate_skip_state_changed: 关 {gate_name} 非当前关（当前 {}）",
+                                    wi.current_gate
+                                ),
+                            ));
+                        }
+                        let stage_state = sg_workitem::stages(store, &workitem_id)
+                            .map_err(store_err)?
+                            .into_iter()
+                            .find(|s| s.gate == gate_name)
+                            .map(|s| s.state)
+                            .unwrap_or_default();
+                        if stage_state != "not_started" {
+                            return Err(err(
+                                ErrorCode::Conflict,
+                                format!("gate_skip_state_changed: 关 {gate_name} 当前为 {stage_state}，仅未开工关可跳过"),
+                            ));
+                        }
+                        let appr =
+                            sg_policy::decide(store, &approval_id, &decision, &decided_by, &reason)
+                                .map_err(store_err)?;
+                        sg_workitem::set_stage(
+                            store,
+                            &workitem_id,
+                            &gate_name,
+                            sg_workitem::StageState::Skipped,
+                            "",
+                        )
+                        .map_err(store_err)?;
+                        // 同步取消跳关关的未开工 attempt（单活跃约束：不阻塞后续关）。
+                        sg_workitem::attempt::transition(store, &attempt_id, "cancelled")
+                            .map_err(store_err)?;
+                        sg_store::audit::append(
+                            store,
+                            &decided_by,
+                            &format!("approval.{decision}"),
+                            "approval",
+                            &approval_id,
+                            json!({"subjectId": subject.subject_id, "gate": gate_name, "outcome": "skipped_with_waiver"}),
+                        )
+                        .map_err(store_err)?;
+                        return Ok(json!({
+                            "approval": appr,
+                            "skip": {"gate": gate_name, "outcome": "skipped_with_waiver"}
+                        }));
+                    }
+                    let appr =
+                        sg_policy::decide(store, &approval_id, &decision, &decided_by, &reason)
+                            .map_err(store_err)?;
+                    sg_store::audit::append(
+                        store,
+                        &decided_by,
+                        &format!("approval.{decision}"),
+                        "approval",
+                        &approval_id,
+                        json!({"subjectId": subject.subject_id, "gate": gate_name}),
+                    )
+                    .map_err(store_err)?;
+                    return Ok(json!({ "approval": appr }));
+                }
                 // WP-7：manual_confirm 确认单落态（单向 requested → confirmed/rejected；
                 // evaluator 只读 confirmed 行 + acceptance_item_digest 精确匹配）。
                 "gate_manual_confirm" => {
@@ -2909,9 +3184,29 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         "passport.issue" => {
             let workitem_id = str_param(params, "workItemId")?;
             let mut gates = Vec::new();
-            let mut ok = true;
-            // M1-04：护照按实例关卡序列签发（默认模板=六关，行为不变）。
+            // M1-04：护照按实例关卡序列签发。完成谓词（WP-8）：每关
+            // outcome ∈ {passed, skipped_with_waiver}；skipped 关照实输出
+            // passed:false（旧消费者保守视为未全通过 = fail-closed 方向）。
             for gref in sg_workitem::gate_refs(store, &workitem_id).map_err(store_err)? {
+                let stage_state = sg_workitem::stages(store, &workitem_id)
+                    .map_err(store_err)?
+                    .into_iter()
+                    .find(|s| s.gate == gref.gate_id)
+                    .map(|s| s.state)
+                    .unwrap_or_else(|| "not_started".into());
+                if stage_state == "skipped" {
+                    let waiver = gate_skip_waiver_approval_id(store, &workitem_id, &gref.gate_id)
+                        .map_err(store_err)?;
+                    gates.push(sg_evidence::GateSummary {
+                        gate: gref.gate_id.clone(),
+                        passed: false,
+                        evidence_ids: vec![],
+                        failed_inputs: vec![],
+                        outcome: "skipped_with_waiver".into(),
+                        waiver_approval_id: waiver.unwrap_or_default(),
+                    });
+                    continue;
+                }
                 match sg_workitem::gate::latest(store, &workitem_id, &gref.gate_id)
                     .map_err(store_err)?
                 {
@@ -2923,19 +3218,17 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                             passed: true,
                             evidence_ids: evidences.iter().map(|e| e.id.clone()).collect(),
                             failed_inputs: vec![],
+                            outcome: "passed".into(),
+                            waiver_approval_id: String::new(),
                         });
                     }
                     _ => {
-                        ok = false;
-                        break;
+                        return Err(err(
+                            ErrorCode::Conflict,
+                            "passport_incomplete_gates: 实例关卡尚未全部通过",
+                        ));
                     }
                 }
-            }
-            if !ok {
-                return Err(err(
-                    ErrorCode::Conflict,
-                    "passport_incomplete_gates: 实例关卡尚未全部通过",
-                ));
             }
             let passport = sg_evidence::issue_passport(
                 store,

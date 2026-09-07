@@ -56,6 +56,51 @@ pub struct VersionRecord {
     pub updated_at: String,
 }
 
+/// skip 策略（WP-8）：`forbidden`（默认）= 不可跳过；`manual_approval` = 仅人工
+/// 经审批跳过（subject_type=gate_skip，替代证据必填）。schema 严格（未知字段
+/// 创建即拒），不存在任何自动跳过形态。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkipPolicy {
+    pub mode: SkipMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipMode {
+    Forbidden,
+    ManualApproval,
+}
+
+/// fast-track 缩减项（WP-8）：仅可缩减关卡层活动/交付物/关卡层人工复核。
+/// schema 严格（deny_unknown_fields）——不存在豁免 Tool 风险审批与 Policy
+/// 强制审批的声明面，越界声明在模板创建即被拒（评审修正项）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FastTrackPolicy {
+    #[serde(default)]
+    pub skippable_activities: Vec<String>,
+    #[serde(default)]
+    pub waived_deliverables: Vec<WaivedDeliverable>,
+    #[serde(default)]
+    pub reduced_approval: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaivedDeliverable {
+    pub kind: String,
+    /// 替代证据 kind（替代证据必填，fast-track 应用时校验在案）。
+    pub substitute_evidence_kind: String,
+}
+
+/// 部署/迁移类交付物 kind：含此类 deliverable 的关恒 forbidden，不可放宽
+/// （skip_policy 声明 manual_approval 在创建即拒）。
+pub fn is_deployment_class_kind(kind: &str) -> bool {
+    let k = kind.trim().to_ascii_lowercase();
+    k.starts_with("deployment") || k.starts_with("migration")
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GateDefinition {
     pub id: String,
@@ -74,6 +119,12 @@ pub struct GateDefinition {
     pub team_policy_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_policy_ref: Option<String>,
+    /// skip 策略（WP-8；None = '{}' = forbidden 缺省）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_policy: Option<SkipPolicy>,
+    /// fast-track 缩减策略（WP-8；None = '{}' = 全禁缺省）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fast_track_policy: Option<FastTrackPolicy>,
 }
 
 /// 版本内容的输入形状（ordinal 由数组位置隐含：1..n 连续）。
@@ -81,6 +132,7 @@ pub struct GateDefinition {
 /// 验收策略与 Context/Team/Workspace 策略引用，随版本冻结、参与 digest。
 /// acceptance 元素为原始 JSON（字符串或 {verifier,...} 对象），创建/激活时经
 /// acceptance::parse_elements 校验（WP-7：未知 verifier/缺参数/越界即拒）。
+/// skip/fast-track 策略为 WP-8 增量：schema 严格、参与 digest v4。
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct GateDefInput {
     pub gate_id: String,
@@ -97,6 +149,10 @@ pub struct GateDefInput {
     pub team_policy_ref: Option<String>,
     #[serde(default)]
     pub workspace_policy_ref: Option<String>,
+    #[serde(default)]
+    pub skip_policy: Option<SkipPolicy>,
+    #[serde(default)]
+    pub fast_track_policy: Option<FastTrackPolicy>,
 }
 
 fn ref_str(r: &Option<String>) -> &str {
@@ -118,18 +174,26 @@ fn acceptance_v3_slot(vals: &[serde_json::Value]) -> String {
         .join(",")
 }
 
+/// 策略槽（digest v4）：None → `-`；Some → canonical JSON（serde 确定性字段序）。
+fn policy_slot<T: serde::Serialize>(policy: &Option<T>) -> String {
+    match policy {
+        None => "-".into(),
+        Some(p) => serde_json::to_string(p).unwrap_or_else(|_| "invalid".into()),
+    }
+}
+
 /// 版本内容 digest：
-/// sha256("v3|" + join("ordinal|gate_id|title|purpose|deliverables_csv|acceptance_v3|ctx_ref|team_ref|ws_ref", "\n"))。
-/// v3（WP-7）：acceptance 槽从原始字符串拼接升级为逐元素 canonical 形态，
-/// 结构化契约进 digest；v1/v2 存量激活版本不重算，仅新版本生效（v1→v2 先例）。
-/// WP-8 的 skip/fast_track 列升 v4，版本标签永不复用为两套 canonical schema。
+/// sha256("v4|" + join("ordinal|gate_id|title|purpose|deliverables_csv|acceptance_v3|ctx_ref|team_ref|ws_ref|skip_policy|fast_track_policy", "\n"))。
+/// v3（WP-7）：acceptance 槽升级为逐元素 canonical 形态。
+/// v4（WP-8）：追加 skip_policy/fast_track_policy 两槽（canonical JSON / `-`）；
+/// v1/v2/v3 存量激活版本不重算，仅新版本生效。版本标签永不复用为两套 canonical schema。
 pub fn content_digest(defs: &[GateDefInput]) -> String {
     let lines: Vec<String> = defs
         .iter()
         .enumerate()
         .map(|(i, d)| {
             format!(
-                "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                 i + 1,
                 d.gate_id,
                 d.title,
@@ -139,11 +203,13 @@ pub fn content_digest(defs: &[GateDefInput]) -> String {
                 ref_str(&d.context_policy_ref),
                 ref_str(&d.team_policy_ref),
                 ref_str(&d.workspace_policy_ref),
+                policy_slot(&d.skip_policy),
+                policy_slot(&d.fast_track_policy),
             )
         })
         .collect();
     let mut hasher = Sha256::new();
-    hasher.update(format!("v3|{}", lines.join("\n")).as_bytes());
+    hasher.update(format!("v4|{}", lines.join("\n")).as_bytes());
     sg_store::ids::hex(&hasher.finalize())
 }
 
@@ -184,6 +250,39 @@ fn validate_defs(defs: &[GateDefInput]) -> Result<(), Error> {
         //  kill switch 关闭遇结构化项 → feature_disabled）。
         crate::acceptance::parse_elements(&d.acceptance)
             .map_err(|e| Error::Message(format!("{}（gate: {}）", e, d.gate_id)))?;
+        // WP-8：skip/fast-track 策略校验。部署/迁移类交付物的关恒 forbidden，
+        // manual_approval 声明创建即拒；fast-track 缩减项引用不得为空。
+        if let Some(skip) = &d.skip_policy {
+            if skip.mode == SkipMode::ManualApproval
+                && d.deliverables.iter().any(|k| is_deployment_class_kind(k))
+            {
+                return Err(Error::Message(format!(
+                    "workflow_template_invalid: 含部署/迁移类交付物的关恒 forbidden，不可声明 manual_approval（gate: {}）",
+                    d.gate_id
+                )));
+            }
+        }
+        if let Some(ft) = &d.fast_track_policy {
+            if ft
+                .waived_deliverables
+                .iter()
+                .any(|w| w.kind.trim().is_empty() || w.substitute_evidence_kind.trim().is_empty())
+            {
+                return Err(Error::Message(format!(
+                    "workflow_template_invalid: waived_deliverables 的 kind 与替代证据 kind 必填（gate: {}）",
+                    d.gate_id
+                )));
+            }
+            if ft.reduced_approval
+                && ft.skippable_activities.is_empty()
+                && ft.waived_deliverables.is_empty()
+            {
+                return Err(Error::Message(format!(
+                    "workflow_template_invalid: reduced_approval 须伴随至少一项活动/交付物缩减（gate: {}）",
+                    d.gate_id
+                )));
+            }
+        }
         let _ = i; // ordinal 连续由数组位置隐含
     }
     Ok(())
@@ -290,11 +389,17 @@ fn insert_defs(
     version_id: &str,
     defs: &[GateDefInput],
 ) -> Result<(), Error> {
+    // 策略列约定：None 落 '{}'（= 禁/缺省）；读向 parse 回 None。
+    fn policy_json<T: serde::Serialize>(p: &Option<T>) -> String {
+        p.as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".into()))
+            .unwrap_or_else(|| "{}".into())
+    }
     let now = timefmt::now();
     for (i, d) in defs.iter().enumerate() {
         conn.execute(
-            "INSERT INTO workflow_gate_definitions(id, version_id, gate_id, ordinal, title, purpose, deliverables_json, acceptance_json, context_policy_ref, team_policy_ref, workspace_policy_ref, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "INSERT INTO workflow_gate_definitions(id, version_id, gate_id, ordinal, title, purpose, deliverables_json, acceptance_json, context_policy_ref, team_policy_ref, workspace_policy_ref, skip_policy_json, fast_track_policy_json, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             rusqlite::params![
                 ids::new_id("wgd"),
                 version_id,
@@ -307,11 +412,22 @@ fn insert_defs(
                 d.context_policy_ref,
                 d.team_policy_ref,
                 d.workspace_policy_ref,
+                policy_json(&d.skip_policy),
+                policy_json(&d.fast_track_policy),
                 now
             ],
         )?;
     }
     Ok(())
+}
+
+/// 策略列读向：'{}'/null/垃圾 → None（fail-closed：落回禁用缺省，不放大权限）。
+fn parse_policy_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if v.is_null() || v.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+        return None;
+    }
+    serde_json::from_value(v).ok()
 }
 
 /// 修改草稿版本的关卡定义（仅 draft；active/deprecated 拒绝——事实只追加）。
@@ -367,6 +483,8 @@ pub fn activate(store: &Store, version_id: &str) -> Result<VersionRecord, Error>
                 context_policy_ref: d.context_policy_ref.clone(),
                 team_policy_ref: d.team_policy_ref.clone(),
                 workspace_policy_ref: d.workspace_policy_ref.clone(),
+                skip_policy: d.skip_policy.clone(),
+                fast_track_policy: d.fast_track_policy.clone(),
             })
             .collect();
         validate_defs(&inputs)?;
@@ -450,10 +568,13 @@ pub fn definitions(
 ) -> Result<Vec<GateDefinition>, Error> {
     let mut stmt = conn.prepare(
         "SELECT id, version_id, gate_id, ordinal, title, purpose, deliverables_json,
-                COALESCE(acceptance_json,'[]'), context_policy_ref, team_policy_ref, workspace_policy_ref
+                COALESCE(acceptance_json,'[]'), context_policy_ref, team_policy_ref, workspace_policy_ref,
+                COALESCE(skip_policy_json,'{}'), COALESCE(fast_track_policy_json,'{}')
          FROM workflow_gate_definitions WHERE version_id=?1 ORDER BY ordinal",
     )?;
     let rows = stmt.query_map([version_id], |r| {
+        let skip_raw: String = r.get(11)?;
+        let ft_raw: String = r.get(12)?;
         Ok(GateDefinition {
             id: r.get(0)?,
             version_id: r.get(1)?,
@@ -466,6 +587,8 @@ pub fn definitions(
             context_policy_ref: r.get(8)?,
             team_policy_ref: r.get(9)?,
             workspace_policy_ref: r.get(10)?,
+            skip_policy: parse_policy_json(&skip_raw),
+            fast_track_policy: parse_policy_json(&ft_raw),
         })
     })?;
     let mut out = Vec::new();
@@ -556,6 +679,8 @@ mod tests {
                 context_policy_ref: None,
                 team_policy_ref: None,
                 workspace_policy_ref: None,
+                skip_policy: None,
+                fast_track_policy: None,
             },
             GateDefInput {
                 gate_id: "fix".into(),
@@ -566,6 +691,8 @@ mod tests {
                 context_policy_ref: None,
                 team_policy_ref: None,
                 workspace_policy_ref: None,
+                skip_policy: None,
+                fast_track_policy: None,
             },
             GateDefInput {
                 gate_id: "confirm".into(),
@@ -576,6 +703,8 @@ mod tests {
                 context_policy_ref: None,
                 team_policy_ref: None,
                 workspace_policy_ref: None,
+                skip_policy: None,
+                fast_track_policy: None,
             },
         ]
     }
@@ -601,9 +730,109 @@ mod tests {
                 context_policy_ref: d.context_policy_ref.clone(),
                 team_policy_ref: d.team_policy_ref.clone(),
                 workspace_policy_ref: d.workspace_policy_ref.clone(),
+                skip_policy: d.skip_policy.clone(),
+                fast_track_policy: d.fast_track_policy.clone(),
             })
             .collect();
         assert_eq!(content_digest(&inputs), version.content_digest);
+    }
+
+    /// WP-8：skip/fast-track 策略——schema 严格（未知字段创建即拒）、部署/迁移类
+    /// 关恒 forbidden、策略参与 digest v4、roundtrip 读回保真。
+    #[test]
+    fn skip_fast_track_policy_validation_and_digest_v4() {
+        let store = setup();
+        let t = create_template(&store, "wp8-skip", "跳关策略").unwrap();
+        let defs = |skip: Option<SkipPolicy>, ft: Option<FastTrackPolicy>| -> Vec<GateDefInput> {
+            vec![GateDefInput {
+                gate_id: "review".into(),
+                title: "评审关".into(),
+                purpose: String::new(),
+                deliverables: vec!["doc".into()],
+                acceptance: vec![],
+                context_policy_ref: None,
+                team_policy_ref: None,
+                workspace_policy_ref: None,
+                skip_policy: skip,
+                fast_track_policy: ft,
+            }]
+        };
+        // manual_approval 可创建（非部署类）。
+        let v = create_version(
+            &store,
+            &t.id,
+            &defs(
+                Some(SkipPolicy {
+                    mode: SkipMode::ManualApproval,
+                }),
+                None,
+            ),
+            "tester",
+        )
+        .unwrap();
+        activate(&store, &v.id).unwrap();
+        // 部署/迁移类交付物的关恒 forbidden：manual_approval 创建即拒。
+        let deploy_defs = vec![GateDefInput {
+            gate_id: "deploy".into(),
+            title: "部署关".into(),
+            purpose: String::new(),
+            deliverables: vec!["deployment".into()],
+            acceptance: vec![],
+            context_policy_ref: None,
+            team_policy_ref: None,
+            workspace_policy_ref: None,
+            skip_policy: Some(SkipPolicy {
+                mode: SkipMode::ManualApproval,
+            }),
+            fast_track_policy: None,
+        }];
+        let err = create_version(&store, &t.id, &deploy_defs, "tester")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("恒 forbidden"), "{err}");
+        // fast-track schema 严格：未知字段（越界豁免声明）反序列化即拒——
+        // RPC/存储面无法构造出该策略，创建面无从接收（policy schema 校验即拒）。
+        assert!(
+            serde_json::from_value::<FastTrackPolicy>(serde_json::json!({
+                "skippable_activities": ["self_test"],
+                "waived_deliverables": [],
+                "reduced_approval": true,
+                "waive_policy_approvals": true
+            }))
+            .is_err()
+        );
+        // digest v4：策略进 digest（None 与 Some 哈希不同、同输入确定）。
+        let d_none = content_digest(&defs(None, None));
+        let d_skip = content_digest(&defs(
+            Some(SkipPolicy {
+                mode: SkipMode::ManualApproval,
+            }),
+            None,
+        ));
+        let d_ft = content_digest(&defs(
+            None,
+            Some(FastTrackPolicy {
+                skippable_activities: vec!["self_test".into()],
+                waived_deliverables: vec![WaivedDeliverable {
+                    kind: "doc".into(),
+                    substitute_evidence_kind: "manual".into(),
+                }],
+                reduced_approval: true,
+            }),
+        ));
+        assert_eq!(d_none, content_digest(&defs(None, None)), "确定");
+        assert_ne!(d_none, d_skip);
+        assert_ne!(d_none, d_ft);
+        assert_ne!(d_skip, d_ft);
+        // 读回保真：策略随版本冻结。
+        let readback = definitions_via_store(&store, &v.id).unwrap();
+        assert_eq!(
+            readback[0].skip_policy,
+            Some(SkipPolicy {
+                mode: SkipMode::ManualApproval
+            })
+        );
+        assert_eq!(readback[0].fast_track_policy, None);
     }
 
     #[test]
@@ -624,6 +853,8 @@ mod tests {
                 context_policy_ref: None,
                 team_policy_ref: None,
                 workspace_policy_ref: None,
+                skip_policy: None,
+                fast_track_policy: None,
             },
             GateDefInput {
                 gate_id: "fix".into(),
@@ -634,6 +865,8 @@ mod tests {
                 context_policy_ref: None,
                 team_policy_ref: None,
                 workspace_policy_ref: None,
+                skip_policy: None,
+                fast_track_policy: None,
             },
         ];
         assert!(create_version(&store, &t.id, &bad, "tester").is_err());
@@ -689,6 +922,8 @@ mod tests {
                 context_policy_ref: None,
                 team_policy_ref: None,
                 workspace_policy_ref: None,
+                skip_policy: None,
+                fast_track_policy: None,
             }]
         };
         // kill switch 关闭：结构化项创建即拒（feature_disabled）。

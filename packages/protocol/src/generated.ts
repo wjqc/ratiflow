@@ -143,6 +143,7 @@ export type RpcMethodName =
   | 'gate.getRelease'
   | 'gate.requestManualConfirmation'
   | 'gate.manualConfirmations'
+  | 'gate.requestSkip'
   | 'stage.attempts'
   | 'stage.package'
   | 'snapshot.get'
@@ -416,6 +417,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'gate.getRelease',
   'gate.requestManualConfirmation',
   'gate.manualConfirmations',
+  'gate.requestSkip',
   'stage.attempts',
   'stage.package',
   'snapshot.get',
@@ -1374,6 +1376,13 @@ export interface GateRequestManualConfirmationParams {
 export interface GateManualConfirmationsParams {
   workItemId: string;
   gate?: string;
+}
+
+export interface GateRequestSkipParams {
+  workItemId: string;
+  gateId: string;
+  waiver: string;
+  substituteEvidenceIds: unknown[];
 }
 
 export interface StageAttemptsParams {

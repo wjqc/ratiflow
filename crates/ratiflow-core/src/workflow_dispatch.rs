@@ -75,6 +75,26 @@ fn parse_gates(params: &Value) -> Result<Vec<sg_workflow::template::GateDefInput
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         };
+        // WP-8：skip/fast-track 策略对象（缺省/null = 无声明）。形状校验在
+        // sg-workflow template（deny_unknown_fields：越界豁免声明在此即拒）。
+        let opt_policy = |key: &str, what: &str| -> Result<Option<Value>, RpcError> {
+            match g.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) if v.is_object() => Ok(Some(v.clone())),
+                Some(_) => Err(err_invalid(format!("{what} 须为对象"))),
+            }
+        };
+        fn decode_policy<T: serde::de::DeserializeOwned>(
+            raw: Option<Value>,
+            what: &str,
+        ) -> Result<Option<T>, RpcError> {
+            raw.map(|v| {
+                serde_json::from_value(v).map_err(|e| err_invalid(format!("{what} 非法：{e}")))
+            })
+            .transpose()
+        }
+        let skip_raw = opt_policy("skipPolicy", "skipPolicy")?;
+        let ft_raw = opt_policy("fastTrackPolicy", "fastTrackPolicy")?;
         out.push(sg_workflow::template::GateDefInput {
             gate_id: g
                 .get("gateId")
@@ -96,6 +116,8 @@ fn parse_gates(params: &Value) -> Result<Vec<sg_workflow::template::GateDefInput
             context_policy_ref: opt_ref("contextPolicyRef"),
             team_policy_ref: opt_ref("teamPolicyRef"),
             workspace_policy_ref: opt_ref("workspacePolicyRef"),
+            skip_policy: decode_policy(skip_raw, "skipPolicy")?,
+            fast_track_policy: decode_policy(ft_raw, "fastTrackPolicy")?,
         });
     }
     Ok(out)

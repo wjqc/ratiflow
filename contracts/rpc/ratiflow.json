@@ -2336,6 +2336,32 @@
       "result": "value"
     },
     {
+      "name": "gate.requestSkip",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gateId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "waiver",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "substituteEvidenceIds",
+          "type": "array",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "stage.attempts",
       "params": [
         {

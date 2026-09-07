@@ -140,12 +140,27 @@ pub fn list(store: &Store, workitem_id: &str, gate: Option<&str>) -> Result<Vec<
     })
 }
 
+/// 关卡结论摘要（WP-8 outcome 语义）：
+/// - `passed`：技术评估通过（passed=true）；
+/// - `skipped_with_waiver`：经 gate_skip 审批跳过（**passed 布尔不篡改，照实
+///   false**；完成谓词以 outcome 为准，旧消费者保守视为未全通过 = fail-closed）；
+/// - `failed` / `unknown`：未通过/未评估（阻断签发）。
 #[derive(Debug, Clone, Serialize)]
 pub struct GateSummary {
     pub gate: String,
     pub passed: bool,
     pub evidence_ids: Vec<String>,
     pub failed_inputs: Vec<String>,
+    /// 缺省 "passed"；skipped 关为 "skipped_with_waiver"（passed 照实 false）。
+    pub outcome: String,
+    pub waiver_approval_id: String,
+}
+
+impl GateSummary {
+    /// 完成谓词（WP-8）：每关 outcome ∈ {passed, skipped_with_waiver}。
+    pub fn completes(&self) -> bool {
+        self.outcome == "passed" || self.outcome == "skipped_with_waiver"
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,9 +185,14 @@ pub fn issue_passport(
             "passport_incomplete_gates: 实例无关卡结论".into(),
         ));
     }
-    if gates.iter().any(|g| !g.passed) {
+    // 完成谓词：outcome ∈ {passed, skipped_with_waiver}；矛盾摘要（outcome=passed
+    // 而 passed=false）按 fail-closed 拒签。
+    if gates
+        .iter()
+        .any(|g| !g.completes() || (g.outcome == "passed" && !g.passed))
+    {
         return Err(Error::Message(
-            "passport_incomplete_gates: 存在未通过关卡".into(),
+            "passport_incomplete_gates: 存在未通过且未豁免跳过的关卡".into(),
         ));
     }
     let evidences = list(store, workitem_id, None)?;
@@ -200,9 +220,17 @@ pub fn issue_passport(
         )?;
         for (i, g) in gates.iter().enumerate() {
             conn.execute(
-                "INSERT INTO passport_gates(passport_id, seq, gate, passed, evidence_ids, failed_inputs)
-                 VALUES (?1,?2,?3,?4,?5,'[]')",
-                rusqlite::params![id, i as i64, g.gate, g.passed, serde_json::to_string(&g.evidence_ids).unwrap_or_else(|_| "[]".into())],
+                "INSERT INTO passport_gates(passport_id, seq, gate, passed, evidence_ids, failed_inputs, outcome, waiver_approval_id)
+                 VALUES (?1,?2,?3,?4,?5,'[]',?6,?7)",
+                rusqlite::params![
+                    id,
+                    i as i64,
+                    g.gate,
+                    g.passed,
+                    serde_json::to_string(&g.evidence_ids).unwrap_or_else(|_| "[]".into()),
+                    g.outcome,
+                    g.waiver_approval_id
+                ],
             )?;
         }
         let created: String = conn.query_row("SELECT created_at FROM passports WHERE id=?1", [&id], |r| r.get(0))?;
@@ -238,7 +266,7 @@ pub fn latest_passport(store: &Store, workitem_id: &str) -> Result<Option<Passpo
         Some(id) => {
             let gates = store.with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT gate, passed, evidence_ids FROM passport_gates WHERE passport_id=?1 ORDER BY seq",
+                    "SELECT gate, passed, evidence_ids, outcome, waiver_approval_id FROM passport_gates WHERE passport_id=?1 ORDER BY seq",
                 )?;
                 let rows = stmt.query_map([&id], |r| {
                     Ok(GateSummary {
@@ -246,6 +274,8 @@ pub fn latest_passport(store: &Store, workitem_id: &str) -> Result<Option<Passpo
                         passed: r.get::<_, i64>(1)? == 1,
                         evidence_ids: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(),
                         failed_inputs: vec![],
+                        outcome: r.get(3)?,
+                        waiver_approval_id: r.get(4)?,
                     })
                 })?;
                 let mut out = Vec::new();
@@ -307,6 +337,8 @@ mod tests {
             passed: true,
             evidence_ids: vec![],
             failed_inputs: vec![],
+            outcome: "passed".into(),
+            waiver_approval_id: String::new(),
         })
         .collect()
     }
@@ -348,7 +380,17 @@ mod tests {
         assert!(issue_passport(&s, "wi", &gates, "").is_err());
         let p = issue_passport(&s, "wi", &all_gates_pass(), "").unwrap();
         assert_eq!(p.gates.len(), 6);
+        // WP-8：skipped_with_waiver 关（passed 照实 false）可签发，outcome/豁免审批落库。
+        let mut skipped = all_gates_pass();
+        skipped[3].passed = false;
+        skipped[3].outcome = "skipped_with_waiver".into();
+        skipped[3].waiver_approval_id = "appr_waiver".into();
+        let ps = issue_passport(&s, "wi", &skipped, "").unwrap();
+        assert_eq!(ps.gates.len(), 6);
         let latest = latest_passport(&s, "wi").unwrap().unwrap();
-        assert_eq!(latest.id, p.id);
+        let skipped_gate = latest.gates.iter().find(|g| g.gate == "testing").unwrap();
+        assert_eq!(skipped_gate.outcome, "skipped_with_waiver");
+        assert!(!skipped_gate.passed);
+        assert_eq!(skipped_gate.waiver_approval_id, "appr_waiver");
     }
 }

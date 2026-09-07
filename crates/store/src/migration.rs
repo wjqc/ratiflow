@@ -87,6 +87,14 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         43,
         include_str!("../migrations/0043_shadow_suggestions.sql"),
     ),
+    (
+        44,
+        include_str!("../migrations/0044_gate_skip_policies.sql"),
+    ),
+    (
+        45,
+        include_str!("../migrations/0045_skill_market_sources.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

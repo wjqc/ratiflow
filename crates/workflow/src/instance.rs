@@ -333,6 +333,8 @@ mod tests {
                     context_policy_ref: None,
                     team_policy_ref: None,
                     workspace_policy_ref: None,
+                    skip_policy: None,
+                    fast_track_policy: None,
                 },
                 GateDefInput {
                     gate_id: "confirm".into(),
@@ -343,6 +345,8 @@ mod tests {
                     context_policy_ref: None,
                     team_policy_ref: None,
                     workspace_policy_ref: None,
+                    skip_policy: None,
+                    fast_track_policy: None,
                 },
             ],
             "tester",
