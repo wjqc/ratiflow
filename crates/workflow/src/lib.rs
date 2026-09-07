@@ -10,6 +10,7 @@ pub mod automation;
 pub mod dag;
 pub mod delivery;
 pub mod instance;
+pub mod metrics;
 pub mod plan;
 pub mod read_model;
 pub mod replan;

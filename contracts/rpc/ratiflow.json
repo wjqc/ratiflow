@@ -2493,6 +2493,22 @@
       "result": "value"
     },
     {
+      "name": "metrics.overview",
+      "params": [
+        {
+          "name": "scope",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "triage.list",
+      "params": [],
+      "result": "value"
+    },
+    {
       "name": "stage.attempts",
       "params": [
         {

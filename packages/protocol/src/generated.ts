@@ -150,6 +150,8 @@ export type RpcMethodName =
   | 'rework.decide'
   | 'rework.get'
   | 'rework.list'
+  | 'metrics.overview'
+  | 'triage.list'
   | 'stage.attempts'
   | 'stage.package'
   | 'snapshot.get'
@@ -435,6 +437,8 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'rework.decide',
   'rework.get',
   'rework.list',
+  'metrics.overview',
+  'triage.list',
   'stage.attempts',
   'stage.package',
   'snapshot.get',
@@ -1443,6 +1447,12 @@ export interface ReworkGetParams {
 export interface ReworkListParams {
   workItemId: string;
 }
+
+export interface MetricsOverviewParams {
+  scope: string;
+}
+
+export type TriageListParams = Record<string, never>;
 
 export interface StageAttemptsParams {
   workItemId: string;

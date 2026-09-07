@@ -147,6 +147,8 @@ export const RPC_METHODS: readonly string[] = [
   'rework.decide',
   'rework.get',
   'rework.list',
+  'metrics.overview',
+  'triage.list',
   'stage.attempts',
   'stage.package',
   'snapshot.get',

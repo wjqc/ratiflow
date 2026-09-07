@@ -30,6 +30,7 @@ pub(crate) fn store_err(e: Error) -> RpcError {
             ErrorCode::InvalidStageTransition,
         ),
         ("trace_incomplete", ErrorCode::TraceIncomplete),
+        ("metrics_invalid", ErrorCode::InvalidParams),
         ("trace_cycle", ErrorCode::Conflict),
         ("output_digest_changed", ErrorCode::Conflict),
         ("snapshot_failed", ErrorCode::SnapshotFailed),
@@ -2595,6 +2596,12 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 }
             }
         }
+        // --- WP-10：A5 指标投影（纯读）+ WP-11 Triage 纯读先行 ---
+        "metrics.overview" => {
+            let scope = str_param(params, "scope")?;
+            sg_workflow::metrics::overview(store, &scope).map_err(store_err)
+        }
+        "triage.list" => sg_workflow::metrics::triage_list(store).map_err(store_err),
         "stage.attempts" => {
             let workitem_id = str_param(params, "workItemId")?;
             let attempts = sg_workitem::attempt::list(store, &workitem_id).map_err(store_err)?;

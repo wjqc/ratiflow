@@ -1335,6 +1335,7 @@ dependencies = [
  "serde_json",
  "sg-integrations",
  "sg-policy",
+ "sg-provenance",
  "sg-store",
  "sha2",
  "time",
