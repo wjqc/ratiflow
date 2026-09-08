@@ -165,6 +165,15 @@ migration-old-binary-drill:
     - cargo build --release -p ratiflow-core
     - bash tests/platform/old-binary-drill.sh
 
+# R0 安全封锁诊断（§10.1）：flag 负例探针 + 只读计数器 JSON 证据——
+# 证明默认态封锁未被破坏（每个流水线都跑）。
+r0-diagnostics:
+  stage: e2e
+  image: node:26
+  needs: [build]
+  script:
+    - node tests/platform/release-diagnostics.mjs
+
 package:
   stage: package
   image: node:26

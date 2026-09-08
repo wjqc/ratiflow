@@ -101,6 +101,10 @@ old-binary-drill: ## 旧二进制演练（兼容 + 0049-era 拒启 + 快照恢�
 rdws-manifest: ## RDWS-001~020 证据矩阵校验（空证据/重复 ID/未进 CI 脚本即失败）
 	node tests/rdws/validate.mjs
 
+release-diagnostics: ## R0 安全封锁诊断与证据清单（§10.1：flag 负例探针 + 只读计数器 JSON）
+	cargo build --release -p ratiflow-core
+	node tests/platform/release-diagnostics.mjs
+
 test-contract: ## Contract fixtures + decoders + secret probe (F11/M4)
 	node tests/contract/run.mjs
 
