@@ -245,7 +245,6 @@ export function AgentCenterPage() {
     <div className="sg-set-page sg-agent-page">
       <SettingsPageHeader
         title="Agent 中心"
-        scope="本地"
         description="决定每一关由谁完成（关卡清单来自已激活的工作流模板）；没有特殊要求时使用内置通用 Agent。"
       />
 

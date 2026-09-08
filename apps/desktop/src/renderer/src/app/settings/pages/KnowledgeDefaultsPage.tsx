@@ -5,7 +5,6 @@ import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsRow, SettingsToggle } from '../components/SettingsRow';
 import { SettingsSection } from '../components/SettingsSection';
-import { StatusPill } from '../components/StatusPill';
 import { useAutoSave } from '../hooks/useAutoSave';
 
 interface KnowledgeSettings {
@@ -74,7 +73,7 @@ export function KnowledgeDefaultsPage() {
     }
   };
 
-  const { pending, schedule } = useAutoSave(persist);
+  const { schedule } = useAutoSave(persist);
 
   const set = (key: keyof KnowledgeSettings, v: unknown, immediate = false) => {
     setDraft((d) => ({ ...d, [key]: v }));
@@ -85,8 +84,6 @@ export function KnowledgeDefaultsPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="知识库默认策略"
-        scope="全局"
-        status={loading ? <StatusPill kind="checking" /> : pending ? <StatusPill kind="pending" label="保存中…" /> : <StatusPill kind="ready" label="已保存" />}
         description="扫描、分块、秘密扫描与检索的全局默认。此处不添加项目来源——项目来源在项目知识库页管理。"
       />
 

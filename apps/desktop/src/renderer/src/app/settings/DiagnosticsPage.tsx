@@ -176,7 +176,6 @@ export function DiagnosticsPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="使用统计"
-        scope="本地"
         description="查看模型请求的缓存使用情况。"
         actions={
           <button className="sg-btn" onClick={() => void load()} disabled={loading}>

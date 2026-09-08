@@ -373,7 +373,6 @@ export function IntegrationsPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="外部集成"
-        scope="全局"
         description="GitLab 实例与 SSH 目标机的连接配置。秘密经凭据引用存 Keychain，此页不显示。"
       />
       <GitlabPanel />

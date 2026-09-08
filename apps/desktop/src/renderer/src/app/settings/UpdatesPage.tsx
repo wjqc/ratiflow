@@ -57,8 +57,6 @@ export function UpdatesPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="更新与关于"
-        scope="本地"
-        status={version ? <StatusPill kind="ready" label="运行中" /> : <StatusPill kind="checking" />}
         description="版本、数据与日志目录信息真实可读；更新执行由 Electron main（autoUpdater）负责。"
       />
 

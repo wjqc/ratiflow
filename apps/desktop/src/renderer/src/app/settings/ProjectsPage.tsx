@@ -159,7 +159,6 @@ export function ProjectsPage() {
     <div className="sg-set-page sg-projects-page">
       <SettingsPageHeader
         title="项目工作区"
-        scope="本地"
         description="一个工作区对应一个本地代码目录。GitLab 和远程环境都是可选连接，不再阻塞本地工作。"
         actions={<button className="sg-btn sg-btn--quiet" onClick={() => void load(includeArchived)} disabled={loading}><IconRefresh size={14} />刷新</button>}
       />

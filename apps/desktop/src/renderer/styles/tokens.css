@@ -1173,13 +1173,6 @@ button.sg-step { cursor: pointer; }
 
 .sg-set-header-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .sg-set-title { font-size: 20px; font-weight: 600; margin: 0; }
-.sg-set-scope {
-  font-size: 11px;
-  color: var(--sg-text-secondary);
-  border: 1px solid var(--sg-border-default);
-  border-radius: 999px;
-  padding: 1px 8px;
-}
 .sg-set-header-actions { margin-left: auto; display: flex; gap: 8px; }
 
 .sg-set-section { display: flex; flex-direction: column; gap: 10px; }
@@ -2685,13 +2678,6 @@ button.sg-step { cursor: pointer; }
   color: var(--sg-text-secondary);
   font-size: 12.5px;
   line-height: 1.65;
-}
-
-.sg-set-scope {
-  padding: 2px 8px;
-  background: var(--sg-setting-surface);
-  border-color: var(--sg-border-default);
-  font-size: 10.5px;
 }
 
 .sg-set-header-actions {

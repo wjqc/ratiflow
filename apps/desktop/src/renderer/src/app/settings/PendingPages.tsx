@@ -5,7 +5,6 @@ import { ContractPending } from './components/ContractPending';
 
 interface PendingDef {
   title: string;
-  scope: '全局' | '项目' | '环境' | '本地';
   description: string;
   features: string[];
   awaiting: string[];
@@ -15,7 +14,6 @@ interface PendingDef {
 const DEFS: Record<string, PendingDef> = {
   'app-general': {
     title: '常规',
-    scope: '全局',
     description: '应用级偏好：启动恢复、默认项目、语言与时间格式、下载目录、遥测（默认关闭）。',
     features: [
       '启动时恢复上次项目与页面',
@@ -28,7 +26,6 @@ const DEFS: Record<string, PendingDef> = {
   },
   appearance: {
     title: '外观',
-    scope: '全局',
     description: '主题、密度、代码字体与动效偏好；遵循系统对比度与 prefers-reduced-motion。',
     features: [
       '主题：浅色（MVP）/ 深色 / 跟随系统',
@@ -42,7 +39,6 @@ const DEFS: Record<string, PendingDef> = {
   },
   'knowledge-defaults': {
     title: '知识库默认策略',
-    scope: '全局',
     description: '新项目的知识库默认摄入与检索策略；项目级覆盖在项目知识库页管理。',
     features: [
       '默认允许来源与默认忽略 glob',
@@ -56,7 +52,6 @@ const DEFS: Record<string, PendingDef> = {
   },
   models: {
     title: '模型与路由',
-    scope: '全局',
     description: 'Provider / 模型档案与按阶段路由规则；秘密值仅存 keychain 引用，永远不入库。',
     features: [
       'Provider 列表与连接状态（baseUrl / apiKeyRef）',
@@ -70,7 +65,6 @@ const DEFS: Record<string, PendingDef> = {
   },
   tools: {
     title: '工具与审批',
-    scope: '全局',
     description: 'Agent 工具开关、风险等级与审批策略；含每工具风险与最近使用排障信息。',
     features: [
       '工具表：开关 / 风险等级 / 审批要求 / 网络访问',
@@ -83,7 +77,6 @@ const DEFS: Record<string, PendingDef> = {
   },
   execution: {
     title: '执行与沙箱',
-    scope: '环境',
     description: 'Agent 命令执行模式与沙箱资源限制；切换前自动运行环境自检。',
     features: [
       '执行模式：本机直接 / Docker 容器',
@@ -97,7 +90,6 @@ const DEFS: Record<string, PendingDef> = {
   },
   editors: {
     title: '编辑器',
-    scope: '本地',
     description: '检测本机编辑器与"打开方式"命令模板；可选页，不影响整体 ready 状态。',
     features: [
       '已安装编辑器检测（VS Code / Cursor 等）',
@@ -112,7 +104,6 @@ const DEFS: Record<string, PendingDef> = {
 export function PendingSettingsPage({ id }: { id: keyof typeof DEFS }) {
   const def = DEFS[id] ?? {
     title: '页面未接线',
-    scope: '本地' as const,
     description: `路由 ${String(id)} 尚未映射到实现页面（路由表与页面壳不一致）。`,
     features: [],
     awaiting: [],
@@ -120,7 +111,7 @@ export function PendingSettingsPage({ id }: { id: keyof typeof DEFS }) {
   };
   return (
     <div className="sg-set-page">
-      <SettingsPageHeader title={def.title} scope={def.scope} description={def.description} />
+      <SettingsPageHeader title={def.title} description={def.description} />
       <SettingsSection title="功能规划与契约状态">
         <ContractPending features={def.features} awaiting={def.awaiting} fallback={def.fallback} />
       </SettingsSection>

@@ -266,14 +266,6 @@ export function WorkflowTemplatesPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="工作流与关卡模板"
-        scope="全局"
-        status={
-          templates == null ? (
-            <StatusPill kind="checking" />
-          ) : (
-            <StatusPill kind="ready" label={`${templates.length} 个模板`} />
-          )
-        }
         description="管理任务的关卡流程。激活版本不可直接修改：复制为新草稿、编辑后激活为新版本；已创建任务继续使用创建时冻结的版本。"
         actions={
           <>

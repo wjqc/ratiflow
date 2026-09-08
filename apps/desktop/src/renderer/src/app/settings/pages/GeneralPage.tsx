@@ -4,7 +4,6 @@ import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsRow, SettingsToggle } from '../components/SettingsRow';
 import { SettingsSection } from '../components/SettingsSection';
-import { StatusPill } from '../components/StatusPill';
 import { useAutoSave } from '../hooks/useAutoSave';
 
 const GENERAL_KEY = 'app.general';
@@ -82,7 +81,7 @@ export function GeneralPage() {
     }
   };
 
-  const { pending, schedule } = useAutoSave(persist);
+  const { schedule } = useAutoSave(persist);
 
   const changeGeneral = (key: string, value: unknown) => {
     setGeneral((current) => ({ ...current, [key]: value }));
@@ -97,14 +96,6 @@ export function GeneralPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="常规"
-        scope="全局"
-        status={
-          loading
-            ? <StatusPill kind="checking" />
-            : pending
-              ? <StatusPill kind="pending" label="保存中…" />
-              : <StatusPill kind="ready" label="已保存" />
-        }
         description="管理应用启动、显示方式与本地诊断偏好。"
       />
 

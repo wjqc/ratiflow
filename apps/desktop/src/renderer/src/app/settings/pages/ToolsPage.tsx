@@ -54,8 +54,6 @@ export function ToolsPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="工具与审批"
-        scope="全局"
-        status={loading ? <StatusPill kind="checking" /> : <StatusPill kind="ready" />}
         description="Agent 可用工具的启用、风险与审批策略。高风险工具默认需人工审批（绑定 ActionDigest）。"
         actions={
           <button className="sg-btn" onClick={() => void load()} disabled={loading}>

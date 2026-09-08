@@ -134,8 +134,6 @@ export function BackupPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="备份与恢复"
-        scope="本地"
-        status={<StatusPill kind="ready" />}
         description="备份为带 manifest 与 sha256 校验的本地快照；恢复前须校验通过，恢复后需重启应用。"
       />
 

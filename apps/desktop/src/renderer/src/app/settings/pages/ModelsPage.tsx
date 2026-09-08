@@ -290,7 +290,6 @@ export function ModelsPage() {
     <div className="sg-set-page sg-model-page">
       <SettingsPageHeader
         title="模型设置"
-        scope="全局"
         description="管理 Agent 使用的模型供应商。API Key 只保存到 OS Keychain，界面不会回显。"
         actions={
           <button className="sg-btn sg-btn--quiet" onClick={() => void load()} disabled={loading}>

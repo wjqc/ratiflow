@@ -74,7 +74,7 @@ export function ExecutionPage() {
     }
   };
 
-  const { pending, schedule } = useAutoSave(persist);
+  const { schedule } = useAutoSave(persist);
 
   const set = (key: keyof ExecutorSettings, v: unknown, immediate = false) => {
     setDraft((d) => ({ ...d, [key]: v }));
@@ -94,8 +94,6 @@ export function ExecutionPage() {
     <div className="sg-set-page">
       <SettingsPageHeader
         title="执行与沙箱"
-        scope="本地"
-        status={loading ? <StatusPill kind="checking" /> : pending ? <StatusPill kind="pending" label="保存中…" /> : <StatusPill kind="ready" label="已保存" />}
         description="Agent 命令执行模式与资源限制。"
       />
 
