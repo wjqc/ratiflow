@@ -264,47 +264,51 @@ export default function NewTaskPage({
         <span className="sg-page-head-status">本地运行</span>
       </header>
       <div className="sg-scroll">
-        <div className="sg-nt-wrap">
-          <h2 className="sg-hero-title">从需求开始，让 Agent 逐关推进</h2>
-          <p className="sg-hero-sub">提交后会自动创建需求版本并起草 PRD，你只需要审阅和确认。</p>
-
-          <div className="sg-nt-context-row">
-            <span>工作区</span>
-            <WorkspacePicker
-              projects={projects}
-              projectId={workspaceId}
-              onSelect={(project) => {
-                setWorkspaceId(project.id);
-                onWorkspaceChanged(project);
-              }}
-              onCreated={(project) => {
-                setWorkspaceId(project.id);
-                onWorkspaceChanged(project);
-              }}
-              onRemote={onOpenRemote}
-            />
-            {templates.length > 0 && (mode === 'text' || mode === 'image') ? (
-              <>
-                <span style={{ marginLeft: 12 }}>关卡模板</span>
-                <select
-                  className="sg-select"
-                  style={{ width: 'auto' }}
-                  value={templateKey}
-                  onChange={(e) => setTemplateKey(e.target.value)}
-                  aria-label="关卡模板"
-                  title="决定任务的关卡数量、顺序与每关交付物要求（创建后冻结该版本）"
-                >
-                  {templates.map((t) => (
-                    <option key={t.key} value={t.key}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
-              </>
-            ) : null}
+        <div className="sg-nt-wrap sg-nt-wrap--centered">
+          <div className="sg-nt-hero">
+            <h2 className="sg-hero-title">从需求开始，让 Agent 逐关推进</h2>
+            <p className="sg-hero-sub">提交后会自动创建需求版本并起草 PRD，你只需要审阅和确认。</p>
           </div>
 
-          <div className="sg-composer-main sg-nt-composer">
+          <div className="sg-nt-composer-shell">
+            {/* 上下文胶囊行（参照 ZCode 首页：工作区/分支胶囊内联在输入框容器顶部） */}
+            <div className="sg-nt-context-pills">
+              <div className="sg-nt-pill" title="PRD 将结合此工作区的代码与知识库起草">
+                <span className="sg-nt-pill-label">工作区</span>
+                <WorkspacePicker
+                  projects={projects}
+                  projectId={workspaceId}
+                  onSelect={(project) => {
+                    setWorkspaceId(project.id);
+                    onWorkspaceChanged(project);
+                  }}
+                  onCreated={(project) => {
+                    setWorkspaceId(project.id);
+                    onWorkspaceChanged(project);
+                  }}
+                  onRemote={onOpenRemote}
+                />
+              </div>
+              {templates.length > 0 && (mode === 'text' || mode === 'image') ? (
+                <div className="sg-nt-pill" title="决定任务的关卡数量、顺序与每关交付物要求（创建后冻结该版本）">
+                  <span className="sg-nt-pill-label">关卡</span>
+                  <select
+                    className="sg-nt-pill-select"
+                    value={templateKey}
+                    onChange={(e) => setTemplateKey(e.target.value)}
+                    aria-label="关卡模板"
+                  >
+                    {templates.map((t) => (
+                      <option key={t.key} value={t.key}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="sg-composer-main sg-nt-composer" style={{ border: 'none', boxShadow: 'none', padding: '0 2px' }}>
             <textarea
               className="sg-composer-input"
               placeholder={
@@ -418,6 +422,7 @@ export default function NewTaskPage({
               </div>
             </div>
           </div>
+          </div>
 
           {error ? (
             <div className="sg-banner sg-banner--error" role="alert" style={{ marginTop: 12 }}>
@@ -425,17 +430,19 @@ export default function NewTaskPage({
             </div>
           ) : null}
 
-          <div className="sg-nt-flow-label">交付流程（{flowGates.length} 关）</div>
-          <div className="sg-nt-flow">
+          <div className="sg-nt-flow-label">
+            交付流程（{flowGates.length} 关{templateKey !== 'six-gate-default' ? ' · 按所选模板' : ''}）
+          </div>
+          <div className={`sg-nt-flow ${flowGates.length > 6 ? 'sg-nt-flow--dense' : ''}`}>
             {flowGates.map((g, i) => (
-              <div className="sg-nt-step" key={g.name}>
+              <div className="sg-nt-step" key={`${g.name}:${i}`}>
                 {i > 0 && <span className="sg-nt-step-sep">→</span>}
                 <span className={`sg-nt-step-num ${i === 0 ? '' : 'sg-nt-step-num--idle'}`}>
                   {i + 1}
                 </span>
                 <div style={{ minWidth: 0 }}>
                   <div className="sg-nt-step-name">{g.name}</div>
-                  <div className="sg-nt-step-sub">{g.sub}</div>
+                  {g.sub ? <div className="sg-nt-step-sub">{g.sub}</div> : null}
                 </div>
               </div>
             ))}
