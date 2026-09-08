@@ -25,6 +25,7 @@ export type RpcMethodName =
   | 'attachment.parse'
   | 'attachment.remove'
   | 'workitem.list'
+  | 'workitem.get'
   | 'workitem.archive'
   | 'workitem.create'
   | 'workitem.progress'
@@ -322,6 +323,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'attachment.parse',
   'attachment.remove',
   'workitem.list',
+  'workitem.get',
   'workitem.archive',
   'workitem.create',
   'workitem.progress',
@@ -836,6 +838,10 @@ export interface WorkitemListParams {
   cursor?: string;
   limit?: number;
   includeArchived?: boolean;
+}
+
+export interface WorkitemGetParams {
+  workItemId: string;
 }
 
 export interface WorkitemArchiveParams {
@@ -1828,8 +1834,11 @@ export interface ModelUsageParams {
 
 export interface McpServerAddParams {
   name: string;
-  command: string;
+  transport?: string;
+  command?: string;
   args?: unknown[];
+  url?: string;
+  headers?: unknown;
 }
 
 export interface McpServerApproveParams {

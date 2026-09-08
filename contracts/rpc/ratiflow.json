@@ -388,6 +388,17 @@
       "result": "value"
     },
     {
+      "name": "workitem.get",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "workitem.archive",
       "params": [
         {
@@ -3839,18 +3850,37 @@
           "required": true
         },
         {
+          "name": "transport",
+          "type": "string",
+          "required": false,
+          "description": "传输类型：stdio（默认，command/args 本地沙箱）| sse | streamable-http（远程，url 必填）"
+        },
+        {
           "name": "command",
           "type": "string",
-          "required": true
+          "required": false,
+          "description": "stdio 启动命令（transport=stdio 时必填）"
         },
         {
           "name": "args",
           "type": "array",
           "required": false
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "required": false,
+          "description": "远程端点（transport=sse|streamable-http 时必填；绝对 http/https）"
+        },
+        {
+          "name": "headers",
+          "type": "object",
+          "required": false,
+          "description": "远程静态头（如 Authorization；值注册时冻结，读模型只透出头名）"
         }
       ],
       "result": "value",
-      "desc": "M6:注册 MCP server(立即探针 initialize+tools/list,工具以候选落库;https 本构建 fail-closed)"
+      "desc": "M6:注册 MCP server(立即探针 initialize+tools/list,工具以候选落库;stdio 经内核沙箱,sse/streamable-http 为远程传输——治理=注册审批+URL/静态头冻结)"
     },
     {
       "name": "mcp.serverApprove",

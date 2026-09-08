@@ -137,20 +137,7 @@ fn probe_server(
         &policy, command, args,
     )?);
     let info = client.initialize().map_err(|e| e.to_string())?;
-    let tools = client.list_tools().map_err(|e| e.to_string())?;
-    if tools.len() > MAX_TOOLS_PER_SERVER {
-        return Err(format!(
-            "工具数 {} 超上限 {MAX_TOOLS_PER_SERVER}（恶意/异常 server 拒绝）",
-            tools.len()
-        ));
-    }
-    for t in &tools {
-        if !sg_integrations::mcp::valid_tool_name(&t.name) {
-            return Err(format!("工具名非法（恶意/异常 Schema 拒绝）: {:?}", t.name));
-        }
-        canonical_schema(&t.input_schema)
-            .map_err(|e| format!("工具 {} Schema 非法: {e}", t.name))?;
-    }
+    let tools = validate_tool_descriptors(client.list_tools().map_err(|e| e.to_string())?)?;
     client.shutdown();
     Ok((json!({"name": info.name, "version": info.version, "protocolVersion": info.protocol_version}).to_string(), tools))
 }
@@ -197,19 +184,177 @@ fn server_by_name(store: &Store, name: &str) -> SettingsResult<Option<Value>> {
         .transpose()
 }
 
+/// 远程 MCP 注册（sse / streamable-http）。治理差异（相对 stdio）：
+/// - 无本地进程 → 不经内核沙箱；治理依赖注册审批 + URL/静态头冻结；
+/// - 平台无关（Windows 亦可注册——无本地执行面）；stdio 的沙箱 fail-closed
+///   语义不受影响。
+pub fn server_add_remote(
+    store: &Store,
+    name: &str,
+    transport: &str,
+    url: &str,
+    headers: &[(String, String)],
+) -> SettingsResult<Value> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(SettingsError::new(
+            "INVALID_PARAMS",
+            format!("非法 server 名 {name:?}（仅字母数字_-）"),
+        ));
+    }
+    if !matches!(transport, "sse" | "streamable-http") {
+        return Err(SettingsError::new(
+            "INVALID_PARAMS",
+            format!("远程传输仅支持 sse|streamable-http（实际 {transport:?}）"),
+        ));
+    }
+    sg_integrations::mcp::remote::valid_remote_url(url)
+        .map_err(|e| SettingsError::new("INVALID_PARAMS", format!("远程 URL 非法：{e}")))?;
+    if headers.len() > 16 {
+        return Err(SettingsError::new(
+            "INVALID_PARAMS",
+            format!("静态头超上限（{} > 16）", headers.len()),
+        ));
+    }
+    for (k, v) in headers {
+        if k.is_empty()
+            || !k
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+        {
+            return Err(SettingsError::new(
+                "INVALID_PARAMS",
+                format!("头名非法 {k:?}"),
+            ));
+        }
+        if v.len() > 4096 {
+            return Err(SettingsError::new(
+                "INVALID_PARAMS",
+                format!("头 {k} 值超长（{} > 4096）", v.len()),
+            ));
+        }
+    }
+    if mcp_disabled() {
+        return Err(SettingsError::new(
+            "INVALID_REQUEST",
+            "feature_disabled: RATIFLOW_MCP_MODE=disabled（MCP 已禁用）",
+        ));
+    }
+    if let Some(existing) = server_by_name(store, name)? {
+        return Ok(existing);
+    }
+    let id = ids::new_id("mcp");
+    let now = timefmt::now();
+    let probe = probe_remote(transport, url, headers);
+    let (status, server_info, probe_error, tools) = match probe {
+        Ok((info, tools)) => ("candidate".to_string(), info, String::new(), tools),
+        Err(e) => ("probe_failed".to_string(), String::new(), e, Vec::new()),
+    };
+    let headers_json = serde_json::to_string(
+        &headers
+            .iter()
+            .map(|(k, v)| json!({"name": k, "value": v}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".into());
+    store
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO mcp_servers(id, name, transport, command, args_json, url, headers_json, server_info, status, probe_error, created_at)
+                 VALUES (?1,?2,?3,'','[]',?4,?5,?6,?7,?8,?9)",
+                rusqlite::params![
+                    id,
+                    name,
+                    transport,
+                    url,
+                    headers_json,
+                    server_info,
+                    status,
+                    probe_error,
+                    now
+                ],
+            )?;
+            for t in &tools {
+                insert_tool_candidate(conn, &id, t, &now)?;
+            }
+            Ok(())
+        })
+        .map_err(store_err)?;
+    server_get(store, &id)
+}
+
+/// 远程探针：建连 → initialize → tools/list → 校验（工具数/命名/Schema 同 stdio）。
+fn probe_remote(
+    transport: &str,
+    url: &str,
+    headers: &[(String, String)],
+) -> Result<(String, Vec<McpToolDescriptor>), String> {
+    let static_headers: sg_integrations::mcp::remote::StaticHeaders = headers.to_vec();
+    let probe_timeout = std::time::Duration::from_secs(15);
+    let wire: Box<dyn sg_integrations::mcp::client::McpWire> = match transport {
+        "sse" => Box::new(
+            sg_integrations::mcp::remote::SseWire::connect(url, probe_timeout, static_headers)
+                .map_err(|e| e.to_string())?,
+        ),
+        _ => Box::new(sg_integrations::mcp::remote::StreamableHttpWire::new(
+            url,
+            probe_timeout,
+            static_headers,
+        )),
+    };
+    let mut client = McpClient::new(wire);
+    let info = client.initialize().map_err(|e| e.to_string())?;
+    let tools = validate_tool_descriptors(client.list_tools().map_err(|e| e.to_string())?)?;
+    client.shutdown();
+    Ok((json!({"name": info.name, "version": info.version, "protocolVersion": info.protocol_version}).to_string(), tools))
+}
+
+/// 工具清单治理校验（stdio/远程共用）：数量上限、命名、Schema 规范化。
+fn validate_tool_descriptors(
+    tools: Vec<McpToolDescriptor>,
+) -> Result<Vec<McpToolDescriptor>, String> {
+    if tools.len() > MAX_TOOLS_PER_SERVER {
+        return Err(format!(
+            "工具数 {} 超上限 {MAX_TOOLS_PER_SERVER}（恶意/异常 server 拒绝）",
+            tools.len()
+        ));
+    }
+    for t in &tools {
+        if !sg_integrations::mcp::valid_tool_name(&t.name) {
+            return Err(format!("工具名非法（恶意/异常 Schema 拒绝）: {:?}", t.name));
+        }
+        canonical_schema(&t.input_schema)
+            .map_err(|e| format!("工具 {} Schema 非法: {e}", t.name))?;
+    }
+    Ok(tools)
+}
+
 pub fn server_get(store: &Store, id: &str) -> SettingsResult<Value> {
     store
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, transport, command, args_json, url, server_info, status, probe_error, approved_by, approved_at, created_at, enabled,
+                "SELECT id, name, transport, command, args_json, url, server_info, status, probe_error, approved_by, approved_at, created_at, enabled, COALESCE(headers_json,'[]'),
                      (SELECT COUNT(*) FROM mcp_server_tools t WHERE t.server_id = mcp_servers.id AND t.status='active'),
                      (SELECT COUNT(*) FROM mcp_server_tools t WHERE t.server_id = mcp_servers.id AND t.status='candidate')
                  FROM mcp_servers WHERE id=?1",
             )?;
             let mut rows = stmt.query_map([id], |r| {
                 let enabled: i64 = r.get(12)?;
-                let tools_active: i64 = r.get(13)?;
-                let tools_candidate: i64 = r.get(14)?;
+                let tools_active: i64 = r.get(14)?;
+                let tools_candidate: i64 = r.get(15)?;
+                // 静态头只透出名（值掩码——密钥不进读模型/UI）。
+                let header_names: Vec<String> =
+                    serde_json::from_str::<Value>(&r.get::<_, String>(13)?)
+                        .unwrap_or(json!([]))
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|h| h["name"].as_str().map(String::from))
+                        .collect();
                 Ok(json!({
                     "serverId": r.get::<_, String>(0)?,
                     "name": r.get::<_, String>(1)?,
@@ -217,6 +362,7 @@ pub fn server_get(store: &Store, id: &str) -> SettingsResult<Value> {
                     "command": r.get::<_, String>(3)?,
                     "args": serde_json::from_str::<Value>(&r.get::<_, String>(4)?).unwrap_or(json!([])),
                     "url": r.get::<_, String>(5)?,
+                    "headerNames": header_names,
                     "serverInfo": serde_json::from_str::<Value>(&r.get::<_, String>(6)?).unwrap_or(Value::Null),
                     "status": r.get::<_, String>(7)?,
                     "probeError": r.get::<_, String>(8)?,
@@ -390,12 +536,30 @@ pub fn server_set_enabled(store: &Store, id: &str, enabled: bool) -> SettingsRes
 /// refresh：重新探针 → 新候选/drift 检测。Schema digest 变化 = 旧候选 superseded、
 /// 新候选落库（**不热更新活跃集**——active 工具保持原 digest 直到再次 approve）。
 pub fn server_refresh(store: &Store, id: &str) -> SettingsResult<Value> {
-    let (name, command, args_json, status): (String, String, String, String) = store
+    let (name, command, args_json, transport, url, headers_json, status): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = store
         .with_conn(|conn| {
             conn.query_row(
-                "SELECT name, command, args_json, status FROM mcp_servers WHERE id=?1",
+                "SELECT name, command, args_json, transport, url, COALESCE(headers_json,'[]'), status FROM mcp_servers WHERE id=?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
             )
             .map_err(sg_store::Error::from)
         })
@@ -406,10 +570,31 @@ pub fn server_refresh(store: &Store, id: &str) -> SettingsResult<Value> {
             "已撤销 server 不可刷新",
         ));
     }
-    let args: Vec<String> = serde_json::from_str(&args_json)
-        .map_err(|e| SettingsError::new("INVALID_PARAMS", e.to_string()))?;
-    let (_info, tools) =
-        probe_server(&command, &args).map_err(|e| SettingsError::new("MCP_PROBE_FAILED", e))?;
+    // 探针按注册传输分流（stdio=沙箱拉起；sse/streamable-http=远程建连）。
+    let probe = match transport.as_str() {
+        "sse" | "streamable-http" => {
+            let headers: Vec<(String, String)> = serde_json::from_str::<Value>(&headers_json)
+                .unwrap_or(json!([]))
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|h| {
+                    Some((
+                        h["name"].as_str()?.to_string(),
+                        h["value"].as_str()?.to_string(),
+                    ))
+                })
+                .collect();
+            probe_remote(&transport, &url, &headers)
+        }
+        _ => {
+            let args: Vec<String> = serde_json::from_str(&args_json)
+                .map_err(|e| SettingsError::new("INVALID_PARAMS", e.to_string()))?;
+            probe_server(&command, &args)
+        }
+    };
+    let (_info, tools) = probe.map_err(|e| SettingsError::new("MCP_PROBE_FAILED", e))?;
     let now = timefmt::now();
     let mut drift = false;
     store
@@ -479,6 +664,9 @@ pub struct ActiveMcpTool {
     pub transport: String,
     pub command: String,
     pub args: Vec<String>,
+    /// 远程 MCP（sse/streamable-http）的端点与静态头（stdio 为空）。
+    pub url: String,
+    pub headers: Vec<(String, String)>,
     /// WP-4：导入型 server 的 import 行 id（直启注册为空串）——call 前冻结复核入口。
     pub import_id: String,
 }
@@ -487,13 +675,27 @@ pub fn active_tools(store: &Store) -> Vec<ActiveMcpTool> {
     store
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT s.id, s.name, t.tool_name, t.description, t.schema_json, t.schema_digest, t.read_only_hint, s.transport, s.command, s.args_json,
+                "SELECT s.id, s.name, t.tool_name, t.description, t.schema_json, t.schema_digest, t.read_only_hint, s.transport, s.command, s.args_json, s.url, COALESCE(s.headers_json,'[]'),
                         COALESCE((SELECT i.id FROM mcp_repo_imports i WHERE i.server_id = s.id LIMIT 1), '')
                  FROM mcp_server_tools t JOIN mcp_servers s ON s.id = t.server_id
                  WHERE t.status='active' AND s.status='active' AND s.enabled=1
                  ORDER BY s.name, t.tool_name",
             )?;
             let rows = stmt.query_map([], |r| {
+                let headers_json: String = r.get(11)?;
+                let headers = serde_json::from_str::<Value>(&headers_json)
+                    .unwrap_or(json!([]))
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|h| {
+                        Some((
+                            h["name"].as_str()?.to_string(),
+                            h["value"].as_str()?.to_string(),
+                        ))
+                    })
+                    .collect();
                 Ok(ActiveMcpTool {
                     server_id: r.get(0)?,
                     server_name: r.get(1)?,
@@ -505,7 +707,9 @@ pub fn active_tools(store: &Store) -> Vec<ActiveMcpTool> {
                     transport: r.get(7)?,
                     command: r.get(8)?,
                     args: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
-                    import_id: r.get(10)?,
+                    url: r.get(10)?,
+                    headers,
+                    import_id: r.get(12)?,
                 })
             })?;
             let out = rows.flatten().collect();
@@ -830,6 +1034,67 @@ for line in sys.stdin:
         assert_eq!(list["items"][0]["toolCounts"]["active"], 2);
         server_revoke(&store, &id, "admin", "x").unwrap();
         assert!(server_set_enabled(&store, &id, false).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 远程注册参数校验（不触网——全部在探针前拒绝）：非法 transport / 非法
+    /// URL（scheme/主机）/ 头数量与值长上限。
+    #[test]
+    fn remote_add_validates_params_before_probe() {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-mcpre-{}-{}",
+            std::process::id(),
+            ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir, "test").unwrap();
+
+        let bad_transport =
+            server_add_remote(&store, "r1", "https", "https://x/mcp", &[]).unwrap_err();
+        assert!(
+            bad_transport.message.contains("sse|streamable-http"),
+            "{bad_transport:?}"
+        );
+
+        let bad_url =
+            server_add_remote(&store, "r1", "sse", "file:///etc/passwd", &[]).unwrap_err();
+        assert!(bad_url.message.contains("http/https"), "{bad_url:?}");
+        let bad_url2 = server_add_remote(&store, "r1", "sse", "https://", &[]).unwrap_err();
+        assert!(bad_url2.message.contains("主机"), "{bad_url2:?}");
+
+        let too_many: Vec<(String, String)> = (0..17)
+            .map(|i| (format!("h{i}",), "v".to_string()))
+            .collect();
+        let bad_header =
+            server_add_remote(&store, "r1", "sse", "https://x/mcp", &too_many).unwrap_err();
+        assert!(bad_header.message.contains("16"), "{bad_header:?}");
+
+        // 参数合法但端点不可达 → probe_failed 落库（不 panic、可重试刷新）。
+        let dead = server_add_remote(
+            &store,
+            "r1",
+            "streamable-http",
+            "http://127.0.0.1:9/mcp",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(dead["status"], "probe_failed");
+        assert!(!dead["probeError"].as_str().unwrap_or("").is_empty());
+
+        // 读模型：url 透出、静态头只透出名。
+        let (name, url): (String, String) = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT name, url FROM mcp_servers WHERE id=?1",
+                    [&dead["serverId"].as_str().unwrap()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            (name.as_str(), url.as_str()),
+            ("r1", "http://127.0.0.1:9/mcp")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

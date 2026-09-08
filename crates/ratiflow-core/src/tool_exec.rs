@@ -1140,20 +1140,26 @@ pub(crate) fn mcp_invoke(
     }
     let tool_name = model_name.to_string();
     let active = (*active).clone();
-    if active.transport != "stdio" {
-        // https 本构建 fail-closed（远端不受本机沙箱保护，需独立评审后接入）。
-        return Err(format!(
-            "mcp_transport: {} 传输本构建未启用（远端不受本机沙箱保护，需独立评审）",
-            active.transport
-        ));
-    }
+    // 远程传输（sse / streamable-http）：无本地进程，不经内核沙箱；治理依赖
+    // 注册审批 + URL/静态头冻结。stdio 路径的沙箱/导入逻辑保持不变。
+    let is_remote = matches!(active.transport.as_str(), "sse" | "streamable-http");
+    let audit_url = if is_remote {
+        active.url.clone()
+    } else {
+        String::new()
+    };
+    let audit_sandboxed = !is_remote;
     let timeout = std::env::var("RATIFLOW_MCP_CALL_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(60);
     // WP-3：MCP server 经内核沙箱拉起（禁网+FS 只读白名单；平台不支持 fail-closed）。
     let policy = sg_settings::mcp_ext::mcp_sandbox_policy(&active.command, &active.args);
-    let policy_digest = policy.digest();
+    let policy_digest = if is_remote {
+        String::new()
+    } else {
+        policy.digest()
+    };
     let audit_transport = active.transport.clone();
     let audit_digest = active.schema_digest.clone();
     let audit_read_only = active.read_only;
@@ -1172,7 +1178,7 @@ pub(crate) fn mcp_invoke(
     // 导入型 server：入口以 checkout 为 cwd；policy 追加 state/tmp 可写面与冻结参数。
     let mut spawn_policy = policy.clone();
     let mut spawn_cwd: Option<std::path::PathBuf> = None;
-    if !active.import_id.is_empty() {
+    if !is_remote && !active.import_id.is_empty() {
         let root = store.data_dir.join("mcp-imports").join(&active.import_id);
         spawn_cwd = Some(root.join("checkout"));
         spawn_policy
@@ -1182,31 +1188,49 @@ pub(crate) fn mcp_invoke(
             .write_paths
             .push(root.join("state").to_string_lossy().to_string());
     }
+    let worker_timeout = timeout;
     let _worker = std::thread::spawn(move || {
         let outcome = (|| -> Result<sg_integrations::mcp::McpToolCallOutcome, String> {
-            // 导入型相对入口：execvp 无斜杠只搜 PATH——显式 ./（cwd=checkout）。
-            let invoke_cmd = if !active.import_id.is_empty() && !active.command.contains('/') {
-                format!("./{}", active.command)
+            let wire: Box<dyn sg_integrations::mcp::client::McpWire> = if is_remote {
+                match active.transport.as_str() {
+                    "sse" => Box::new(
+                        sg_integrations::mcp::remote::SseWire::connect(
+                            &active.url,
+                            std::time::Duration::from_secs(worker_timeout),
+                            active.headers.to_vec(),
+                        )
+                        .map_err(|e| e.to_string())?,
+                    ),
+                    _ => Box::new(sg_integrations::mcp::remote::StreamableHttpWire::new(
+                        &active.url,
+                        std::time::Duration::from_secs(worker_timeout),
+                        active.headers.to_vec(),
+                    )),
+                }
             } else {
-                active.command.clone()
-            };
-            let mut client = sg_integrations::mcp::McpClient::new(
-                sg_integrations::mcp::SandboxedTransport::spawn_in(
+                // 导入型相对入口：execvp 无斜杠只搜 PATH——显式 ./（cwd=checkout）。
+                let invoke_cmd = if !active.import_id.is_empty() && !active.command.contains('/') {
+                    format!("./{}", active.command)
+                } else {
+                    active.command.clone()
+                };
+                Box::new(sg_integrations::mcp::SandboxedTransport::spawn_in(
                     &spawn_policy,
                     spawn_cwd.as_deref(),
                     &invoke_cmd,
                     &active.args,
-                )?,
-            );
+                )?)
+            };
+            let mut client = sg_integrations::mcp::McpClient::new(wire);
             let out = (|| -> Result<sg_integrations::mcp::McpToolCallOutcome, String> {
                 client.initialize().map_err(|e| e.to_string())?;
-                // WP-3 send_phase：intent 先于 stdin 写入持久化（崩溃窗口的权威起点）；
-                // flush 成功 → request_flushed（副作用可能已发生的事实起点）。
+                // WP-3 send_phase：intent 先于请求字节送出持久化（崩溃窗口的权威
+                // 起点）；flush 成功 → request_flushed（副作用可能已发生的事实起点）。
                 client
                     .call_tool_phased(
                         &worker_tool,
                         worker_args,
-                        std::time::Duration::from_secs(timeout),
+                        std::time::Duration::from_secs(worker_timeout),
                         &|_| {
                             advance_send_phase(
                                 &worker_store,
@@ -1282,6 +1306,7 @@ pub(crate) fn mcp_invoke(
     };
 
     // 审计：server 身份/transport/沙箱标注 + policy digest + send_phase 证据。
+    // 远程传输 sandboxed=false（无本地进程/内核沙箱；治理=注册审批 + URL/头冻结）。
     let _ = sg_store::audit::append(
         store,
         "system",
@@ -1292,8 +1317,9 @@ pub(crate) fn mcp_invoke(
             "server": server_name, "tool": tool_name,
             "transport": audit_transport,
             "schemaDigest": audit_digest,
-            "sandboxed": true,
+            "sandboxed": audit_sandboxed,
             "policyDigest": policy_digest,
+            "url": audit_url,
             "providerCallId": provider_call_id,
         }),
     );

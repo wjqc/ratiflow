@@ -2162,14 +2162,44 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     "feature_disabled: RATIFLOW_MCP_MODE=disabled（MCP 已禁用）",
                 ));
             }
-            let args_list = str_list_param(params, "args");
-            sg_settings::mcp_ext::server_add(
-                store,
-                &str_param(params, "name")?,
-                &str_param(params, "command")?,
-                &args_list,
-            )
-            .map_err(serr)
+            // 传输类型分流：stdio（command/args，本地沙箱）| sse / streamable-http
+            //（url + 可选静态头，远程——治理依赖注册审批 + URL/头冻结）。
+            let transport = opt_str_param(params, "transport").unwrap_or_else(|| "stdio".into());
+            match transport.as_str() {
+                "stdio" => {
+                    let args_list = str_list_param(params, "args");
+                    sg_settings::mcp_ext::server_add(
+                        store,
+                        &str_param(params, "name")?,
+                        &str_param(params, "command")?,
+                        &args_list,
+                    )
+                    .map_err(serr)
+                }
+                "sse" | "streamable-http" => {
+                    let headers: Vec<(String, String)> = params
+                        .get("headers")
+                        .and_then(|v| v.as_object())
+                        .map(|m| {
+                            m.iter()
+                                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    sg_settings::mcp_ext::server_add_remote(
+                        store,
+                        &str_param(params, "name")?,
+                        &transport,
+                        &str_param(params, "url")?,
+                        &headers,
+                    )
+                    .map_err(serr)
+                }
+                other => Err(err(
+                    ErrorCode::InvalidParams,
+                    format!("mcp_transport_invalid: 仅支持 stdio|sse|streamable-http（实际 {other:?}）"),
+                )),
+            }
         }
         "mcp.serverApprove" => {
             if sg_settings::mcp_ext::mcp_disabled() {

@@ -16,6 +16,118 @@ pub trait McpTransport: Send {
     fn shutdown(&mut self);
 }
 
+/// 消息级传输抽象（MCP wire）：一次 JSON-RPC 请求 → 等待其响应。
+/// 相位语义（RDWS-005 五段式）对远程传输同样成立：
+/// - `on_intent`：请求持久化后、字节送出前（此窗口失败 = 可重试 Transport）；
+/// - `on_flushed`：请求字节已送出（副作用可能已发生的事实起点；此后失败面归 unknown）。
+pub trait McpWire: Send {
+    fn request(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        on_intent: &dyn Fn(&str) -> Result<(), String>,
+        on_flushed: &dyn Fn(&str) -> Result<(), String>,
+    ) -> Result<Value, McpError>;
+    /// 通知（无 id，不等待响应）。
+    fn notify(&mut self, method: &str) -> Result<(), McpError>;
+    /// 关闭底层连接/进程。
+    fn close(&mut self);
+}
+
+/// 行式请求/响应循环（stdio 家族共用；响应按 id 匹配，跳过通知与他人响应）。
+fn line_request<T: McpTransport>(
+    t: &mut T,
+    id: u64,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+    on_intent: &dyn Fn(&str) -> Result<(), String>,
+    on_flushed: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<Value, McpError> {
+    let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
+    on_intent(method).map_err(McpError::Transport)?;
+    t.send_line(&line).map_err(McpError::Transport)?;
+    on_flushed(method).map_err(McpError::Transport)?;
+    loop {
+        let raw = t.recv_line(timeout).map_err(|e| {
+            if e == "timeout" {
+                McpError::Timeout(format!("{method} 超时（{timeout:?}）"))
+            } else {
+                McpError::Transport(e)
+            }
+        })?;
+        let v: Value = serde_json::from_str(raw.trim())
+            .map_err(|e| McpError::Protocol(format!("响应非 JSON: {e}")))?;
+        if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
+            if let Some(err) = v.get("error") {
+                return Err(McpError::Protocol(format!(
+                    "server 返回错误: {}",
+                    err["message"].as_str().unwrap_or("unknown")
+                )));
+            }
+            return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+        }
+        // 通知/其他 id 的响应：跳过继续等。
+    }
+}
+
+macro_rules! impl_wire_for_line_transport {
+    ($ty:ty) => {
+        impl McpWire for $ty {
+            fn request(
+                &mut self,
+                id: u64,
+                method: &str,
+                params: Value,
+                timeout: Duration,
+                on_intent: &dyn Fn(&str) -> Result<(), String>,
+                on_flushed: &dyn Fn(&str) -> Result<(), String>,
+            ) -> Result<Value, McpError> {
+                line_request(self, id, method, params, timeout, on_intent, on_flushed)
+            }
+
+            fn notify(&mut self, method: &str) -> Result<(), McpError> {
+                let line = json!({"jsonrpc":"2.0","method":method}).to_string();
+                self.send_line(&line).map_err(McpError::Transport)
+            }
+
+            fn close(&mut self) {
+                self.shutdown();
+            }
+        }
+    };
+}
+
+impl_wire_for_line_transport!(StdioTransport);
+impl_wire_for_line_transport!(SandboxedTransport);
+impl_wire_for_line_transport!(ScriptedTransport);
+
+/// 装箱委托：Box<dyn McpWire> 本身可作为 McpClient 的传输（探针/调用侧按
+/// transport 动态选择远程/本地实现）。
+impl McpWire for Box<dyn McpWire> {
+    fn request(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        on_intent: &dyn Fn(&str) -> Result<(), String>,
+        on_flushed: &dyn Fn(&str) -> Result<(), String>,
+    ) -> Result<Value, McpError> {
+        (**self).request(id, method, params, timeout, on_intent, on_flushed)
+    }
+
+    fn notify(&mut self, method: &str) -> Result<(), McpError> {
+        (**self).notify(method)
+    }
+
+    fn close(&mut self) {
+        (**self).close();
+    }
+}
+
 /// stdio 传输：子进程按行交换 JSON-RPC（进程随 client 生命周期）。
 pub struct StdioTransport {
     child: Child,
@@ -132,8 +244,9 @@ impl McpTransport for ScriptedTransport {
 }
 
 /// MCP 客户端（一次会话：initialize → tools/list → tools/call → 结束）。
-pub struct McpClient<T: McpTransport> {
-    transport: T,
+/// W 为消息级传输（行式 stdio 家族或远程 SSE/Streamable HTTP，见 remote.rs）。
+pub struct McpClient<W: McpWire> {
+    pub transport: W,
     next_id: u64,
 }
 
@@ -147,8 +260,8 @@ pub enum McpError {
     Transport(String),
 }
 
-impl<T: McpTransport> McpClient<T> {
-    pub fn new(transport: T) -> Self {
+impl<W: McpWire> McpClient<W> {
+    pub fn new(transport: W) -> Self {
         Self {
             transport,
             next_id: 1,
@@ -164,10 +277,11 @@ impl<T: McpTransport> McpClient<T> {
         self.request_phased(method, params, timeout, &|_| Ok(()), &|_| Ok(()))
     }
 
-    /// WP-3（RDWS v1.4 §2）：带调用相位回调的请求——on_intent 在写入 stdin **前**
+    /// WP-3（RDWS v1.4 §2）：带调用相位回调的请求——on_intent 在请求字节送出**前**
     /// （此时落库即「intent 已持久化、flush 是否发生不可知」窗口的权威起点），
-    /// on_flushed 在 flush 成功后（副作用可能已发生的事实起点）。回调 Err = 中止调用
+    /// on_flushed 在请求字节送出后（副作用可能已发生的事实起点）。回调 Err = 中止调用
     /// （transport 错误语义）。McpClient 不决定重试，相位终态由编排器定。
+    /// 相位由 McpWire 实现承载（stdio=stdin 写入前后；HTTP=请求发送前后），语义一致。
     fn request_phased(
         &mut self,
         method: &str,
@@ -178,38 +292,12 @@ impl<T: McpTransport> McpClient<T> {
     ) -> Result<Value, McpError> {
         let id = self.next_id;
         self.next_id += 1;
-        let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
-        on_intent(method).map_err(McpError::Transport)?;
         self.transport
-            .send_line(&line)
-            .map_err(McpError::Transport)?;
-        on_flushed(method).map_err(McpError::Transport)?;
-        loop {
-            let raw = self.transport.recv_line(timeout).map_err(|e| {
-                if e == "timeout" {
-                    McpError::Timeout(format!("{method} 超时（{timeout:?}）"))
-                } else {
-                    McpError::Transport(e)
-                }
-            })?;
-            let v: Value = serde_json::from_str(raw.trim())
-                .map_err(|e| McpError::Protocol(format!("响应非 JSON: {e}")))?;
-            if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
-                if let Some(err) = v.get("error") {
-                    return Err(McpError::Protocol(format!(
-                        "server 返回错误: {}",
-                        err["message"].as_str().unwrap_or("unknown")
-                    )));
-                }
-                return Ok(v.get("result").cloned().unwrap_or(Value::Null));
-            }
-            // 通知/其他 id 的响应：跳过继续等。
-        }
+            .request(id, method, params, timeout, on_intent, on_flushed)
     }
 
     fn notify(&mut self, method: &str) -> Result<(), McpError> {
-        let line = json!({"jsonrpc":"2.0","method":method}).to_string();
-        self.transport.send_line(&line).map_err(McpError::Transport)
+        self.transport.notify(method)
     }
 
     /// 握手：initialize → notifications/initialized。
@@ -304,7 +392,7 @@ impl<T: McpTransport> McpClient<T> {
     }
 
     pub fn shutdown(&mut self) {
-        self.transport.shutdown();
+        self.transport.close();
     }
 }
 
@@ -501,6 +589,7 @@ mod tests {
         }
         fn shutdown(&mut self) {}
     }
+    impl_wire_for_line_transport!(SendBreakTransport);
 
     #[test]
     fn intent_phase_break_before_flush_is_retryable_transport() {

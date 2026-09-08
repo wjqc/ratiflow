@@ -1645,6 +1645,43 @@ mod tests {
             .unwrap();
     }
 
+    /// 0058：远程 MCP 传输——CHECK 扩 ('stdio','sse','streamable-http')、
+    /// headers_json 列就位、'https' 不再是合法值、静态头 JSON 可存可读。
+    #[test]
+    fn migration_0058_mcp_remote_transports() {
+        let (store, _guard) = open();
+        assert!(store.schema_version().unwrap() >= 58);
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO mcp_servers(id, name, transport, url, headers_json, status, created_at)
+                     VALUES ('m58a','sse-svc','sse','https://x/sse','[]','candidate','t');
+                     INSERT INTO mcp_servers(id, name, transport, url, headers_json, status, created_at)
+                     VALUES ('m58b','sh-svc','streamable-http','https://x/mcp','[]','candidate','t');
+                     INSERT INTO mcp_servers(id, name, transport, command, status, created_at)
+                     VALUES ('m58c','local','stdio','/bin/cat','candidate','t');",
+                )?;
+                c.execute(
+                    "UPDATE mcp_servers SET headers_json=?1 WHERE id='m58a'",
+                    [r#"[{"name":"Authorization","value":"Bearer t"}]"#],
+                )?;
+                let headers: String = c.query_row(
+                    "SELECT headers_json FROM mcp_servers WHERE id='m58a'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert!(headers.contains("Authorization"));
+                let rejected = c.execute(
+                    "INSERT INTO mcp_servers(id, name, transport, status, created_at)
+                     VALUES ('m58d','legacy','https','candidate','t')",
+                    [],
+                );
+                assert!(rejected.is_err(), "'https' 传输应被新 CHECK 拒绝");
+                Ok(())
+            })
+            .unwrap();
+    }
+
     fn seed_minimal_fixtures(store: &Store) {
         store
             .with_conn(|c| {
