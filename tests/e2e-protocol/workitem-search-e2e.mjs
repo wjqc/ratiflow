@@ -54,12 +54,23 @@ async function main() {
       await c.call('project.create', { gitlabInstance: 'local', namespace: 'e2e', project: 'wsoff', name: 'WsOff' });
       const wi = await c.call('workitem.create', { projectId: (await c.call('project.list', {})).items[0].id, title: '支付网关超时修复' });
       await expectError(() => c.call('workitem.similar', { workItemId: wi.id }), 'flag 关闭：similar 拒绝');
-      await expectError(() => c.call('workitem.searchRebuild', {}), 'flag 关闭：searchRebuild 拒绝');
+      await expectErrorCode(() => c.call('workitem.searchRebuild', {}), 'idempotency_key_required', 'P0-1：缺 idempotencyKey 先于 flag 拒绝');
+      await expectError(() => c.call('workitem.searchRebuild', { idempotencyKey: 'rb-off' }), 'flag 关闭：searchRebuild 拒绝');
       console.log('场景一（flag 关闭回退）通过');
     } finally {
       c.kill();
       rmSync(dataDir, { recursive: true, force: true });
     }
+  }
+
+  async function expectErrorCode(call, code, label) {
+    try {
+      await call();
+    } catch (e) {
+      assert((e.code ?? '') === code, `${label}（实际 ${e.code ?? e.message.slice(0, 60)}）`);
+      return;
+    }
+    throw new Error(`workitem-search-e2e 断言失败：${label} 期望错误码 ${code}，但调用成功`);
   }
 
   async function expectError(call, label) {
@@ -89,9 +100,11 @@ async function main() {
       assert(ids.includes(b.id) && !ids.includes(a.id) && !ids.includes(cc.id), `similar 中文子串命中（实际 ${JSON.stringify(ids)}）`);
       assert(typeof sim.items[0].rank === 'number', 'bm25 rank 落值');
 
-      // 2) searchRebuild：全量回填幂等。
-      const rb = await c.call('workitem.searchRebuild', {});
+      // 2) searchRebuild：全量回填；同 key transport 重放返回首次响应。
+      const rb = await c.call('workitem.searchRebuild', { idempotencyKey: 'rb-1' });
       assert(rb.indexed === 3, `全量回填 3 条（实际 ${rb.indexed}）`);
+      const rbReplay = await c.call('workitem.searchRebuild', { idempotencyKey: 'rb-1' });
+      assert(rbReplay.indexed === rb.indexed, '同 key 重放返回首次响应（不重执行）');
       const sim2 = await c.call('workitem.similar', { workItemId: a.id });
       assert(sim2.items.length === 1, '重建后 similar 结果一致');
 

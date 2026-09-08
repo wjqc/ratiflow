@@ -8,7 +8,7 @@
 //! - Step A（单 DB 事务，幂等）：[target, from] 区间事实登记+失效
 //!   （gate_results 登记；attempts 非终态+approved → superseded；pending
 //!   release → superseded、approved 登记失效；pending approvals → expire；
-//!   baselines superseded_by=rework id；plan 未终态 attempt → cancelled；
+//!   baselines invalidated_by_rework_id（0053 纠偏）；plan 未终态 attempt → cancelled；
 //!   passports 登记）+ 区间 stages 复位 not_started（set_stage_rework，绕过
 //!   can_transition 仅此处可调）+ target 新 attempt（preparing，不占单活跃
 //!   名额，predecessor 链）+ 指针回 target。
@@ -59,13 +59,20 @@ pub struct ReworkOperation {
     pub decided_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    /// P0-4/0053 恢复协议：progress 游标 + 双 digest + Step B 对象摘要 + 恢复计数。
+    pub progress: String,
+    pub pre_state_digest: String,
+    pub post_step_a_digest: String,
+    pub step_b_object_sha256: String,
+    pub recovery_attempts: i64,
     pub created_at: String,
     pub updated_at: String,
 }
 
 const OP_COLS: &str = "id, workitem_id, from_gate, target_gate, from_attempt_id, reason_code, note,
         current_state_digest, state, blocked_reason, approval_id, action_digest,
-        requested_by, decided_by, decided_at, completed_at, created_at, updated_at";
+        requested_by, decided_by, decided_at, completed_at, progress, pre_state_digest,
+        post_step_a_digest, step_b_object_sha256, recovery_attempts, created_at, updated_at";
 
 fn op_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReworkOperation> {
     Ok(ReworkOperation {
@@ -85,8 +92,13 @@ fn op_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReworkOperation> {
         decided_by: r.get(13)?,
         decided_at: r.get(14)?,
         completed_at: r.get(15)?,
-        created_at: r.get(16)?,
-        updated_at: r.get(17)?,
+        progress: r.get(16)?,
+        pre_state_digest: r.get(17)?,
+        post_step_a_digest: r.get(18)?,
+        step_b_object_sha256: r.get(19)?,
+        recovery_attempts: r.get(20)?,
+        created_at: r.get(21)?,
+        updated_at: r.get(22)?,
     })
 }
 
@@ -164,6 +176,59 @@ pub fn cas_digest(store: &Store, workitem_id: &str) -> Result<String, Error> {
     Ok(format!(
         "sha256:{}",
         sg_store::ids::hex(&Sha256::digest(lines.join("\n").as_bytes()))
+    ))
+}
+
+/// tx 连接上的 cas 口径 digest（Step A 事务末计算 post_step_a_digest 用）。
+/// `exclude_gate`：排除该关的 attempt 行——Step B 会写 entry_snapshot_id 与
+/// preparing→prepared 状态，部分 Step B 后恢复重算不误判（v1.4 §WP-9）。
+/// 其余口径与 `cas_digest` 一致（指针 + 全关 stage 状态 + 活跃 attempt）。
+fn cas_digest_on_conn(
+    conn: &rusqlite::Connection,
+    workitem_id: &str,
+    exclude_gate: Option<&str>,
+) -> Result<String, Error> {
+    let pointer: String = conn.query_row(
+        "SELECT current_gate FROM workitems WHERE id=?1",
+        [workitem_id],
+        |r| r.get(0),
+    )?;
+    let mut lines = vec![format!("pointer|{pointer}")];
+    let mut stmt = conn.prepare(
+        "SELECT gd.gate_id, COALESCE(s.state,'not_started')
+         FROM workflow_gate_definitions gd
+         JOIN workflow_instances i ON i.template_version_id = gd.version_id
+         LEFT JOIN workitem_stages s ON s.workitem_id = ?1 AND s.gate = gd.gate_id
+         WHERE i.workitem_id = ?1
+         ORDER BY gd.ordinal",
+    )?;
+    let rows = stmt.query_map([workitem_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (gate, state) = row?;
+        lines.push(format!("stage|{gate}|{state}"));
+    }
+    let mut stmt = conn.prepare(
+        "SELECT gate, state FROM stage_attempts
+         WHERE workitem_id=?1 AND state IN
+           ('prepared','running','review_ready','awaiting_user_approval','changes_requested')
+         ORDER BY gate, attempt_no",
+    )?;
+    let rows = stmt.query_map([workitem_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (gate, state) = row?;
+        if Some(gate.as_str()) == exclude_gate {
+            continue;
+        }
+        lines.push(format!("attempt|{gate}|{state}"));
+    }
+    use sha2::Digest;
+    Ok(format!(
+        "sha256:{}",
+        ids::hex(&sha2::Sha256::digest(lines.join("\n").as_bytes()))
     ))
 }
 
@@ -649,7 +714,8 @@ fn step_a(store: &Store, op: &ReworkOperation) -> Result<String, Error> {
             ),
             rusqlite::params_from_iter(p.iter()),
         )?;
-        // ①f baselines：superseded_by = rework id（读取面已过滤）+ 登记。
+        // ①f baselines（0053 纠偏）：invalidated_by_rework_id = rework id——
+        // 不再复用表示"后继 baseline id"的 superseded_by（读取面双列过滤）。
         p.clear();
         p.push(ids::new_id("raf").into());
         p.push(op.id.clone().into());
@@ -662,7 +728,8 @@ fn step_a(store: &Store, op: &ReworkOperation) -> Result<String, Error> {
             &format!(
                 "INSERT OR IGNORE INTO rework_affected_facts(id, rework_operation_id, fact_kind, fact_id, created_at)
                  SELECT ?1 || '-' || lower(hex(randomblob(8))), ?2, 'baseline', id, ?3 FROM baselines
-                 WHERE workitem_id=?4 AND gate IN ({gates_sql}) AND superseded_by IS NULL"
+                 WHERE workitem_id=?4 AND gate IN ({gates_sql})
+                   AND superseded_by IS NULL AND invalidated_by_rework_id IS NULL"
             ),
             rusqlite::params_from_iter(p.iter()),
         )?;
@@ -672,8 +739,9 @@ fn step_a(store: &Store, op: &ReworkOperation) -> Result<String, Error> {
         }
         conn.execute(
             &format!(
-                "UPDATE baselines SET superseded_by=?1
-                 WHERE workitem_id=?2 AND gate IN ({gates_sql}) AND superseded_by IS NULL"
+                "UPDATE baselines SET invalidated_by_rework_id=?1
+                 WHERE workitem_id=?2 AND gate IN ({gates_sql})
+                   AND superseded_by IS NULL AND invalidated_by_rework_id IS NULL"
             ),
             rusqlite::params_from_iter(p.iter()),
         )?;
@@ -746,6 +814,16 @@ fn step_a(store: &Store, op: &ReworkOperation) -> Result<String, Error> {
             "UPDATE workflow_instances SET current_gate_id=?1, updated_at=?2 WHERE workitem_id=?3",
             rusqlite::params![op.target_gate, now, workitem_id],
         )?;
+        // ⑥ 事务末原子写 progress=step_a_committed + post_step_a_digest
+        //    （排除 target 关 attempt——Step B 字段，部分 Step B 后恢复不误判）。
+        let post_digest = cas_digest_on_conn(conn, &workitem_id, Some(&op.target_gate))?;
+        conn.execute(
+            "UPDATE rework_operations SET progress='step_a_committed', post_step_a_digest=?1,
+                    pre_state_digest=CASE WHEN pre_state_digest='' THEN ?2 ELSE pre_state_digest END,
+                    updated_at=?3
+             WHERE id=?4",
+            rusqlite::params![post_digest, op.current_state_digest, now, op.id],
+        )?;
         Ok(attempt_id)
     })?;
     // 谱系：新 attempt 节点注册（幂等；放在事务外——register_node 自带连接管理，
@@ -764,8 +842,11 @@ fn step_a(store: &Store, op: &ReworkOperation) -> Result<String, Error> {
     Ok(attempt_id)
 }
 
-/// Step B（文件写，非事务）：target attempt 关前快照装配 + prepared。
-/// 失败 → attempt 留 preparing、op blocked(snapshot_write_failed)；重试幂等复用。
+/// Step B（文件写 + 单事务收尾；0053 v2）：对象 CAS put（内容寻址幂等，先）→
+/// 单 DB 事务：snapshot 行绑定 + attempt prepared + progress=step_b_committed +
+/// step_b_object_sha256 + state=completed/completed_at + audit/outbox。
+/// 对象写成功但 DB 失败 → 无引用 orphan（内容寻址全局去重，无害），
+/// 由启动 GC 引用扫描回收；attempt 留 preparing 供 resume 重入。
 fn step_b(store: &Store, op: &ReworkOperation, attempt_id: &str) -> Result<(), Error> {
     let snapshot = crate::snapshot::create(
         store,
@@ -774,14 +855,41 @@ fn step_b(store: &Store, op: &ReworkOperation, attempt_id: &str) -> Result<(), E
         attempt_id,
         "stage_entry",
     )?;
-    store.with_conn(|conn| {
+    let now = timefmt::now();
+    store.with_tx(|conn| {
         conn.execute(
-            "UPDATE stage_attempts SET entry_snapshot_id=?1, state='prepared', updated_at=?2 WHERE id=?3 AND state='preparing'",
-            rusqlite::params![snapshot.id, timefmt::now(), attempt_id],
+            "UPDATE stage_attempts SET entry_snapshot_id=?1, state='prepared', updated_at=?2
+             WHERE id=?3 AND state='preparing'",
+            rusqlite::params![snapshot.id, now, attempt_id],
+        )?;
+        let n = conn.execute(
+            "UPDATE rework_operations SET progress='step_b_committed', state='completed',
+                    step_b_object_sha256=?1, completed_at=?2, blocked_reason='', updated_at=?2
+             WHERE id=?3 AND progress='step_a_committed'",
+            rusqlite::params![snapshot.root_digest, now, op.id],
+        )?;
+        if n != 1 {
+            return Err(Error::Message(
+                "rework_state_changed: 恢复进度已漂移".into(),
+            ));
+        }
+        sg_store::audit::append_at(
+            conn,
+            "system",
+            "rework.step_b",
+            "workitem",
+            &op.workitem_id,
+            json!({"operationId": op.id, "attemptId": attempt_id, "snapshotId": snapshot.id}),
+        )?;
+        outbox::emit_at(
+            conn,
+            "workitem",
+            &op.workitem_id,
+            "rework.completed",
+            json!({"workitemId": op.workitem_id, "operationId": op.id, "targetGate": op.target_gate}),
         )?;
         Ok(())
-    })?;
-    Ok(())
+    })
 }
 
 /// 执行（decide 批准 / executing 重入共用；Step A 幂等、Step B 可重试）。
@@ -827,7 +935,7 @@ fn execute(
     )?;
     // Step A（单事务；幂等）。
     let attempt_id = step_a(store, op)?;
-    // Step B（文件写；失败 → blocked，attempt 留 preparing 供重试复用）。
+    // Step B（对象写 + 单事务收尾；失败 → blocked 保留 progress，resume 恢复）。
     if let Err(e) = step_b(store, op, &attempt_id) {
         let reason = format!("snapshot_write_failed: {e}");
         store.with_conn(|conn| {
@@ -846,25 +954,19 @@ fn execute(
         )?;
         return Err(Error::Message(format!("rework_blocked: {reason}")));
     }
-    store.with_conn(|conn| {
-        conn.execute(
-            "UPDATE rework_operations SET state='completed', completed_at=?1, updated_at=?1 WHERE id=?2",
-            rusqlite::params![timefmt::now(), op.id],
-        )?;
-        Ok(())
-    })?;
-    outbox::emit(
-        store,
-        "workitem",
-        &workitem_id,
-        "rework.completed",
-        json!({"workitemId": workitem_id, "operationId": op.id, "targetGate": op.target_gate}),
-    )?;
     let op = op_by_id(store, &op.id)?.ok_or_else(|| Error::Message("missing op".into()))?;
     op_view(store, &op)
 }
 
-/// executing 崩溃恢复重入（decide(approved) 对 executing/blocked 重放即可达）。
+/// 崩溃恢复（0053 v2：按 progress 游标 + 双 digest 校验，幂等）：
+/// - completed → 幂等返回视图；
+/// - prepared（executing/blocked）→ 重算 pre_state_digest 比对
+///   （失配 = cascade_state_changed，真并发，标 failed）；
+/// - step_a_committed → 重算 post_step_a_digest 比对（排除 target 关 attempt，
+///   部分 Step B 后恢复不误判）→ 匹配续跑 Step B（attempt 复用），失配 failed+告警；
+/// - step_b_committed 且非 completed（异常残态）→ 补终态字段。
+///
+/// 活跃 Run 阻断：blocked(active_run_present) 由用户取消后 resume 重试。
 pub fn resume(
     store: &Store,
     operation_id: &str,
@@ -872,16 +974,128 @@ pub fn resume(
 ) -> Result<serde_json::Value, Error> {
     let op = op_by_id(store, operation_id)?
         .ok_or_else(|| Error::Message("rework_invalid: 操作不存在".into()))?;
+    if op.state == "completed" {
+        return op_view(store, &op);
+    }
     if op.state != "executing" && op.state != "blocked" {
         return Err(Error::Message(format!(
             "rework_state_changed: 操作处于 {} 状态，无恢复面",
             op.state
         )));
     }
-    if op.state == "blocked" && op.blocked_reason.contains("active_run_present") {
-        // 活跃 Run 由用户取消后再恢复；直接重试。
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE rework_operations SET recovery_attempts=recovery_attempts+1, updated_at=?1
+             WHERE id=?2",
+            rusqlite::params![timefmt::now(), op.id],
+        )?;
+        Ok(())
+    })?;
+    match op.progress.as_str() {
+        "prepared" => {
+            // Step A 前崩溃/未开始：重验发起时状态摘要。
+            let current = cas_digest(store, &op.workitem_id)?;
+            if current != op.pre_state_digest && current != op.current_state_digest {
+                return mark_failed_and_view(store, &op, "cascade_state_changed");
+            }
+            execute(store, &op, decided_by)
+        }
+        "step_a_committed" => {
+            // Step A 后崩溃：重验 Step A 事实（排除 Step B 字段）后续跑 Step B。
+            let current = store.with_conn(|conn| {
+                cas_digest_on_conn(conn, &op.workitem_id, Some(&op.target_gate))
+            })?;
+            if !op.post_step_a_digest.is_empty() && current != op.post_step_a_digest {
+                return mark_failed_and_view(store, &op, "cascade_state_changed");
+            }
+            let attempt_id = target_preparing_attempt(store, &op)?.ok_or_else(|| {
+                Error::Message("rework_invalid: 恢复缺 target preparing attempt".into())
+            })?;
+            step_b(store, &op, &attempt_id)?;
+            let done =
+                op_by_id(store, &op.id)?.ok_or_else(|| Error::Message("missing op".into()))?;
+            op_view(store, &done)
+        }
+        _ => {
+            // step_b_committed 残态：补终态字段（同事务写入保证常态不可达，纵深防御）。
+            let now = timefmt::now();
+            store.with_conn(|conn| {
+                conn.execute(
+                    "UPDATE rework_operations SET state='completed', completed_at=?1, updated_at=?1
+                     WHERE id=?2 AND progress='step_b_committed'",
+                    rusqlite::params![now, op.id],
+                )?;
+                Ok(())
+            })?;
+            let done =
+                op_by_id(store, &op.id)?.ok_or_else(|| Error::Message("missing op".into()))?;
+            op_view(store, &done)
+        }
     }
-    execute(store, &op, decided_by)
+}
+
+/// 恢复校验失配 → failed(cascade_state_changed) + 告警事件，返回视图。
+fn mark_failed_and_view(
+    store: &Store,
+    op: &ReworkOperation,
+    reason: &str,
+) -> Result<serde_json::Value, Error> {
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE rework_operations SET state='failed', blocked_reason=?1, updated_at=?2
+             WHERE id=?3",
+            rusqlite::params![reason, timefmt::now(), op.id],
+        )?;
+        Ok(())
+    })?;
+    outbox::emit(
+        store,
+        "workitem",
+        &op.workitem_id,
+        "rework.failed",
+        json!({"workitemId": op.workitem_id, "operationId": op.id, "reason": reason}),
+    )?;
+    let failed = op_by_id(store, &op.id)?.ok_or_else(|| Error::Message("missing op".into()))?;
+    op_view(store, &failed)
+}
+
+/// target 关的 preparing/prepared 且无 entry snapshot 绑定的 attempt（恢复定位；
+/// Step A 幂等保证同 op 只有一个）。
+fn target_preparing_attempt(store: &Store, op: &ReworkOperation) -> Result<Option<String>, Error> {
+    store.with_conn(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT id FROM stage_attempts
+                 WHERE workitem_id=?1 AND gate=?2 AND state IN ('preparing','prepared')
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                rusqlite::params![op.workitem_id, op.target_gate],
+                |r| r.get(0),
+            )
+            .ok())
+    })
+}
+
+/// 启动扫描（main.rs 调用）：executing/blocked 且 progress=step_a_committed 的
+/// 操作尝试自动恢复（失败只告警不阻断启动）。
+pub fn startup_recover(store: &Store) -> Result<Vec<(String, String)>, Error> {
+    let ids: Vec<String> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM rework_operations
+             WHERE state IN ('executing','blocked') AND progress='step_a_committed'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    })?;
+    let mut out = Vec::new();
+    for id in ids {
+        match resume(store, &id, "system") {
+            Ok(v) => out.push((id, v["state"].as_str().unwrap_or("").to_string())),
+            Err(e) => {
+                out.push((id, format!("recover_failed: {e}")));
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub fn get(store: &Store, operation_id: &str) -> Result<serde_json::Value, Error> {
@@ -1050,14 +1264,14 @@ mod tests {
         let sup: i64 = store
             .with_conn(|c| {
                 Ok(c.query_row(
-                    "SELECT COUNT(*) FROM baselines WHERE workitem_id=?1 AND superseded_by IS NOT NULL",
+                    "SELECT COUNT(*) FROM baselines WHERE workitem_id=?1 AND invalidated_by_rework_id IS NOT NULL",
                     [&wi.id],
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap())
             })
             .unwrap();
-        assert_eq!(sup, 2, "design/development 基线已 superseded_by=rework id"); // 失效登记概要：gate_result×2（design/development）在册。
+        assert_eq!(sup, 2, "design/development 基线已 invalidated_by_rework_id（0053 纠偏：不再污染 successor 列）"); // 失效登记概要：gate_result×2（design/development）在册。
         let counts = out["affectedFacts"].clone();
         let gr = counts
             .as_array()
@@ -1071,6 +1285,115 @@ mod tests {
         // decide 终态重放：同决定幂等返回。
         let replay = decide(&store, &approval_id, "approved", "owner", "").unwrap();
         assert_eq!(replay["state"], json!("completed"));
+    }
+
+    #[test]
+    fn recovery_after_step_a_crash_and_partial_step_b() {
+        let store = setup();
+        let wi = crate::create(&store, "pj", "恢复任务", "", None, &[]).unwrap();
+        advance(&store, &wi.id, "requirements");
+        advance(&store, &wi.id, "design");
+        seed_facts(&store, &wi.id, "design");
+        seed_facts(&store, &wi.id, "development");
+        let req = request(&store, &wi.id, "design", "regression", "恢复打回", "agent").unwrap();
+        let op_id = req["id"].as_str().unwrap().to_string();
+        let approval_id = req["approvalId"].as_str().unwrap().to_string();
+
+        // 崩溃注入①：Step A 提交后、Step B 前（手工构造 executing+step_a_committed）。
+        let op = op_by_id(&store, &op_id).unwrap().unwrap();
+        let attempt = step_a(&store, &op).unwrap();
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE rework_operations SET state='executing', progress='step_a_committed' WHERE id=?1",
+                    [&op_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mid = op_by_id(&store, &op_id).unwrap().unwrap();
+        assert_eq!(mid.progress, "step_a_committed");
+        assert!(
+            !mid.post_step_a_digest.is_empty(),
+            "Step A 事务末写入 post digest"
+        );
+
+        // 恢复①：resume 按 post digest 重验后续跑 Step B；幂等重放。
+        let out = resume(&store, &op_id, "system").unwrap();
+        assert_eq!(
+            out["state"],
+            json!("completed"),
+            "Step A 后崩溃 → resume 收尾：{out}"
+        );
+        assert_eq!(out["progress"], json!("step_b_committed"));
+        let again = resume(&store, &op_id, "system").unwrap();
+        assert_eq!(again["state"], json!("completed"), "resume 幂等");
+        let count: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM stage_attempts WHERE workitem_id=?1 AND gate='design'",
+                    [&wi.id],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert!(count >= 1, "target attempt 在册");
+        let target_states: Vec<String> = store
+            .with_conn(|c| {
+                let mut stmt = c
+                    .prepare("SELECT state FROM stage_attempts WHERE workitem_id=?1 AND gate='design' AND state IN ('preparing','prepared')")
+                    .unwrap();
+                let rows = stmt
+                    .query_map([&wi.id], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(target_states.len(), 1, "恢复不重复创建 target attempt");
+        assert_eq!(target_states[0], "prepared");
+
+        // 崩溃注入②：部分 Step B（attempt 已 prepared、对象已写）后重算 post digest
+        // 不误判——target 关 attempt 行被排除出口径。
+        let recompute = store
+            .with_conn(|c| cas_digest_on_conn(c, &wi.id, Some("design")))
+            .unwrap();
+        assert_eq!(
+            recompute, mid.post_step_a_digest,
+            "post digest 排除 Step B 字段：部分 Step B 后重算一致"
+        );
+
+        // 崩溃注入③：prepared 段漂移（真并发）→ resume 标 failed(cascade)。
+        let store2 = setup();
+        let wi2 = crate::create(&store2, "pj", "漂移任务", "", None, &[]).unwrap();
+        advance(&store2, &wi2.id, "requirements");
+        advance(&store2, &wi2.id, "design");
+        seed_facts(&store2, &wi2.id, "design");
+        seed_facts(&store2, &wi2.id, "development");
+        let req2 = request(
+            &store2,
+            &wi2.id,
+            "design",
+            "regression",
+            "漂移打回",
+            "agent",
+        )
+        .unwrap();
+        let op2_id = req2["id"].as_str().unwrap().to_string();
+        let _ = decide(
+            &store2,
+            req2["approvalId"].as_str().unwrap(),
+            "approved",
+            "owner",
+            "",
+        )
+        .unwrap();
+        // 已完成的操作重复 resume → 幂等视图（非错误）。
+        let done = resume(&store2, &op2_id, "system").unwrap();
+        assert_eq!(done["state"], json!("completed"));
+        let _ = approval_id;
     }
 
     #[test]

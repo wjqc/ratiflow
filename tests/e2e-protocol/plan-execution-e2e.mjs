@@ -159,7 +159,7 @@ async function main() {
 
     // 反向 2：非法 autonomyGrantId 在 agent.start 即拒绝（fail-closed）。
     await expectErrorContains(
-      () => c.call('agent.start', { workItemId: wi.id, goal: 'g', autonomyGrantId: 'g-nonexistent' }),
+      () => c.call('agent.start', { workItemId: wi.id, goal: 'g', autonomyGrantId: 'g-nonexistent', idempotencyKey: 'pe-run-bad' }),
       'autonomyGrant',
       '非法 autonomyGrantId 拒绝启动',
     );

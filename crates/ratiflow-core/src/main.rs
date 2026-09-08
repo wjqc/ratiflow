@@ -19,6 +19,7 @@ mod automation_dispatch;
 mod commands;
 mod memory_dispatch;
 mod migrate;
+mod mutation_registry;
 mod plan_dispatch;
 mod plan_runtime;
 mod settings_dispatch;
@@ -180,6 +181,34 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
             Err(e) => eprintln!("{{\"level\":\"warn\",\"msg\":\"automation reconcile: {e}\"}}"),
         }
     }
+    // P0-4（0053）：rework 崩溃恢复启动扫描——executing/blocked 且
+    // progress=step_a_committed 的操作按双 digest 重验后续跑 Step B
+    // （失败只告警不阻断启动）。
+    if std::env::var("RATIFLOW_REWORK").ok().as_deref() == Some("1") {
+        match sg_workitem::rework::startup_recover(&store) {
+            Ok(list) if !list.is_empty() => {
+                for (id, outcome) in &list {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"msg\":\"rework startup recover: {id} -> {outcome}\"}}"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("{{\"level\":\"warn\",\"msg\":\"rework startup recover: {e}\"}}"),
+        }
+    }
+    // P0-4：对象 orphan GC 引用扫描（默认只报告清单；RATIFLOW_OBJECTS_GC_PRUNE=1
+    // 时清理——Step B 对象写成功但 DB 失败留下的无引用对象）。
+    match sg_store::objects::gc_scan(&store) {
+        Ok(report) if !report.orphans.is_empty() => {
+            eprintln!(
+                "{{\"level\":\"info\",\"msg\":\"objects gc: {}/{} orphan candidates (pruned {}, set RATIFLOW_OBJECTS_GC_PRUNE=1 to prune)\"}}",
+                report.orphans.len(), report.total, report.pruned
+            );
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("{{\"level\":\"warn\",\"msg\":\"objects gc scan: {e}\"}}"),
+    }
     // Agent Run 启动对账：崩溃/重启遗留的 queued/running 标 failed(interrupted)，
     // 前端轮询立即见终态，不再挂满超时窗口。
     match sg_agent::reconcile_interrupted(&store) {
@@ -319,6 +348,20 @@ async fn run_server(store: Store, run_store: Arc<Store>, core_version: &'static 
                         }
                     }
                     _ => {}
+                }
+                // P0-5：durable run intent 消费（claim/lease → agent.start 装配入口 →
+                // consumed+run_id；失败按 transient/deterministic 收敛）。
+                let app_consumer = app_timer.clone();
+                let consumed = app_timer
+                    .db
+                    .call(move |store| {
+                        automation_dispatch::consume_pending_intents(&app_consumer, store)
+                    })
+                    .await;
+                if let Ok(Ok(items)) = consumed {
+                    for (id, status) in &items {
+                        eprintln!("{{\"level\":\"info\",\"msg\":\"run_intent {id} -> {status}\"}}");
+                    }
                 }
             }
         });

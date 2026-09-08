@@ -178,9 +178,10 @@ async function main() {
       );
 
       // 5) manual_confirm 链：请求（审批挂起）→ 决定 confirmed → evaluate 解阻。
-      const req1 = await c.call('gate.requestManualConfirmation', { workItemId: wi.id, gate: 'confirm', element: MANUAL_ELEMENT, requestedBy: 'agent', reason: '请人工复核' });
+      const req1 = await c.call('gate.requestManualConfirmation', { workItemId: wi.id, gate: 'confirm', element: MANUAL_ELEMENT, requestedBy: 'agent', reason: '请人工复核', idempotencyKey: 'mc-1' });
       assert(req1.state === 'requested' && req1.approval_status === 'requested', '确认单+审批挂起');
-      const replay = await c.call('gate.requestManualConfirmation', { workItemId: wi.id, gate: 'confirm', element: MANUAL_ELEMENT, requestedBy: 'agent', reason: '' });
+      // P0-1：异 key 同 attempt 同元素 → 领域幂等返回既有确认单（同 key 则为 transport 重放）。
+      const replay = await c.call('gate.requestManualConfirmation', { workItemId: wi.id, gate: 'confirm', element: MANUAL_ELEMENT, requestedBy: 'agent', reason: '', idempotencyKey: 'mc-2' });
       assert(replay.id === req1.id, '同 attempt 同元素请求幂等（返回既有确认单）');
       ev = await c.call('gate.evaluate', { workItemId: wi.id, gate: 'confirm' });
       assert(ev.passed === false, '仅请求未决定 → 仍不通过');
@@ -198,7 +199,7 @@ async function main() {
 
       // 6) 拒绝路径：第二个工作项 rejected → manual_confirm 仍 fail。
       const wi2 = await c.call('workitem.create', { projectId: pj, title: '拒绝路径任务', templateId: 'acc-demo' });
-      const req2 = await c.call('gate.requestManualConfirmation', { workItemId: wi2.id, gate: 'confirm', element: MANUAL_ELEMENT, requestedBy: 'agent', reason: '' });
+      const req2 = await c.call('gate.requestManualConfirmation', { workItemId: wi2.id, gate: 'confirm', element: MANUAL_ELEMENT, requestedBy: 'agent', reason: '', idempotencyKey: 'mc-3' });
       await c.call('approval.decide', { approvalId: req2.approval_id, decision: 'rejected', decidedBy: 'owner', reason: '不同意' });
       const ev2 = await c.call('gate.evaluate', { workItemId: wi2.id, gate: 'confirm' });
       assert(ev2.passed === false && ev2.failed_inputs.some((t) => t.startsWith('acceptance:manual_confirm')), 'rejected 不放行');

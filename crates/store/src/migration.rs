@@ -105,6 +105,30 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         49,
         include_str!("../migrations/0049_knowledge_verification_receipts.sql"),
     ),
+    (
+        50,
+        include_str!("../migrations/0050_rdws_mutation_receipts.sql"),
+    ),
+    (
+        51,
+        include_str!("../migrations/0051_shadow_automation_policy_v2.sql"),
+    ),
+    (
+        52,
+        include_str!("../migrations/0052_gate_skip_operations_v2.sql"),
+    ),
+    (
+        53,
+        include_str!("../migrations/0053_rework_recovery_v2.sql"),
+    ),
+    (
+        54,
+        include_str!("../migrations/0054_knowledge_verification_v2.sql"),
+    ),
+    (
+        55,
+        include_str!("../migrations/0055_durable_run_intents.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

@@ -26,7 +26,6 @@ export type RpcMethodName =
   | 'attachment.remove'
   | 'workitem.list'
   | 'workitem.archive'
-  | 'workitem.archive'
   | 'workitem.create'
   | 'workitem.progress'
   | 'workitem.documents'
@@ -144,10 +143,15 @@ export type RpcMethodName =
   | 'gate.requestManualConfirmation'
   | 'gate.manualConfirmations'
   | 'gate.requestSkip'
+  | 'gate.decideSkip'
+  | 'gate.resumeSkip'
+  | 'gate.applyWaiver'
+  | 'gate.revokeWaiver'
   | 'gate.evaluateFastTrack'
   | 'rework.preview'
   | 'rework.request'
   | 'rework.decide'
+  | 'rework.resume'
   | 'rework.get'
   | 'rework.list'
   | 'metrics.overview'
@@ -318,7 +322,6 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'attachment.remove',
   'workitem.list',
   'workitem.archive',
-  'workitem.archive',
   'workitem.create',
   'workitem.progress',
   'workitem.documents',
@@ -436,10 +439,15 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'gate.requestManualConfirmation',
   'gate.manualConfirmations',
   'gate.requestSkip',
+  'gate.decideSkip',
+  'gate.resumeSkip',
+  'gate.applyWaiver',
+  'gate.revokeWaiver',
   'gate.evaluateFastTrack',
   'rework.preview',
   'rework.request',
   'rework.decide',
+  'rework.resume',
   'rework.get',
   'rework.list',
   'metrics.overview',
@@ -832,11 +840,6 @@ export interface WorkitemArchiveParams {
   workItemId: string;
 }
 
-export interface WorkitemArchiveParams {
-  workItemId: string;
-  archived?: boolean;
-}
-
 export interface WorkitemCreateParams {
   projectId: string;
   title: string;
@@ -920,10 +923,10 @@ export interface AgentStartParams {
   workItemId: string;
   goal: string;
   contextManifestId: string;
+  idempotencyKey: string;
   toolAllowlist?: unknown[];
   budget?: unknown;
   taskId?: string;
-  idempotencyKey?: string;
 }
 
 export interface AgentGetParams {
@@ -1406,6 +1409,7 @@ export interface GateRequestManualConfirmationParams {
   gate: string;
   element: unknown;
   requestedBy: string;
+  idempotencyKey: string;
   reason?: string;
 }
 
@@ -1419,12 +1423,46 @@ export interface GateRequestSkipParams {
   gateId: string;
   waiver: string;
   substituteEvidenceIds: unknown[];
+  idempotencyKey: string;
+  expectedStateDigest?: string;
+}
+
+export interface GateDecideSkipParams {
+  approvalId: string;
+  decision: string;
+  decidedBy: string;
+  idempotencyKey: string;
+  reason?: string;
+}
+
+export interface GateResumeSkipParams {
+  skipRequestId: string;
+  idempotencyKey: string;
+}
+
+export interface GateApplyWaiverParams {
+  workItemId: string;
+  gate: string;
+  waivedKind: string;
+  substituteEvidenceId: string;
+  decidedBy: string;
+  idempotencyKey: string;
+  rationale?: string;
+  suggestionId?: string;
+}
+
+export interface GateRevokeWaiverParams {
+  waiverId: string;
+  revokedBy: string;
+  idempotencyKey: string;
+  reason?: string;
 }
 
 export interface GateEvaluateFastTrackParams {
   workItemId: string;
   gate: string;
-  factors: unknown;
+  idempotencyKey: string;
+  expectedStateDigest?: string;
 }
 
 export interface ReworkPreviewParams {
@@ -1439,6 +1477,7 @@ export interface ReworkRequestParams {
   workItemId: string;
   targetGate: string;
   reasonCode: string;
+  idempotencyKey: string;
   note?: string;
   requestedBy?: string;
 }
@@ -1447,7 +1486,14 @@ export interface ReworkDecideParams {
   approvalId: string;
   decision: string;
   decidedBy: string;
+  idempotencyKey: string;
   reason?: string;
+}
+
+export interface ReworkResumeParams {
+  operationId: string;
+  idempotencyKey: string;
+  resumedBy?: string;
 }
 
 export interface ReworkGetParams {
@@ -1464,12 +1510,15 @@ export interface MetricsOverviewParams {
 
 export type TriageListParams = Record<string, never>;
 
-export type WorkitemSearchRebuildParams = Record<string, never>;
+export interface WorkitemSearchRebuildParams {
+  idempotencyKey: string;
+}
 
 export interface AutomationSetShadowModeParams {
   automationId: string;
   shadowMode: boolean;
   expectedRevision: unknown;
+  idempotencyKey: string;
 }
 
 export interface WorkitemSimilarParams {
@@ -1478,10 +1527,12 @@ export interface WorkitemSimilarParams {
 
 export interface KnowledgeVerifySourceParams {
   projectId: string;
-  stableId: string;
+  sourceId: string;
   outcome: string;
   verifier: string;
+  idempotencyKey: string;
   evidenceRef?: string;
+  verificationOpId?: string;
 }
 
 export interface KnowledgeFreshnessOverviewParams {
@@ -1535,11 +1586,11 @@ export interface StageStartActivityParams {
   workItemId: string;
   gate: string;
   goal: string;
+  idempotencyKey: string;
   activityKey?: string;
   profileVersionId?: string;
   requiredCapabilities?: unknown[];
   toolAllowlist?: unknown[];
-  idempotencyKey?: string;
 }
 
 export interface AgentProfileListParams {
@@ -2133,6 +2184,7 @@ export interface AutomationDecideSuggestionParams {
   decision: string;
   decidedBy: string;
   note: string;
+  idempotencyKey: string;
 }
 
 export interface AutomationReviewSuggestionParams {
@@ -2140,6 +2192,7 @@ export interface AutomationReviewSuggestionParams {
   falsePositive: boolean;
   reviewer: string;
   note: string;
+  idempotencyKey: string;
 }
 
 export interface AutomationObservationsParams {

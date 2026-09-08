@@ -177,3 +177,80 @@ fn sniff_content_type(body: &[u8]) -> String {
     }
     "text/plain; charset=utf-8".into()
 }
+
+/// P0-4/0053：对象 orphan GC 引用扫描（v1.4 §WP-9「orphan 边界」）。
+///
+/// 引用集 = 库内全部「存对象内容摘要」的列（REFS_SQL 枚举）。**新增含对象
+/// 引用的表必须同步登记**，否则其对象会被误报 orphan——报告只读误报无副作用；
+/// 清理受 `RATIFLOW_OBJECTS_GC_PRUNE=1` 门控（默认只出清单+审计 manifest）。
+/// orphan 来源：Step B 对象 CAS put 成功但 DB 提交失败等窗口（内容寻址全局
+/// 去重，无害），由启动扫描回收。
+pub struct GcReport {
+    pub total: i64,
+    pub orphans: Vec<String>,
+    pub pruned: usize,
+}
+
+/// 全部对象引用列（并集；空串跳过）。
+const REFS_SQL: &str = "
+    SELECT control_manifest_sha256 AS s FROM state_snapshots WHERE control_manifest_sha256 != ''
+    UNION SELECT workspace_manifest_sha256 FROM state_snapshots WHERE workspace_manifest_sha256 != ''
+    UNION SELECT external_manifest_sha256 FROM state_snapshots WHERE external_manifest_sha256 != ''
+    UNION SELECT object_sha256 FROM snapshot_resources WHERE object_sha256 != ''
+    UNION SELECT object_sha256 FROM evidences WHERE object_sha256 != ''
+    UNION SELECT object_sha256 FROM requirement_revisions WHERE object_sha256 != ''
+    UNION SELECT object_sha256 FROM knowledge_chunks WHERE object_sha256 != ''
+    UNION SELECT object_sha256 FROM attachments WHERE object_sha256 != ''
+    UNION SELECT extracted_object_sha256 FROM attachments WHERE extracted_object_sha256 != ''
+    UNION SELECT object_sha256 FROM memory_revisions WHERE object_sha256 IS NOT NULL AND object_sha256 != ''
+    UNION SELECT persona_object_sha256 FROM agent_profile_versions WHERE persona_object_sha256 != ''
+    UNION SELECT sop_object_sha256 FROM agent_profile_versions WHERE sop_object_sha256 != ''
+    UNION SELECT body_object_sha256 FROM skill_versions WHERE body_object_sha256 != ''
+    UNION SELECT content_sha256 FROM revisions WHERE content_sha256 != ''
+    UNION SELECT manifest_object_sha256 FROM stage_output_packages WHERE manifest_object_sha256 != ''
+";
+
+pub fn gc_scan(store: &Store) -> Result<GcReport, Error> {
+    let orphans: Vec<String> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT o.sha256 FROM objects o
+             WHERE o.sha256 NOT IN ({REFS_SQL})
+             ORDER BY o.created_at, o.sha256"
+        ))?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    })?;
+    let total: i64 = store
+        .with_conn(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM objects", [], |r| r.get(0))?))?;
+    let mut report = GcReport {
+        total,
+        orphans: orphans.clone(),
+        pruned: 0,
+    };
+    if std::env::var("RATIFLOW_OBJECTS_GC_PRUNE").ok().as_deref() == Some("1") {
+        for sum in &orphans {
+            let path = object_path(store, sum);
+            let _ = std::fs::remove_file(&path);
+            store.with_conn(|conn| {
+                conn.execute("DELETE FROM objects WHERE sha256=?1", [sum])?;
+                Ok(())
+            })?;
+            report.pruned += 1;
+        }
+        if !orphans.is_empty() {
+            crate::audit::append(
+                store,
+                "system",
+                "objects.gc_pruned",
+                "objects",
+                "gc",
+                serde_json::json!({
+                    "pruned": report.pruned,
+                    "manifest": orphans,
+                }),
+            )
+            .ok();
+        }
+    }
+    Ok(report)
+}

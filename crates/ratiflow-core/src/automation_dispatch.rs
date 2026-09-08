@@ -50,6 +50,9 @@ fn record_shadow_tick(
             content: serde_json::json!({"intent": intent, "scheduledFor": scheduled_for}),
             hypothetical_action_digest: &hypothetical,
             policy_version: "sp1",
+            // P0-5 将冻结 metric/intent 快照摘要；当前 tick 建议无输入状态语义。
+            input_state_digest: "",
+            expires_at: None,
             model: "",
             prompt_version: "",
         },
@@ -169,15 +172,21 @@ fn fire_one_inner(
         .map_err(Error::from)
     })?;
     if shadow_mode == 0 {
-        let (decided, fp, rate) = sg_workflow::automation::shadow_false_positive_stats(
+        // P0-5 修正口径：分母=已复核已决（reviewed），coverage=已复核/已决；
+        // 两窗迟滞 + metric digest 冻结 + expected revision CAS（force_shadow_mode_v2）。
+        let (decided, reviewed, fp, rate, coverage) =
+            sg_workflow::automation::shadow_false_positive_stats(
+                store,
+                automation_id,
+                sg_workflow::automation::shadow_window_days(),
+            )?;
+        let (_breach, fell_back) = sg_workflow::automation::force_shadow_mode_v2(
             store,
             automation_id,
+            (decided, reviewed, fp, rate, coverage),
             sg_workflow::automation::shadow_window_days(),
         )?;
-        if decided >= sg_workflow::automation::shadow_min_sample()
-            && rate > sg_workflow::automation::shadow_fp_threshold()
-        {
-            sg_workflow::automation::force_shadow_mode(store, automation_id)?;
+        if fell_back {
             record_shadow_tick(store, automation_id, scheduled_for, &intent, &workitem_id)?;
             sg_workflow::automation::record_intent(
                 store,
@@ -186,14 +195,14 @@ fn fire_one_inner(
                 "shadow_fallback",
                 None,
                 &format!(
-                    "误报率 {rate:.2}>{:.2}（{fp}/{decided}），自动回 shadow",
+                    "两窗误报率 {rate:.2}>{:.2}（{fp}/{reviewed}，coverage {coverage:.2}），自动回 shadow",
                     sg_workflow::automation::shadow_fp_threshold()
                 ),
             )?;
             sg_workflow::automation::reschedule(store, automation_id, &now)?;
             return Ok((
                 "shadow_fallback".into(),
-                format!("false_positive_rate {fp}/{decided}"),
+                format!("false_positive_rate {fp}/{reviewed} coverage {coverage:.2}"),
             ));
         }
     } else {
@@ -236,15 +245,29 @@ fn fire_one_inner(
         sg_workflow::automation::reschedule(store, automation_id, &now)?;
         return Ok(("blocked_no_grant".into(), e.to_string()));
     }
-    // 意图创建（Run 创建由 Goal 执行器消费 intent；此处只落账+事件）。
-    let run_intent_id = sg_store::ids::new_id("rint");
+    // P0-5：durable run intent 入队（消费链权威——崩溃/重启不丢意图；
+    // 幂等键 ri|automation|scheduled_for；grant/策略冻结进意图）。
+    let grant_digest = format!("grant|{grant_id}");
+    let run_intent_id = sg_workflow::automation::enqueue_run_intent(
+        store,
+        automation_id,
+        if workitem_id.is_empty() {
+            None
+        } else {
+            Some(&workitem_id)
+        },
+        scheduled_for,
+        &intent,
+        &grant_digest,
+        "sp2",
+    )?;
     sg_workflow::automation::record_intent(
         store,
         automation_id,
         scheduled_for,
         "intent_created",
         Some(&run_intent_id),
-        "RunIntent 已创建（消费侧经既有装配/审批链）",
+        "RunIntent 已入队（consumer 经既有 agent.start 装配/审批链消费）",
     )?;
     sg_workflow::automation::reschedule(store, automation_id, &now)?;
     let workitem = if workitem_id.is_empty() {
@@ -278,4 +301,128 @@ pub fn fire_due(store: &Store) -> Result<Vec<(String, String, String)>, Error> {
         out.push((a.id.clone(), status, note));
     }
     Ok(out)
+}
+
+/// P0-5：durable run intent 消费者（timer tick 调用；在 DB actor 上串行执行）。
+/// 链路：claim（lease CAS）→ 复用既有 `agent.start` 装配入口（不直接调
+/// Provider/Tool、不推进 Gate；idempotency_key=run_intent 的操作键——
+/// transport receipt 幂等，同 intent 重放不双跑）→ consumed + run_id 回填。
+/// deterministic 失败 → cancelled；transient → attempt+1 回 pending（上限 3 → unknown）。
+pub fn consume_pending_intents(
+    state: &crate::state::AppState,
+    store: &Store,
+) -> Result<Vec<(String, String)>, Error> {
+    reconcile_stale_intents(store)?;
+    let pending: Vec<String> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM run_intents WHERE state='pending' ORDER BY created_at LIMIT 5",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    })?;
+    let mut out = Vec::new();
+    for id in pending {
+        // claim：pending → claimed（CAS）。
+        let claimed = store.with_conn(|conn| {
+            conn.execute(
+                "UPDATE run_intents SET state='claimed', claimed_by=?1, attempt=attempt+1,
+                        lease_expires_at=?2, updated_at=?2
+                 WHERE id=?3 AND state='pending'",
+                rusqlite::params![
+                    format!("consumer:{}", std::process::id()),
+                    sg_store::timefmt::now_plus_minutes(1),
+                    id
+                ],
+            )?;
+            Ok(conn.changes() == 1)
+        })?;
+        if !claimed {
+            continue; // 并发或状态已变
+        }
+        let (intent_json, workitem_id, idem, attempt): (String, String, String, i64) = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT intent_json, COALESCE(workitem_id,''), idempotency_key, attempt
+                     FROM run_intents WHERE id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .map_err(Error::from)
+            })?;
+        let intent: Value = serde_json::from_str(&intent_json).unwrap_or_else(|_| json!({}));
+        let goal = intent
+            .get("goal")
+            .and_then(|g| g.as_str())
+            .unwrap_or("automation tick")
+            .to_string();
+        let params = json!({
+            "workItemId": workitem_id,
+            "goal": goal,
+            "idempotencyKey": idem,
+        });
+        let result = crate::dispatch::dispatch(state, store, "agent.start", &params);
+        match result {
+            Ok(resp) => {
+                let run_id = resp
+                    .get("runId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                store.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE run_intents SET state='consumed', run_id=?1, lease_expires_at=NULL,
+                                blocked_reason='', updated_at=?2 WHERE id=?3 AND state='claimed'",
+                        rusqlite::params![run_id, sg_store::timefmt::now(), id],
+                    )?;
+                    Ok(())
+                })?;
+                out.push((id.clone(), format!("consumed run {run_id}")));
+            }
+            Err(e) => {
+                let transient = e.err_class() == sg_protocol::ErrClass::Transient;
+                let (new_state, reason) = if transient && attempt < 3 {
+                    ("pending", format!("transient: {e}"))
+                } else if transient {
+                    ("unknown", format!("transient x{attempt}: {e}"))
+                } else {
+                    ("cancelled", format!("deterministic: {e}"))
+                };
+                store.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE run_intents SET state=?1, blocked_reason=?2, lease_expires_at=NULL,
+                                updated_at=?3 WHERE id=?4 AND state='claimed'",
+                        rusqlite::params![new_state, reason, sg_store::timefmt::now(), id],
+                    )?;
+                    Ok(())
+                })?;
+                let note = format!("run_intent {new_state}: {reason}");
+                let _ = store.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE automation_runs SET status='failed', note=?1
+                         WHERE run_intent_id=?2",
+                        rusqlite::params![note, id],
+                    )?;
+                    Ok(())
+                });
+                out.push((id.clone(), new_state.to_string()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// P0-5：租约对账——claimed 且租约过期的意图收敛 unknown（启动/tick 共用；
+/// 不自动重试——对账状态交人工/策略处置）。
+pub fn reconcile_stale_intents(store: &Store) -> Result<usize, Error> {
+    let now = sg_store::timefmt::now();
+    store.with_conn(|conn| {
+        let n = conn.execute(
+            "UPDATE run_intents SET state='unknown',
+                    blocked_reason='consumer lease expired（崩溃或超时）', lease_expires_at=NULL,
+                    updated_at=?1
+             WHERE state='claimed' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?1",
+            [&now],
+        )?;
+        Ok(n)
+    })
 }

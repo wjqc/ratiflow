@@ -93,7 +93,9 @@ fn kind_status(
     let baseline: Option<(String, String)> = store.with_conn(|conn| {
         Ok(conn
             .query_row(
-                "SELECT id, revision_map FROM baselines WHERE workitem_id=?1 AND gate=?2 AND superseded_by IS NULL ORDER BY frozen_at DESC LIMIT 1",
+                "SELECT id, revision_map FROM baselines WHERE workitem_id=?1 AND gate=?2
+                   AND superseded_by IS NULL AND invalidated_by_rework_id IS NULL
+                 ORDER BY frozen_at DESC LIMIT 1",
                 rusqlite::params![workitem_id, gate_id],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )

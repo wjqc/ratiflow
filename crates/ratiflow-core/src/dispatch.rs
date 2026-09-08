@@ -120,33 +120,6 @@ fn gate_skip_waiver_approval_id(
     })
 }
 
-/// WP-8：按 action_digest 查既有 gate_skip 审批（幂等重放）。
-fn gate_skip_existing_approval(
-    store: &Store,
-    digest: &str,
-) -> Result<Option<serde_json::Value>, Error> {
-    store.with_conn(|conn| {
-        match conn.query_row(
-            "SELECT id, status, reason, created_at FROM approvals
-             WHERE subject_type='gate_skip' AND action_digest=?1",
-            [digest],
-            |r| {
-                Ok(serde_json::json!({
-                    "approvalId": r.get::<_, String>(0)?,
-                    "state": r.get::<_, String>(1)?,
-                    "reason": r.get::<_, String>(2)?,
-                    "createdAt": r.get::<_, String>(3)?,
-                    "idempotentReplay": true,
-                }))
-            },
-        ) {
-            Ok(v) => Ok(Some(v)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(other) => Err(other.into()),
-        }
-    })
-}
-
 /// gate.decideRelease 的 RPC 体（评审 P1 修复抽出共享）：
 /// approval.decide 对 gate_release 主体必须路由到这里——digest 漂移复检（AC-SW-03）
 /// 只存在于 decide_release 治理链，通用 sg_policy::decide 会旁路它。
@@ -770,6 +743,21 @@ fn shadow_err(e: &sg_store::Error) -> RpcError {
 
 /// 分发一个 RPC 请求（在 DB actor 线程上执行；store 由 actor 提供）。
 pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -> RpcResult {
+    // P0-1（审计 §5.1/§7）：注册表门控——receipt 模式 mutation 缺 idempotencyKey
+    // 一律拒绝，先于任何子分发器/feature flag/handler 执行（含 settings_dispatch）。
+    if crate::mutation_registry::requires_receipt(method) {
+        let key_present = params
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        if !key_present {
+            return Err(RpcError::new(
+                ErrorCode::IdempotencyKeyRequired,
+                format!("{method}: receipt 门控 mutation 必须携带 idempotencyKey"),
+            ));
+        }
+    }
     if let Some(result) = crate::settings_dispatch::dispatch(state, store, method, params) {
         return result;
     }
@@ -2356,27 +2344,38 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
         // --- WP-7 结构化验收：manual_confirm 人工确认链（决定走 approval.decide 路由）---
         "gate.requestManualConfirmation" => {
-            let workitem_id = str_param(params, "workItemId")?;
-            let gate_name = str_param(params, "gate")?;
-            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
-                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
-            }
-            let element = params
-                .get("element")
-                .cloned()
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "missing param: element"))?;
-            let requested_by = str_param(params, "requestedBy")?;
-            let reason = opt_str_param(params, "reason").unwrap_or_default();
-            let confirmation = sg_workitem::manual_confirm::request(
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(
                 store,
-                &workitem_id,
-                &gate_name,
-                &element,
-                &requested_by,
-                &reason,
+                &idem,
+                "gate.requestManualConfirmation",
+                params,
+                || {
+                    let workitem_id = str_param(params, "workItemId")?;
+                    let gate_name = str_param(params, "gate")?;
+                    if !sg_workitem::gate_known(store, &workitem_id, &gate_name)
+                        .map_err(store_err)?
+                    {
+                        return Err(err(ErrorCode::InvalidParams, "unknown gate"));
+                    }
+                    let element = params
+                        .get("element")
+                        .cloned()
+                        .ok_or_else(|| err(ErrorCode::InvalidParams, "missing param: element"))?;
+                    let requested_by = str_param(params, "requestedBy")?;
+                    let reason = opt_str_param(params, "reason").unwrap_or_default();
+                    let confirmation = sg_workitem::manual_confirm::request(
+                        store,
+                        &workitem_id,
+                        &gate_name,
+                        &element,
+                        &requested_by,
+                        &reason,
+                    )
+                    .map_err(store_err)?;
+                    Ok(serde_json::to_value(confirmation).unwrap_or_default())
+                },
             )
-            .map_err(store_err)?;
-            Ok(serde_json::to_value(confirmation).unwrap_or_default())
         }
         "gate.manualConfirmations" => {
             let workitem_id = str_param(params, "workItemId")?;
@@ -2391,6 +2390,8 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
         // --- WP-8：gate.requestSkip——人工经审批跳关（flag=RATIFLOW_GATE_SKIP，
         //     默认 0；=0 禁止新建，存量 skipped 关照实返回 outcome 不退化）---
+        // --- WP-8/P0-3：跳关 operation v2（表 0052；策略/证据/状态/digest 冻结与
+        //     治理校验全部在 sg_workitem::skip::request——单一实现）---
         "gate.requestSkip" => {
             if std::env::var("RATIFLOW_GATE_SKIP").ok().as_deref() != Some("1") {
                 return Err(err(
@@ -2398,127 +2399,110 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     "feature_disabled: RATIFLOW_GATE_SKIP 未开启",
                 ));
             }
-            let workitem_id = str_param(params, "workItemId")?;
-            let gate_name = str_param(params, "gateId")?;
-            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
-                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
-            }
-            // 策略（实例冻结版本）：无声明或 forbidden → 拒；部署/迁移类恒 forbidden
-            //（创建面已拒，此处复核 = 纵深防御）。
-            let instance = sg_workflow::instance::for_workitem(store, &workitem_id)
-                .map_err(store_err)?
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "workflow instance missing"))?;
-            let defs =
-                sg_workflow::template::definitions_via_store(store, &instance.template_version_id)
-                    .map_err(store_err)?;
-            let def = defs
-                .iter()
-                .find(|d| d.gate_id == gate_name)
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "unknown gate"))?;
-            let manual_allowed = def
-                .skip_policy
-                .as_ref()
-                .map(|p| p.mode == sg_workflow::template::SkipMode::ManualApproval)
-                .unwrap_or(false);
-            let deployment_class = def
-                .deliverables
-                .iter()
-                .any(|k| sg_workflow::template::is_deployment_class_kind(k));
-            if !manual_allowed || deployment_class {
-                return Err(err(
-                    ErrorCode::ActionDenied,
-                    format!(
-                        "gate_skip_forbidden: 关 {gate_name} 的 skip 策略为 forbidden{}",
-                        if deployment_class {
-                            "（部署/迁移类恒 forbidden）"
-                        } else {
-                            ""
-                        }
-                    ),
-                ));
-            }
-            // 替代证据必填且须在案（本工作项证据面）。
-            let substitute_ids: Vec<String> = params
-                .get("substituteEvidenceIds")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if substitute_ids.is_empty() {
-                return Err(err(
-                    ErrorCode::InvalidParams,
-                    "substitute_evidence_missing: 替代证据必填",
-                ));
-            }
-            let known = sg_evidence::list(store, &workitem_id, None).map_err(store_err)?;
-            for id in &substitute_ids {
-                if !known.iter().any(|e| &e.id == id) {
-                    return Err(err(
-                        ErrorCode::InvalidParams,
-                        format!("substitute_evidence_missing: 证据 {id} 不存在"),
-                    ));
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "gate.requestSkip", params, || {
+                let workitem_id = str_param(params, "workItemId")?;
+                let gate_name = str_param(params, "gateId")?;
+                if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
+                    return Err(err(ErrorCode::InvalidParams, "unknown gate"));
                 }
-            }
-            let waiver = opt_str_param(params, "waiver").unwrap_or_default();
-            // digest = sha256(gate_skip|workitem|gate|waiver|排序后替代证据 ids)；UNIQUE 幂等。
-            let mut sorted_ids = substitute_ids.clone();
-            sorted_ids.sort();
-            let action_digest = format!("sha256:{}", {
-                use sha2::Digest;
-                sg_store::ids::hex(&sha2::Sha256::digest(
-                    format!(
-                        "gate_skip|{workitem_id}|{gate_name}|{waiver}|{}",
-                        sorted_ids.join(",")
-                    )
-                    .as_bytes(),
-                ))
-            });
-            // 幂等重放优先：同 digest 已有 gate_skip 审批 → 原样返回
-            //（不受当前阶段状态影响——已批跳关的重放返回已批审批而非误报状态冲突）。
-            if let Some(existing) =
-                gate_skip_existing_approval(store, &action_digest).map_err(store_err)?
-            {
-                return Ok(existing);
-            }
-            // 阶段须未开工（仅 (NotStarted, Skipped) 迁移；已开工 → 状态已变）。
-            let stage_state = sg_workitem::stages(store, &workitem_id)
-                .map_err(store_err)?
-                .into_iter()
-                .find(|s| s.gate == gate_name)
-                .map(|s| s.state)
-                .unwrap_or_default();
-            if stage_state != "not_started" {
+                let waiver = opt_str_param(params, "waiver").unwrap_or_default();
+                let substitute_ids: Vec<String> = params
+                    .get("substituteEvidenceIds")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                sg_workitem::skip::request(
+                    store,
+                    &workitem_id,
+                    &gate_name,
+                    &waiver,
+                    &substitute_ids,
+                    "local",
+                    opt_str_param(params, "expectedStateDigest").as_deref(),
+                )
+                .map_err(store_err)
+            })
+        }
+        // --- P0-3：gate.decideSkip 唯一决定入口（approval.decide 的 gate_skip
+        //     主体路由同实现）；决定时四要素 digest 重算，批准走两步执行 ---
+        "gate.decideSkip" => {
+            if std::env::var("RATIFLOW_GATE_SKIP").ok().as_deref() != Some("1") {
                 return Err(err(
-                    ErrorCode::Conflict,
-                    format!("gate_skip_state_changed: 关 {gate_name} 当前为 {stage_state}，仅未开工关可跳过"),
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_GATE_SKIP 未开启",
                 ));
             }
-            let attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, &gate_name)
-                .map_err(store_err)?;
-            let approval = sg_policy::request_approval(
-                store,
-                "gate_skip",
-                &attempt.id,
-                &action_digest,
-                sg_policy::Risk::High,
-                &waiver,
-                0,
-                Some(&workitem_id),
-                Some(&attempt.id),
-            )
-            .map_err(store_err)?;
-            Ok(json!({
-                "approvalId": approval.id,
-                "actionDigest": action_digest,
-                "state": "requested",
-                "risk": approval.risk,
-            }))
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "gate.decideSkip", params, || {
+                sg_workitem::skip::decide(
+                    store,
+                    &str_param(params, "approvalId")?,
+                    &str_param(params, "decision")?,
+                    &str_param(params, "decidedBy")?,
+                    &opt_str_param(params, "reason").unwrap_or_default(),
+                )
+                .map_err(store_err)
+            })
+        }
+        // --- P0-3：崩溃恢复入口（blocked/executing → 按 progress 幂等续跑 Step B）---
+        "gate.resumeSkip" => {
+            if std::env::var("RATIFLOW_GATE_SKIP").ok().as_deref() != Some("1") {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_GATE_SKIP 未开启",
+                ));
+            }
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "gate.resumeSkip", params, || {
+                sg_workitem::skip::resume(store, &str_param(params, "skipRequestId")?)
+                    .map_err(store_err)
+            })
+        }
+        // --- P0-3：豁免两动作（applyWaiver 受 flag 门控；revokeWaiver 是安全
+        //     收紧通道，flag 关闭也始终可用）---
+        "gate.applyWaiver" => {
+            if std::env::var("RATIFLOW_GATE_SKIP").ok().as_deref() != Some("1") {
+                return Err(err(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_GATE_SKIP 未开启",
+                ));
+            }
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "gate.applyWaiver", params, || {
+                sg_workitem::fast_track::apply_waiver(
+                    store,
+                    &str_param(params, "workItemId")?,
+                    &str_param(params, "gate")?,
+                    &str_param(params, "waivedKind")?,
+                    &str_param(params, "substituteEvidenceId")?,
+                    &opt_str_param(params, "rationale").unwrap_or_default(),
+                    opt_str_param(params, "suggestionId").as_deref(),
+                    &str_param(params, "decidedBy")?,
+                )
+                .map_err(store_err)
+            })
+        }
+        "gate.revokeWaiver" => {
+            // 不受 flag 门控：撤销豁免/作废 pending 是安全收紧动作（v1.4 回退语义）。
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "gate.revokeWaiver", params, || {
+                sg_workitem::fast_track::revoke_waiver(
+                    store,
+                    &str_param(params, "waiverId")?,
+                    &opt_str_param(params, "reason").unwrap_or_default(),
+                    &str_param(params, "revokedBy")?,
+                )
+                .map_err(store_err)
+            })
         }
         // --- WP-8 fast-track：六因素全真 → 建议落 shadow（不自动执行）；
-        //     采纳后的缩减经 decideSuggestion 钩子应用（活动缩减+交付物豁免）---
+        //     采纳后的缩减经 decideSuggestion 钩子应用（活动缩减+交付物豁免）。
+        //     P0-2：六因素服务端派生，客户端 factors 已废弃 ---
         "gate.evaluateFastTrack" => {
             if std::env::var("RATIFLOW_GATE_SKIP").ok().as_deref() != Some("1") {
                 return Err(err(
@@ -2526,31 +2510,59 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     "feature_disabled: RATIFLOW_GATE_SKIP 未开启",
                 ));
             }
-            let workitem_id = str_param(params, "workItemId")?;
-            let gate_name = str_param(params, "gate")?;
-            if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
-                return Err(err(ErrorCode::InvalidParams, "unknown gate"));
-            }
-            let factors: sg_workflow::template::FastTrackFactors = params
-                .get("factors")
-                .cloned()
-                .ok_or_else(|| err(ErrorCode::InvalidParams, "missing param: factors"))
-                .and_then(|v| {
-                    serde_json::from_value(v)
-                        .map_err(|e| err(ErrorCode::InvalidParams, format!("factors 非法：{e}")))
-                })?;
-            let suggestion = sg_workitem::fast_track::evaluate_and_suggest(
-                store,
-                &workitem_id,
-                &gate_name,
-                &factors,
-            )
-            .map_err(|e| shadow_err(&e))?;
-            Ok(serde_json::to_value(suggestion).unwrap_or_default())
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "gate.evaluateFastTrack", params, || {
+                let workitem_id = str_param(params, "workItemId")?;
+                let gate_name = str_param(params, "gate")?;
+                if !sg_workitem::gate_known(store, &workitem_id, &gate_name).map_err(store_err)? {
+                    return Err(err(ErrorCode::InvalidParams, "unknown gate"));
+                }
+                // P0-2：权威事实只在服务端派生（审计 §5.3）；携带 factors 一律拒绝。
+                if params.get("factors").is_some() {
+                    return Err(err(
+                        ErrorCode::InvalidParams,
+                        "fast_track_client_factors_rejected: 六因素由服务端权威派生，不接受客户端 factors",
+                    ));
+                }
+                // expectedStateDigest：调用方冻结的工作项状态 CAS（与 rework 同源）；
+                // 漂移 → 冲突（基于过期状态的评估无意义）。
+                if let Some(expected) = opt_str_param(params, "expectedStateDigest") {
+                    let current =
+                        sg_workitem::rework::cas_digest(store, &workitem_id).map_err(store_err)?;
+                    if current != expected {
+                        return Err(err(
+                            ErrorCode::Conflict,
+                            "fast_track_state_changed: 工作项状态与 expectedStateDigest 不一致，请刷新后重试",
+                        ));
+                    }
+                }
+                let suggestion = sg_workitem::fast_track::evaluate_and_suggest(
+                    store,
+                    &workitem_id,
+                    &gate_name,
+                    // 注册表注入（依赖倒置）：提案列为 canonical ToolId（builtin:read_file），
+                    // 解析后按 builtin 短名查注册表；MCP 未接分类 adapter → None（保守 false）。
+                    |tool: &str| match sg_agent::provider::ToolId::parse(tool) {
+                        sg_agent::provider::ToolId::Builtin { name } => {
+                            sg_agent::tools::find(&name).map(|d| {
+                                sg_workitem::fast_track::ToolClass {
+                                    effect_class: d.effect_class.into(),
+                                    reversibility: d.reversibility.into(),
+                                    protected_target: d.protected_target,
+                                }
+                            })
+                        }
+                        _ => None,
+                    },
+                )
+                .map_err(|e| shadow_err(&e))?;
+                Ok(serde_json::to_value(suggestion).unwrap_or_default())
+            })
         }
         // --- WP-9：A1 跨关返工五件套（flag=RATIFLOW_REWORK，默认 0）；
         //     decide 走 approval.decide 的 rework 主体路由到同一实现 ---
-        "rework.preview" | "rework.request" | "rework.decide" | "rework.get" | "rework.list" => {
+        "rework.preview" | "rework.request" | "rework.decide" | "rework.resume" | "rework.get"
+        | "rework.list" => {
             if std::env::var("RATIFLOW_REWORK").ok().as_deref() != Some("1") {
                 return Err(err(
                     ErrorCode::InvalidRequest,
@@ -2569,25 +2581,47 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         .as_str(),
                 )
                 .map_err(store_err),
-                "rework.request" => sg_workitem::rework::request(
-                    store,
-                    &str_param(params, "workItemId")?,
-                    &str_param(params, "targetGate")?,
-                    &str_param(params, "reasonCode")?,
-                    &opt_str_param(params, "note").unwrap_or_default(),
-                    opt_str_param(params, "requestedBy")
-                        .unwrap_or_else(|| "local".into())
-                        .as_str(),
-                )
-                .map_err(store_err),
-                "rework.decide" => sg_workitem::rework::decide(
-                    store,
-                    &str_param(params, "approvalId")?,
-                    &str_param(params, "decision")?,
-                    &str_param(params, "decidedBy")?,
-                    &opt_str_param(params, "reason").unwrap_or_default(),
-                )
-                .map_err(store_err),
+                "rework.request" => {
+                    let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+                    with_rpc_receipt(store, &idem, "rework.request", params, || {
+                        sg_workitem::rework::request(
+                            store,
+                            &str_param(params, "workItemId")?,
+                            &str_param(params, "targetGate")?,
+                            &str_param(params, "reasonCode")?,
+                            &opt_str_param(params, "note").unwrap_or_default(),
+                            opt_str_param(params, "requestedBy")
+                                .unwrap_or_else(|| "local".into())
+                                .as_str(),
+                        )
+                        .map_err(store_err)
+                    })
+                }
+                "rework.decide" => {
+                    let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+                    with_rpc_receipt(store, &idem, "rework.decide", params, || {
+                        sg_workitem::rework::decide(
+                            store,
+                            &str_param(params, "approvalId")?,
+                            &str_param(params, "decision")?,
+                            &str_param(params, "decidedBy")?,
+                            &opt_str_param(params, "reason").unwrap_or_default(),
+                        )
+                        .map_err(store_err)
+                    })
+                }
+                // P0-4（0053）：按 progress 游标 + 双 digest 的崩溃恢复入口（幂等）。
+                "rework.resume" => {
+                    let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+                    with_rpc_receipt(store, &idem, "rework.resume", params, || {
+                        sg_workitem::rework::resume(
+                            store,
+                            &str_param(params, "operationId")?,
+                            &opt_str_param(params, "resumedBy").unwrap_or_else(|| "system".into()),
+                        )
+                        .map_err(store_err)
+                    })
+                }
                 "rework.get" => sg_workitem::rework::get(store, &str_param(params, "operationId")?)
                     .map_err(store_err),
                 _ => {
@@ -2642,8 +2676,13 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     "feature_disabled: RATIFLOW_WORKITEM_FTS 未开启",
                 ));
             }
-            let indexed = sg_workitem::search::reindex_all(store).map_err(store_err)?;
-            Ok(json!({ "indexed": indexed }))
+            // P0-1：重建走 receipt lease（同 key 重放不重跑；并发单 owner）；
+            // 域内 DELETE+INSERT 原子化（中断不留空索引；影子表切换在 P1-3）。
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "workitem.searchRebuild", params, || {
+                let indexed = sg_workitem::search::reindex_all(store).map_err(store_err)?;
+                Ok(json!({ "indexed": indexed }))
+            })
         }
         "workitem.similar" => {
             if std::env::var("RATIFLOW_WORKITEM_FTS").ok().as_deref() != Some("1") {
@@ -2658,20 +2697,27 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
         }
         // --- WP-13：B10 知识验证事实（本机 SQLite 权威；manifest 只声明策略）---
         "knowledge.verifySource" => {
-            let project_id = str_param(params, "projectId")?;
-            let stable_id = str_param(params, "stableId")?;
-            let outcome = str_param(params, "outcome")?;
-            let verifier = str_param(params, "verifier")?;
-            let evidence_ref = opt_str_param(params, "evidenceRef").unwrap_or_default();
-            sg_knowledge::freshness::verify_source(
-                store,
-                &project_id,
-                &stable_id,
-                &outcome,
-                &verifier,
-                &evidence_ref,
-            )
-            .map_err(store_err)
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "knowledge.verifySource", params, || {
+                let project_id = str_param(params, "projectId")?;
+                // P0-6：sourceId（manifest stableId，项目作用域内解析）；
+                // revision 由服务端按 source kind 解析（四 mode），不接受客户端提交。
+                let source_id = str_param(params, "sourceId")?;
+                let outcome = str_param(params, "outcome")?;
+                let verifier = str_param(params, "verifier")?;
+                let evidence_ref = opt_str_param(params, "evidenceRef").unwrap_or_default();
+                let op_id = opt_str_param(params, "verificationOpId");
+                sg_knowledge::freshness::verify_source(
+                    store,
+                    &project_id,
+                    &source_id,
+                    &outcome,
+                    &verifier,
+                    &evidence_ref,
+                    op_id.as_deref(),
+                )
+                .map_err(store_err)
+            })
         }
         "knowledge.freshnessOverview" => {
             let project_id = str_param(params, "projectId")?;
@@ -3095,8 +3141,8 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     .map_err(store_err)?;
                     return Ok(out);
                 }
-                // WP-8：gate_skip——批准 → 阶段落 skipped 终态（指针随 Passed|Skipped
-                // 推进）；拒绝 → 仅审批落态。批准时阶段已开工 → gate_skip_state_changed。
+                // WP-8/P0-3：gate_skip——跳关 operation v2 治理链（四要素 digest
+                // 重算/两步执行/崩溃恢复）与 gate.decideSkip 同实现（唯一决定入口路由）。
                 "gate_skip" => {
                     if !matches!(decision.as_str(), "approved" | "rejected") {
                         return Err(err(
@@ -3104,93 +3150,14 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                             "decision must be approved|rejected for gate_skip",
                         ));
                     }
-                    let workitem_id = subject.workitem_id.clone().ok_or_else(|| {
-                        err(
-                            ErrorCode::InternalError,
-                            "gate_skip approval missing workitem",
-                        )
-                    })?;
-                    let attempt_id = subject.stage_attempt_id.clone().ok_or_else(|| {
-                        err(
-                            ErrorCode::InternalError,
-                            "gate_skip approval missing attempt",
-                        )
-                    })?;
-                    let gate_name: String = store
-                        .with_conn(|conn| {
-                            conn.query_row(
-                                "SELECT gate FROM stage_attempts WHERE id=?1",
-                                [&attempt_id],
-                                |r| r.get(0),
-                            )
-                            .map_err(Error::from)
-                        })
-                        .map_err(store_err)?;
-                    if decision == "approved" {
-                        // 仅当前关可跳（跳关语义 = 跳过眼前这关；未来关须依次到达）。
-                        let wi = sg_workitem::get(store, &workitem_id).map_err(store_err)?;
-                        if wi.current_gate != gate_name {
-                            return Err(err(
-                                ErrorCode::Conflict,
-                                format!(
-                                    "gate_skip_state_changed: 关 {gate_name} 非当前关（当前 {}）",
-                                    wi.current_gate
-                                ),
-                            ));
-                        }
-                        let stage_state = sg_workitem::stages(store, &workitem_id)
-                            .map_err(store_err)?
-                            .into_iter()
-                            .find(|s| s.gate == gate_name)
-                            .map(|s| s.state)
-                            .unwrap_or_default();
-                        if stage_state != "not_started" {
-                            return Err(err(
-                                ErrorCode::Conflict,
-                                format!("gate_skip_state_changed: 关 {gate_name} 当前为 {stage_state}，仅未开工关可跳过"),
-                            ));
-                        }
-                        let appr =
-                            sg_policy::decide(store, &approval_id, &decision, &decided_by, &reason)
-                                .map_err(store_err)?;
-                        sg_workitem::set_stage(
-                            store,
-                            &workitem_id,
-                            &gate_name,
-                            sg_workitem::StageState::Skipped,
-                            "",
-                        )
-                        .map_err(store_err)?;
-                        // 同步取消跳关关的未开工 attempt（单活跃约束：不阻塞后续关）。
-                        sg_workitem::attempt::transition(store, &attempt_id, "cancelled")
-                            .map_err(store_err)?;
-                        sg_store::audit::append(
-                            store,
-                            &decided_by,
-                            &format!("approval.{decision}"),
-                            "approval",
-                            &approval_id,
-                            json!({"subjectId": subject.subject_id, "gate": gate_name, "outcome": "skipped_with_waiver"}),
-                        )
-                        .map_err(store_err)?;
-                        return Ok(json!({
-                            "approval": appr,
-                            "skip": {"gate": gate_name, "outcome": "skipped_with_waiver"}
-                        }));
-                    }
-                    let appr =
-                        sg_policy::decide(store, &approval_id, &decision, &decided_by, &reason)
-                            .map_err(store_err)?;
-                    sg_store::audit::append(
+                    return sg_workitem::skip::decide(
                         store,
-                        &decided_by,
-                        &format!("approval.{decision}"),
-                        "approval",
                         &approval_id,
-                        json!({"subjectId": subject.subject_id, "gate": gate_name}),
+                        &decision,
+                        &decided_by,
+                        &reason,
                     )
-                    .map_err(store_err)?;
-                    return Ok(json!({ "approval": appr }));
+                    .map_err(store_err);
                 }
                 // WP-9：rework——decide 治理链（CAS 复查/两步执行）与 rework.decide 同实现。
                 "rework" => {
@@ -4905,54 +4872,74 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                     "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
                 ));
             }
-            let automation_id = str_param("automationId")?;
-            let shadow_mode = params
-                .get("shadowMode")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| invalid("missing param: shadowMode".into()))?;
-            let expected_revision = params
-                .get("expectedRevision")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| invalid("missing param: expectedRevision".into()))?;
-            if !shadow_mode {
-                // 人工切 live：观察门槛（WP-12 配置化，本地假设）。
-                let (decided, _fp, rate) = sg_workflow::automation::shadow_false_positive_stats(
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "automation.setShadowMode", params, || {
+                let automation_id = str_param("automationId")?;
+                let shadow_mode = params
+                    .get("shadowMode")
+                    .and_then(|v| v.as_bool())
+                    .ok_or_else(|| invalid("missing param: shadowMode".into()))?;
+                let expected_revision = params
+                    .get("expectedRevision")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| invalid("missing param: expectedRevision".into()))?;
+                if !shadow_mode {
+                    // P0-5：自动回退 cooldown 先于指标门槛（回退后的首要控制——
+                    // 即便指标随后好转，冷静期内也不可人工切回 live）。
+                    if let Some(until) =
+                        sg_workflow::automation::cooldown_until(store, &automation_id)
+                            .map_err(|e| shadow_err(&e))?
+                    {
+                        return Err(RpcError::new(
+                            ErrorCode::Conflict,
+                            format!("automation_cooldown: 自动回退冷静期至 {until}，不可切 live"),
+                        ));
+                    }
+                    // 人工切 live 门槛（修正口径）：reviewed≥min_sample 且
+                    // review_coverage≥50% 且误报率≤阈值（分母=已复核已决）。
+                    let (_decided, reviewed, _fp, rate, coverage) =
+                        sg_workflow::automation::shadow_false_positive_stats(
+                            store,
+                            &automation_id,
+                            sg_workflow::automation::shadow_window_days(),
+                        )
+                        .map_err(|e| shadow_err(&e))?;
+                    let min = sg_workflow::automation::shadow_min_sample();
+                    let threshold = sg_workflow::automation::shadow_fp_threshold();
+                    if reviewed < min || coverage < 0.5 || rate > threshold {
+                        return Err(RpcError::new(
+                            ErrorCode::Conflict,
+                            format!(
+                                "automation_shadow_gate: 观察门槛未达（reviewed {reviewed}<{min} 或 coverage {coverage:.2}<0.50 或误报率 {rate:.2}>{threshold:.2}），不可切 live"
+                            ),
+                        ));
+                    }
+                }
+                let a = sg_workflow::automation::set_shadow_mode(
                     store,
                     &automation_id,
-                    sg_workflow::automation::shadow_window_days(),
+                    shadow_mode,
+                    expected_revision,
                 )
-                .map_err(|e| shadow_err(&e))?;
-                let min = sg_workflow::automation::shadow_min_sample();
-                let threshold = sg_workflow::automation::shadow_fp_threshold();
-                if decided < min || rate > threshold {
-                    return Err(RpcError::new(
-                        ErrorCode::Conflict,
-                        format!(
-                            "automation_shadow_gate: 观察门槛未达（decided {decided}<{min} 或误报率 {rate:.2}>{threshold:.2}），不可切 live"
-                        ),
-                    ));
-                }
-            }
-            let a = sg_workflow::automation::set_shadow_mode(
-                store,
-                &automation_id,
-                shadow_mode,
-                expected_revision,
-            )
-            .map_err(store_err)?;
-            Ok(json!({
-                "automationId": a.id,
-                "shadowMode": a.shadow_mode,
-                "revision": a.revision,
-            }))
+                .map_err(store_err)?;
+                Ok(json!({
+                    "automationId": a.id,
+                    "shadowMode": a.shadow_mode,
+                    "revision": a.revision,
+                }))
+            })
         }
         "automation.history" => {
             let automation_id = str_param("automationId")?;
             let items: Vec<Value> = store
                 .with_conn(|conn| {
                     let mut stmt = conn.prepare(
-                        "SELECT scheduled_for, receipt, status, note, created_at
-                         FROM automation_runs WHERE automation_id=?1 ORDER BY created_at",
+                        "SELECT r.scheduled_for, r.receipt, r.status, r.note, r.created_at,
+                                COALESCE(r.run_intent_id,''), COALESCE(ri.run_id,''),
+                                COALESCE(ri.state,'')
+                         FROM automation_runs r
+                         LEFT JOIN run_intents ri ON ri.id = r.run_intent_id
+                         WHERE r.automation_id=?1 ORDER BY r.created_at",
                     )?;
                     let rows = stmt.query_map([&automation_id], |r| {
                         Ok(json!({
@@ -4961,6 +4948,9 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                             "status": r.get::<_, String>(2)?,
                             "note": r.get::<_, String>(3)?,
                             "createdAt": r.get::<_, String>(4)?,
+                            "runIntentId": r.get::<_, String>(5)?,
+                            "runId": r.get::<_, String>(6)?,
+                            "runIntentState": r.get::<_, String>(7)?,
                         }))
                     })?;
                     let mut out = Vec::new();
@@ -5123,40 +5113,20 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                     "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
                 ));
             }
-            let out = sg_workflow::shadow::decide(
-                store,
-                &str_param("suggestionId")?,
-                &str_param("decision")?,
-                &str_param("decidedBy")?,
-                &str_param("note")?,
-            )
-            .map_err(|e| shadow_err(&e))?;
-            // WP-8：fast-track 建议被采纳 → 应用缩减（活动缩减；交付物豁免在
-            // deliverable 检查时按已采纳状态消费）。未采纳/非 fast-track → 幂等跳过。
-            let mut fast_track_applied = Value::Null;
-            if out.decision == "accepted" {
-                if let Ok(s) = sg_workflow::shadow::get(store, &out.suggestion_id) {
-                    if s.source == "fast_track" {
-                        if let Some(wi) = &s.workitem_id {
-                            let gate = s.content.get("gate").and_then(|g| g.as_str()).unwrap_or("");
-                            let applied =
-                                sg_workitem::fast_track::apply_if_accepted(store, wi, gate)
-                                    .map_err(|e| shadow_err(&e))?;
-                            fast_track_applied =
-                                json!({"workItemId": wi, "gate": gate, "applied": applied});
-                            let _ = sg_store::audit::append(
-                                store,
-                                &str_param("decidedBy")?,
-                                "fast_track.applied",
-                                "workitem",
-                                wi,
-                                json!({"gate": gate, "applied": applied}),
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(json!({ "decision": out, "fastTrack": fast_track_applied }))
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "automation.decideSuggestion", params, || {
+                let out = sg_workflow::shadow::decide(
+                    store,
+                    &str_param("suggestionId")?,
+                    &str_param("decision")?,
+                    &str_param("decidedBy")?,
+                    &str_param("note")?,
+                )
+                .map_err(|e| shadow_err(&e))?;
+                // P0-3：采纳建议 ≠ 应用豁免（两动作分离）——fast-track 建议被采纳
+                // 后不自动应用；豁免经 gate.applyWaiver 显式应用、gate.revokeWaiver 撤销。
+                Ok(json!({ "decision": out }))
+            })
         }
         "automation.reviewSuggestion" => {
             if !automation_flag {
@@ -5165,19 +5135,22 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
                     "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
                 ));
             }
-            let false_positive = params
-                .get("falsePositive")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| invalid("missing param: falsePositive".into()))?;
-            let out = sg_workflow::shadow::review(
-                store,
-                &str_param("suggestionId")?,
-                false_positive,
-                &str_param("reviewer")?,
-                &str_param("note")?,
-            )
-            .map_err(|e| shadow_err(&e))?;
-            Ok(serde_json::to_value(out).unwrap_or_default())
+            let idem = opt_str_param(params, "idempotencyKey").unwrap_or_default();
+            with_rpc_receipt(store, &idem, "automation.reviewSuggestion", params, || {
+                let false_positive = params
+                    .get("falsePositive")
+                    .and_then(|v| v.as_bool())
+                    .ok_or_else(|| invalid("missing param: falsePositive".into()))?;
+                let out = sg_workflow::shadow::review(
+                    store,
+                    &str_param("suggestionId")?,
+                    false_positive,
+                    &str_param("reviewer")?,
+                    &str_param("note")?,
+                )
+                .map_err(|e| shadow_err(&e))?;
+                Ok(serde_json::to_value(out).unwrap_or_default())
+            })
         }
         "automation.observations" => {
             let source = opt_str_param(params, "source");

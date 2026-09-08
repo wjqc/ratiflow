@@ -31,7 +31,7 @@ pub fn index_workitem(
     if !enabled() {
         return Ok(());
     }
-    store.with_conn(|conn| {
+    store.with_tx(|conn| {
         conn.execute(
             "DELETE FROM workitem_search WHERE workitem_id=?1",
             [workitem_id],
@@ -44,9 +44,10 @@ pub fn index_workitem(
     })
 }
 
-/// 全量回填（searchRebuild）：清空后按 workitems 表重建。返回索引条数。
+/// 全量回填（searchRebuild）：单事务清空重建（中断不留半空索引；P0-1 receipt
+/// lease 保证同 key 重放/并发单 owner；影子表切换在 P1-3）。返回索引条数。
 pub fn reindex_all(store: &Store) -> Result<i64, Error> {
-    store.with_conn(|conn| {
+    store.with_tx(|conn| {
         conn.execute("DELETE FROM workitem_search", [])?;
         conn.execute(
             "INSERT INTO workitem_search(workitem_id, title, description)

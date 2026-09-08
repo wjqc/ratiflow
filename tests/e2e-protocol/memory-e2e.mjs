@@ -275,7 +275,7 @@ async function main() {
     const wi = await c.call('workitem.create', { projectId: pjA.id, title: '记忆注入验证' });
 
     // 17. 入口一：agent.start 不传 contextManifestId → 服务端统一 builder 创建并冻结。
-    const run1 = await c.call('agent.start', { workItemId: wi.id, goal: '部署 检查 健康', toolAllowlist: ['read_file'] });
+    const run1 = await c.call('agent.start', { workItemId: wi.id, goal: '部署 检查 健康', toolAllowlist: ['read_file'], idempotencyKey: 'mem-run-1' });
     const g1 = await c.call('agent.get', { runId: run1.runId });
     assert(g1.memory?.count === 2, 'agent.start 服务端 manifest 冻结 2 条命中记忆（§7.1/§7.3）');
     assert(!!g1.memory?.items?.find((i) => i.memoryId === inj.memoryId)?.revisionId, '证据含冻结 revisionId');
@@ -289,7 +289,7 @@ async function main() {
     const g1b = await c.call('agent.get', { runId: run1.runId });
     const evInj1b = g1b.memory.items.find((i) => i.memoryId === inj.memoryId);
     assert(evInj1b.revisionId === evInj1.revisionId, '更新后旧 manifest 冻结 revision 不漂移');
-    const run2 = await c.call('agent.start', { workItemId: wi.id, goal: '部署 检查 健康', toolAllowlist: ['read_file'] });
+    const run2 = await c.call('agent.start', { workItemId: wi.id, goal: '部署 检查 健康', toolAllowlist: ['read_file'], idempotencyKey: 'mem-run-2' });
     const g2 = await c.call('agent.get', { runId: run2.runId });
     const evInj2 = g2.memory.items.find((i) => i.memoryId === inj.memoryId);
     assert(evInj2.revisionId !== evInj1.revisionId, '新 Run 采用新 revision');
@@ -298,6 +298,7 @@ async function main() {
     const staged = await c.call('stage.startActivity', {
       workItemId: wi.id, gate: 'requirements', activityKey: 'requirement_analysis',
       goal: '部署 检查', toolAllowlist: ['read_file'],
+      idempotencyKey: 'mem-staged-1',
     });
     const gs = await c.call('agent.get', { runId: staged.runId });
     assert(gs.memory?.count >= 2, 'stage.startActivity 同一 builder 注入记忆');
@@ -308,7 +309,7 @@ async function main() {
       projectId: pjA.id, memoryId: malicious.memoryId, expectedRevision: 1,
       confirmationToken: pp.confirmationToken, idempotencyKey: 'e2e-m2-purge',
     });
-    const run3 = await c.call('agent.start', { workItemId: wi.id, goal: '部署 检查 健康', toolAllowlist: ['read_file'] });
+    const run3 = await c.call('agent.start', { workItemId: wi.id, goal: '部署 检查 健康', toolAllowlist: ['read_file'], idempotencyKey: 'mem-run-3' });
     const g3 = await c.call('agent.get', { runId: run3.runId });
     assert(g3.memory.count === 1 && !g3.memory.ids.includes(malicious.memoryId), 'purge 后新 Run 不注入恶意记忆');
     assert(g1.memory.ids.includes(malicious.memoryId), '旧 Run 冻结证据不被追溯改写');
@@ -322,7 +323,7 @@ async function main() {
     const g4 = await c.call('agent.get', { runId: run4.runId });
     assert(g4.memory?.count >= 1, '显式 contextManifestId：验证+冻结+记忆证据');
     await expectError(
-      () => c.call('agent.start', { workItemId: wi.id, goal: 'x', contextManifestId: 'ctx_does_not_exist' }),
+      () => c.call('agent.start', { workItemId: wi.id, goal: 'x', contextManifestId: 'ctx_does_not_exist', idempotencyKey: 'mem-run-bad' }),
       'not_found',
       '清单归属校验：未知 manifest 拒绝',
     );

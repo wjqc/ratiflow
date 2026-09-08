@@ -94,15 +94,18 @@ pub struct WaivedDeliverable {
     pub substitute_evidence_kind: String,
 }
 
-/// fast-track 受控枚举（WP-8；计划文本称"六因素"，具名五项以此为准）：
-/// 全真才可生成快通道建议（落 shadow，不自动执行）。schema 严格；
-/// 受保护路径/接口变更等语义核验由提案方断言，服务端深化核验随 WP-10/12。
+/// fast-track 六因素受控枚举（WP-8 / v1.4 §WP-8 映射表）：
+/// 全真才可生成快通道建议（落 shadow，不自动执行）。
+/// P0-2（审计 §7）：六因素全部由服务端从权威事实派生
+/// （fast_track::derive_fast_track_facts），客户端不得提交；
+/// 任一数据源缺失/漂移 = false（不得默认 true）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FastTrackFactors {
     pub no_protected_path: bool,
     pub api_schema_unchanged: bool,
     pub effect_class_read_only: bool,
+    pub reversibility_confirmed: bool,
     pub provenance_complete: bool,
     pub test_evidence_present: bool,
 }
@@ -112,6 +115,7 @@ impl FastTrackFactors {
         self.no_protected_path
             && self.api_schema_unchanged
             && self.effect_class_read_only
+            && self.reversibility_confirmed
             && self.provenance_complete
             && self.test_evidence_present
     }

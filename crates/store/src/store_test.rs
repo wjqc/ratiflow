@@ -1111,6 +1111,501 @@ mod tests {
         assert_eq!(phase, "not_sent", "存量提案 send_phase 默认 not_sent");
     }
 
+    #[test]
+    fn migration_0050_rdws_mutation_receipt_domain_keys() {
+        let (store, _guard) = open();
+        seed_minimal_fixtures(&store);
+        store
+            .with_conn(|c| {
+                let ins_approval = |id: &str, subject: &str, digest: &str| {
+                    c.execute(
+                        "INSERT INTO approvals(id, subject_type, subject_id, workitem_id,
+                             stage_attempt_id, action_digest, risk, status, requested_by,
+                             expires_at, reason, created_at)
+                         VALUES (?1,?2,'att1','wi','att1',?3,'high','requested','local','','w','t')",
+                        rusqlite::params![id, subject, digest],
+                    )
+                };
+                // gate_skip：同 (subject_type, action_digest) 只允许一条审批行。
+                ins_approval("appr_g1", "gate_skip", "sha256:a").unwrap();
+                assert!(
+                    ins_approval("appr_g2", "gate_skip", "sha256:a").is_err(),
+                    "0050：gate_skip 同 action_digest 第二条审批必须被唯一索引拒绝"
+                );
+                ins_approval("appr_g3", "gate_skip", "sha256:b").unwrap();
+                // partial index 只作用于 gate_skip：其他主体同 digest 不受影响。
+                ins_approval("appr_r1", "gate_release", "sha256:a").unwrap();
+                // （shadow_suggestions 的 digest 唯一性随 0051 表重建迁入
+                //  UNIQUE(source, scope_key, suggestion_digest)，见 0051 语义测试。）
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_0051_shadow_policy_v2_semantics() {
+        use crate::migration::MIGRATIONS;
+        let dir = tempdir::make("sg-0051-upgrade");
+        // 手搭 schema≤0050 并种旧形态 shadow 建议（0043 列集，无 scope_key）。
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow-v3.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            for (v, sql) in MIGRATIONS.iter() {
+                if *v > 50 {
+                    break;
+                }
+                conn.execute_batch(sql).unwrap();
+                conn.execute("INSERT INTO schema_migrations(version) VALUES (?1)", [v])
+                    .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute_batch(
+                "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                 VALUES ('pj','u','n','p','main','t');
+                 INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                 VALUES ('wi','pj','t','','[]','build','t','t');
+                 INSERT INTO automations(id, key, interval_secs, next_fire_at, created_at, updated_at)
+                 VALUES ('aut1','k1',60,'t','t','t');
+                 INSERT INTO shadow_suggestions(id, source, automation_id, workitem_id, suggestion_type,
+                     suggestion_digest, content_json, hypothetical_action_digest, policy_version,
+                     model, prompt_version, generated_at)
+                 VALUES ('sg_old1','fast_track',NULL,'wi','gate_fast_track','sha256:old1','{}','h','ft1','','','t');
+                 INSERT INTO shadow_suggestions(id, source, automation_id, workitem_id, suggestion_type,
+                     suggestion_digest, content_json, hypothetical_action_digest, policy_version,
+                     model, prompt_version, generated_at)
+                 VALUES ('sg_old2','automation','aut1',NULL,'automation_intent','sha256:old2','{}','h','sp1','','','t');
+                 INSERT INTO shadow_decisions(suggestion_id, decision, decided_by, decided_at, note)
+                 VALUES ('sg_old1','accepted','owner','t','存量决定必须保留');",
+            )
+            .unwrap();
+        }
+        // 升级（0051 语义在最新 schema 上验证——后续迁移不得破坏）。
+        let store = Store::open(dir.path(), "test").expect("open store");
+        assert!(store.schema_version().unwrap() >= 51);
+
+        store
+            .with_conn(|c| {
+                // 存量回填：scope_key 推导 + legacy=1 + 决定保留。
+                let (scope1, legacy1): (String, i64) = c
+                    .query_row(
+                        "SELECT scope_key, legacy FROM shadow_suggestions WHERE id='sg_old1'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!((scope1.as_str(), legacy1), ("wi", 1), "fast_track 存量 scope=workitem 且 legacy");
+                let (scope2, legacy2): (String, i64) = c
+                    .query_row(
+                        "SELECT scope_key, legacy FROM shadow_suggestions WHERE id='sg_old2'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!((scope2.as_str(), legacy2), ("aut1", 1), "automation 存量 scope=automation 且 legacy");
+                let decided: String = c
+                    .query_row(
+                        "SELECT decision FROM shadow_decisions WHERE suggestion_id='sg_old1'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(decided, "accepted", "存量决定随 FK 重建保留");
+
+                // 新写入：scope 配对 CHECK 违约拒绝（fast_track 带 automation）。
+                let bad_pair = c.execute(
+                    "INSERT INTO shadow_suggestions(id, source, automation_id, workitem_id, scope_key,
+                         suggestion_type, suggestion_digest, input_state_digest, generated_at)
+                     VALUES ('sg_bad','fast_track','aut1',NULL,'aut1','t','sha256:b1','','t')",
+                    [],
+                );
+                assert!(bad_pair.is_err(), "CHECK：fast_track 必须 scope=workitem 且不带 automation");
+
+                // UNIQUE(source, scope_key, suggestion_digest)：同 scope 同 digest 拒绝；异 scope 同 digest 允许。
+                let ins = |id: &str, scope: &str, digest: &str| {
+                    c.execute(
+                        "INSERT INTO shadow_suggestions(id, source, automation_id, workitem_id, scope_key,
+                             suggestion_type, suggestion_digest, input_state_digest, generated_at)
+                         VALUES (?1,'fast_track',NULL,'wi',?2,'t',?3,'sha256:st','t')",
+                        rusqlite::params![id, scope, digest],
+                    )
+                };
+                ins("sg_new1", "wi", "sha256:d1").unwrap();
+                assert!(
+                    ins("sg_new2", "wi", "sha256:d1").is_err(),
+                    "同 (source,scope,digest) 重复拒绝"
+                );
+
+                // automations 新列默认值。
+                let (cooldown, streak, metric): (String, i64, String) = c
+                    .query_row(
+                        "SELECT cooldown_started_at, bad_window_streak, last_metric_snapshot_digest
+                         FROM automations WHERE id='aut1'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .unwrap();
+                assert_eq!((cooldown.as_str(), streak, metric.as_str()), ("", 0, ""));
+
+                // automation_policy_transitions 唯一键。
+                let ins_tr = |id: &str| {
+                    c.execute(
+                        "INSERT INTO automation_policy_transitions(id, automation_id, metric_snapshot_digest,
+                             target_mode, expected_revision, review_coverage, sample_size, false_positives,
+                             window_days, policy_version, actor, created_at)
+                         VALUES (?1,'aut1','sha256:m',0,3,1.0,30,1,7,'sp2','system','t')",
+                        [id],
+                    )
+                };
+                ins_tr("tr1").unwrap();
+                assert!(ins_tr("tr2").is_err(), "同 (automation,快照,目标) 重复切换拒绝");
+
+                // notification_outbox 幂等键唯一（空串不参与）。
+                let ins_note = |id: &str, key: &str| {
+                    c.execute(
+                        "INSERT INTO notification_outbox(id, kind, payload_json, idempotency_key, created_at)
+                         VALUES (?1,'automation_blocked','{}',?2,'t')",
+                        rusqlite::params![id, key],
+                    )
+                };
+                ins_note("n1", "idem-a").unwrap();
+                ins_note("n2", "").unwrap();
+                ins_note("n3", "").unwrap();
+                assert!(ins_note("n4", "idem-a").is_err(), "同幂等键通知拒绝（防重复通知）");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_0052_gate_skip_operations_v2() {
+        use crate::migration::MIGRATIONS;
+        let dir = tempdir::make("sg-0052-upgrade");
+        // 手搭 schema≤0051 并种 gate_skip 审批（approved + pending 两态）。
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow-v3.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            for (v, sql) in MIGRATIONS.iter() {
+                if *v > 51 {
+                    break;
+                }
+                conn.execute_batch(sql).unwrap();
+                conn.execute("INSERT INTO schema_migrations(version) VALUES (?1)", [v])
+                    .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute_batch(
+                "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                 VALUES ('pj','u','n','p','main','t');
+                 INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                 VALUES ('wi','pj','t','','[]','build','t','t');
+                 INSERT INTO stage_attempts(id, workitem_id, gate, attempt_no, branch_no, state, entry_snapshot_id,
+                     input_package_sha256, active_output_package_id, predecessor_attempt_id, created_at, updated_at)
+                 VALUES ('att1','wi','build',1,1,'prepared','','',NULL,NULL,'t','t');
+                 INSERT INTO approvals(id, subject_type, subject_id, workitem_id, stage_attempt_id, action_digest,
+                     risk, status, requested_by, decided_by, decided_at, expires_at, reason, created_at)
+                 VALUES ('appr_ok','gate_skip','att1','wi','att1','sha256:ok','high','approved','local','o','t','','w','t');
+                 INSERT INTO approvals(id, subject_type, subject_id, workitem_id, stage_attempt_id, action_digest,
+                     risk, status, requested_by, expires_at, reason, created_at)
+                 VALUES ('appr_pd','gate_skip','att1','wi','att1','sha256:pd','high','requested','local','','w','t');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(dir.path(), "test").expect("open store");
+        assert!(store.schema_version().unwrap() >= 52);
+
+        store
+            .with_conn(|c| {
+                // 存量 approved → legacy_completed（digest 空，只读投影）。
+                let (state, cas): (String, String) = c
+                    .query_row(
+                        "SELECT state, current_state_digest FROM gate_skip_requests WHERE approval_id='appr_ok'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!((state.as_str(), cas.as_str()), ("legacy_completed", ""));
+                // 存量 pending → requested 投影（可作废不可批准）。
+                let state_pd: String = c
+                    .query_row(
+                        "SELECT state FROM gate_skip_requests WHERE approval_id='appr_pd'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(state_pd, "requested");
+
+                // 新表唯一约束：action_digest 唯一。
+                let ins = |id: &str, digest: &str| {
+                    c.execute(
+                        "INSERT INTO gate_skip_requests(id, workitem_id, gate, stage_attempt_id, template_version_id,
+                             current_state_digest, waiver, approval_id, action_digest, requested_by, created_at, updated_at)
+                         VALUES (?1,'wi','build','att1','tv','cas','w',NULL,?2,'local','t','t')",
+                        rusqlite::params![id, digest],
+                    )
+                };
+                ins("gsk1", "sha256:a").unwrap();
+                assert!(ins("gsk2", "sha256:a").is_err(), "action_digest 唯一");
+
+                // gate_fast_track_waivers：action_digest 唯一 + status CHECK。
+                let wv = |id: &str, digest: &str, status: &str| {
+                    c.execute(
+                        "INSERT INTO gate_fast_track_waivers(id, workitem_id, gate, stage_attempt_id, policy_digest,
+                             waived_kind, substitute_evidence_id, substitute_evidence_digest, rationale, action_digest,
+                             status, created_by, created_at)
+                         VALUES (?1,'wi','build','att1','pd','code','ev1','sd','r',?2,?3,'o','t')",
+                        rusqlite::params![id, digest, status],
+                    )
+                };
+                wv("gfw1", "sha256:w1", "active").unwrap();
+                assert!(wv("gfw2", "sha256:w1", "active").is_err(), "waiver action_digest 唯一");
+                assert!(wv("gfw3", "sha256:w3", "paused").is_err(), "status CHECK 只允许 active|revoked");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_0053_rework_recovery_and_baseline_correction() {
+        use crate::migration::MIGRATIONS;
+        let dir = tempdir::make("sg-0053-upgrade");
+        // 手搭 schema≤0052 并种被 rework 污染的 baselines + 已完成 rework 操作。
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("ratiflow-v3.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            for (v, sql) in MIGRATIONS.iter() {
+                if *v > 52 {
+                    break;
+                }
+                conn.execute_batch(sql).unwrap();
+                conn.execute("INSERT INTO schema_migrations(version) VALUES (?1)", [v])
+                    .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute_batch(
+                "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                 VALUES ('pj','u','n','p','main','t');
+                 INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                 VALUES ('wi','pj','t','','[]','design','t','t');
+                 INSERT INTO stage_attempts(id, workitem_id, gate, attempt_no, branch_no, state, entry_snapshot_id,
+                     input_package_sha256, active_output_package_id, predecessor_attempt_id, created_at, updated_at)
+                 VALUES ('att1','wi','design',1,1,'superseded','','',NULL,NULL,'t','t');
+                 INSERT INTO rework_operations(id, workitem_id, from_gate, target_gate, from_attempt_id,
+                     reason_code, note, current_state_digest, state, action_digest, requested_by, created_at, updated_at)
+                 VALUES ('rwk1','wi','development','design','att1','regression','n','sha256:cas','completed','sha256:ad1','a','t','t');
+                 INSERT INTO baselines(id, workitem_id, gate, revision_map, inputs_sha256, frozen_at)
+                 VALUES ('b1','wi','design','{}','sha256:i1','t');
+                 INSERT INTO baselines(id, workitem_id, gate, revision_map, inputs_sha256, frozen_at)
+                 VALUES ('b2','wi','development','{}','sha256:i2','t');
+                 -- 污染：rework id 被写入 successor 列。
+                 UPDATE baselines SET superseded_by='rwk1' WHERE id IN ('b1','b2');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(dir.path(), "test").expect("open store");
+        assert!(store.schema_version().unwrap() >= 53);
+
+        store
+            .with_conn(|c| {
+                // 纠偏：污染行迁 invalidated_by_rework_id，successor 列清空。
+                let moved: i64 = c
+                    .query_row(
+                        "SELECT COUNT(*) FROM baselines WHERE invalidated_by_rework_id='rwk1' AND superseded_by IS NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(moved, 2, "可确定归属的污染行全部迁移");
+                // rework_operations 回填：completed → step_b_committed；pre ← current。
+                let (progress, pre): (String, String) = c
+                    .query_row(
+                        "SELECT progress, pre_state_digest FROM rework_operations WHERE id='rwk1'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!((progress.as_str(), pre.as_str()), ("step_b_committed", "sha256:cas"));
+                // manifest 落审计。
+                let manifest: i64 = c
+                    .query_row(
+                        "SELECT COUNT(*) FROM audit_log WHERE action='rework_recovery_v2_manifest'
+                           AND detail LIKE '%movedToInvalidated%'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(manifest, 1, "迁移 manifest 在册");
+                // 新列 CHECK：非法 progress 拒绝。
+                let bad = c.execute(
+                    "UPDATE rework_operations SET progress='mid_air' WHERE id='rwk1'",
+                    [],
+                );
+                assert!(bad.is_err(), "progress CHECK 只允许三态");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn objects_gc_scan_reports_unreferenced_only() {
+        let (store, _guard) = open();
+        // 无引用对象 → orphan 候选；被引用对象（evidence）不在清单。
+        let orphan = crate::objects::put(
+            &store,
+            &b"orphan-body"[..],
+            crate::objects::PutOptions::default(),
+        )
+        .unwrap();
+        let referenced = crate::objects::put(
+            &store,
+            &b"evidence-body"[..],
+            crate::objects::PutOptions::default(),
+        )
+        .unwrap();
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj2','u','n','p','main','t');
+                     INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi2','pj2','t','','[]','design','t','t');",
+                )?;
+                c.execute(
+                    "INSERT INTO evidences(id, workitem_id, gate, kind, title, object_sha256, payload, source, verified, created_at)
+                     VALUES ('ev_gc','wi2','design','manual','引用',?1,'{}','local',0,'t')",
+                    [&referenced.sha256],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let report = crate::objects::gc_scan(&store).unwrap();
+        assert_eq!(report.total, 2);
+        assert!(report.orphans.contains(&orphan.sha256), "无引用对象进清单");
+        assert!(
+            !report.orphans.contains(&referenced.sha256),
+            "被引用对象不在清单"
+        );
+        assert_eq!(report.pruned, 0, "默认只报告不清理");
+    }
+
+    #[test]
+    fn migration_0054_knowledge_verification_v2() {
+        let (store, _guard) = open();
+        assert!(store.schema_version().unwrap() >= 54);
+        store
+            .with_conn(|c| {
+                // 旧表保留为只读历史（不 drop）。
+                let legacy: i64 =
+                    c.query_row("SELECT COUNT(*) FROM knowledge_verification_receipts", [], |r| r.get(0))?;
+                let _ = legacy;
+                // v2 表约束：mode/outcome CHECK + op_id UNIQUE。
+                let seed = |id: &str, mode: &str, outcome: &str, op: &str| {
+                    c.execute(
+                        "INSERT INTO knowledge_verifications_v2
+                         (id, project_id, source_id, stable_id, verified_input_revision, input_revision_mode,
+                          verified_input_digest, outcome, verifier, verification_op_id, policy_version,
+                          verified_at, evidence_ref, legacy, created_at)
+                         SELECT ?1, p.id, ks.id, 'sid', ?2, ?3, ?4, ?5, 'v', ?6, 'pv', '2026-09-08T00:00:00.000Z', '', 0, '2026-09-08T00:00:00.000Z'
+                         FROM projects p JOIN knowledge_sources ks ON ks.project_id = p.id
+                         WHERE p.id = 'pj54' LIMIT 1",
+                        rusqlite::params![id, format!("{mode}:rev"), mode, "sha", outcome, op],
+                    )
+                };
+                // 先造 project + source 行供 FK。
+                c.execute(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj54','u','n','p','main','t')",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO knowledge_sources(id, project_id, kind, name, locator, enabled, scan_state, content_sha256, created_at, updated_at)
+                     VALUES ('ksrc_t','pj54','repo_path','t','docs/t.md',1,'pending','sha','t','t')",
+                    [],
+                )?;
+                seed("kvr54a", "content_hash", "pass", "op-1").unwrap();
+                assert!(
+                    seed("kvr54b", "content_hash", "pass", "op-1").is_err(),
+                    "verification_op_id UNIQUE（操作幂等）"
+                );
+                assert!(seed("kvr54c", "mid_air", "pass", "op-2").is_err(), "mode CHECK 四态");
+                assert!(seed("kvr54d", "content_hash", "maybe", "op-3").is_err(), "outcome CHECK 三态");
+                // 同参异 op_id = 新事件（无域 UNIQUE——改判可翻面）。
+                seed("kvr54e", "content_hash", "pass", "op-4").unwrap();
+                // manifest 落审计。
+                let manifest: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE action='knowledge_verification_v2_manifest'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(manifest, 1, "迁移 manifest 在册（不猜测迁移的证据）");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_0055_durable_run_intents() {
+        let (store, _guard) = open();
+        assert!(store.schema_version().unwrap() >= 55);
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj55','u','n','p','main','t');
+                     INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi55','pj55','t','','[]','requirements','t','t');
+                     INSERT INTO automations(id, key, interval_secs, next_fire_at, created_at, updated_at)
+                     VALUES ('aut55','k',60,'t','t','t');",
+                )?;
+                // run_intents：幂等键唯一 + 状态机 CHECK。
+                let ins = |id: &str, key: &str, state: &str| {
+                    c.execute(
+                        "INSERT INTO run_intents(id, source, automation_id, workitem_id, intent_json,
+                             policy_snapshot, context_digest, grant_digest, idempotency_key, state, created_at, updated_at)
+                         VALUES (?1,'automation','aut55','wi55','{}','sp2','','g',?2,?3,'t','t')",
+                        rusqlite::params![id, key, state],
+                    )
+                };
+                ins("ri1", "ri|aut55|s1", "pending").unwrap();
+                assert!(ins("ri2", "ri|aut55|s1", "pending").is_err(), "idempotency_key UNIQUE");
+                assert!(ins("ri3", "ri|aut55|s2", "mid_air").is_err(), "state CHECK 状态机");
+                // automation_runs FK 重建后约束生效。
+                c.execute(
+                    "INSERT INTO automation_runs(id, automation_id, scheduled_for, receipt, status, run_intent_id, created_at)
+                     VALUES ('ar1','aut55','s1','r1','intent_created','ri1','t')",
+                    [],
+                )?;
+                let bad = c.execute(
+                    "INSERT INTO automation_runs(id, automation_id, scheduled_for, receipt, status, run_intent_id, created_at)
+                     VALUES ('ar2','aut55','s2','r2','fired','ri_missing','t')",
+                    [],
+                );
+                assert!(bad.is_err(), "run_intent_id FK 生效（0055 表重建）");
+                Ok(())
+            })
+            .unwrap();
+    }
+
     fn seed_minimal_fixtures(store: &Store) {
         store
             .with_conn(|c| {

@@ -23,11 +23,18 @@ pub struct Suggestion {
     pub automation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workitem_id: Option<String>,
+    pub scope_key: String,
     pub suggestion_type: String,
     pub suggestion_digest: String,
     pub content: serde_json::Value,
     pub hypothetical_action_digest: String,
     pub policy_version: String,
+    /// 服务端派生的输入状态摘要（P0-2：权威事实冻结进建议；漂移检测用）。
+    pub input_state_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// 0051 存量标记：无法证明 scope/input digest → 只读，不参与 live 门槛。
+    pub legacy: bool,
     pub model: String,
     pub prompt_version: String,
     pub generated_at: String,
@@ -62,12 +69,15 @@ pub struct Observation {
     pub reviews: Vec<Review>,
 }
 
-/// 误报率口径（同过滤域）：分子 = decision∈{rejected,expired} 且有 false_positive=1
-/// 复核；分母 = 已决定建议数。
+/// 误报率口径（P0-5 修正）：分子 = decision∈{rejected,expired} 且有
+/// false_positive=1 复核；**分母 = 已复核的已决建议**（不以未复核 rejection 稀释）；
+/// 同时输出 review_coverage = 已复核/已决。
 #[derive(Debug, Clone, Serialize)]
 pub struct Stats {
     pub total: i64,
     pub decided: i64,
+    pub reviewed: i64,
+    pub review_coverage: f64,
     pub false_positive_candidates: i64,
     pub false_positives: i64,
     pub false_positive_rate: f64,
@@ -80,6 +90,8 @@ pub struct Observations {
 }
 
 /// 写入建议（不可变事实；领域路径专用——fast-track 判定 / automation tick）。
+/// 0051 v2：scope_key 由 source 推导（fast_track→workitem_id / automation→automation_id，
+/// 表 CHECK 强制成对）；input_state_digest 为服务端派生输入摘要（authority 冻结）。
 #[derive(Debug, Clone)]
 pub struct SuggestionInput<'a> {
     pub source: &'a str,
@@ -90,13 +102,16 @@ pub struct SuggestionInput<'a> {
     pub content: serde_json::Value,
     pub hypothetical_action_digest: &'a str,
     pub policy_version: &'a str,
+    pub input_state_digest: &'a str,
+    /// None = 不设有效期（automation tick 建议；P0-5 语义激活时再定）。
+    pub expires_at: Option<&'a str>,
     pub model: &'a str,
     pub prompt_version: &'a str,
 }
 
-const SUGGESTION_COLS: &str = "id, source, automation_id, workitem_id, suggestion_type,
+const SUGGESTION_COLS: &str = "id, source, automation_id, workitem_id, scope_key, suggestion_type,
         suggestion_digest, content_json, hypothetical_action_digest, policy_version,
-        model, prompt_version, generated_at";
+        input_state_digest, expires_at, legacy, model, prompt_version, generated_at";
 
 fn suggestion_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Suggestion> {
     Ok(Suggestion {
@@ -104,24 +119,46 @@ fn suggestion_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Suggestion> {
         source: r.get(1)?,
         automation_id: r.get(2)?,
         workitem_id: r.get(3)?,
-        suggestion_type: r.get(4)?,
-        suggestion_digest: r.get(5)?,
-        content: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
-        hypothetical_action_digest: r.get(7)?,
-        policy_version: r.get(8)?,
-        model: r.get(9)?,
-        prompt_version: r.get(10)?,
-        generated_at: r.get(11)?,
+        scope_key: r.get(4)?,
+        suggestion_type: r.get(5)?,
+        suggestion_digest: r.get(6)?,
+        content: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+        hypothetical_action_digest: r.get(8)?,
+        policy_version: r.get(9)?,
+        input_state_digest: r.get(10)?,
+        expires_at: r.get(11)?,
+        legacy: r.get::<_, i64>(12)? != 0,
+        model: r.get(13)?,
+        prompt_version: r.get(14)?,
+        generated_at: r.get(15)?,
     })
 }
 
-pub fn record(store: &Store, input: &SuggestionInput<'_>) -> Result<Suggestion, Error> {
-    if !SOURCES.contains(&input.source) {
-        return Err(Error::Message(format!(
+/// scope_key 推导（与 0051 表 CHECK 同一规则；写前在 Rust 侧先给出可读错误）。
+fn scope_key_of(input: &SuggestionInput<'_>) -> Result<String, Error> {
+    match input.source {
+        "fast_track" => match (input.workitem_id, input.automation_id) {
+            (Some(w), None) if !w.is_empty() => Ok(w.to_string()),
+            _ => Err(Error::Message(
+                "shadow_suggestion_invalid: fast_track 建议必须携带 workitem_id 且不带 automation_id"
+                    .into(),
+            )),
+        },
+        "automation" => match (input.automation_id, input.workitem_id) {
+            (Some(a), _) if !a.is_empty() => Ok(a.to_string()),
+            _ => Err(Error::Message(
+                "shadow_suggestion_invalid: automation 建议必须携带 automation_id".into(),
+            )),
+        },
+        _ => Err(Error::Message(format!(
             "shadow_suggestion_invalid: source 须为 {:?}（得到 {:?}）",
             SOURCES, input.source
-        )));
+        ))),
     }
+}
+
+pub fn record(store: &Store, input: &SuggestionInput<'_>) -> Result<Suggestion, Error> {
+    let scope_key = scope_key_of(input)?;
     if input.suggestion_type.trim().is_empty() || input.suggestion_digest.trim().is_empty() {
         return Err(Error::Message(
             "shadow_suggestion_invalid: suggestion_type/suggestion_digest 必填".into(),
@@ -132,19 +169,23 @@ pub fn record(store: &Store, input: &SuggestionInput<'_>) -> Result<Suggestion, 
     store.with_conn(|conn| {
         conn.execute(
             "INSERT INTO shadow_suggestions
-             (id, source, automation_id, workitem_id, suggestion_type, suggestion_digest,
-              content_json, hypothetical_action_digest, policy_version, model, prompt_version, generated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+             (id, source, automation_id, workitem_id, scope_key, suggestion_type, suggestion_digest,
+              content_json, hypothetical_action_digest, policy_version, input_state_digest,
+              expires_at, legacy, model, prompt_version, generated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?14,?15)",
             rusqlite::params![
                 id,
                 input.source,
                 input.automation_id,
                 input.workitem_id,
+                scope_key,
                 input.suggestion_type.trim(),
                 input.suggestion_digest,
                 serde_json::to_string(&input.content).unwrap_or_else(|_| "{}".into()),
                 input.hypothetical_action_digest,
                 input.policy_version,
+                input.input_state_digest,
+                input.expires_at,
                 input.model,
                 input.prompt_version,
                 now
@@ -159,6 +200,47 @@ pub fn record(store: &Store, input: &SuggestionInput<'_>) -> Result<Suggestion, 
             suggestion_from,
         )
         .map_err(Error::from)
+    })
+}
+
+/// 过期同 scope 未决建议（0051 v2 语义；v1.4 §WP-8a）：
+/// - 未决定（无 shadow_decisions 行）且 input_state_digest ≠ 当前权威摘要 → expired；
+/// - 未决定且 expires_at 已过 → expired；
+/// - 过期不改建议行，INSERT shadow_decisions('expired','system')，与人工决定竞态时
+///   只有一方插入（PK 冲突忽略）；已决定建议永不过期；legacy 行不参与（只读投影）。
+///
+/// 返回本次过期条数。
+pub fn expire_stale(
+    store: &Store,
+    source: &str,
+    scope_key: &str,
+    current_input_state_digest: &str,
+) -> Result<i64, Error> {
+    let now = timefmt::now();
+    store.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM shadow_suggestions s
+             WHERE s.source=?1 AND s.scope_key=?2 AND s.legacy=0
+               AND NOT EXISTS (SELECT 1 FROM shadow_decisions d WHERE d.suggestion_id=s.id)
+               AND (s.input_state_digest != ?3
+                    OR (s.expires_at IS NOT NULL AND s.expires_at < ?4))",
+        )?;
+        let stale: Vec<String> = stmt
+            .query_map(
+                rusqlite::params![source, scope_key, current_input_state_digest, now],
+                |r| r.get(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut n: i64 = 0;
+        for id in stale {
+            n += conn
+                .execute(
+                    "INSERT OR IGNORE INTO shadow_decisions(suggestion_id, decision, decided_by, decided_at, note)
+                     VALUES (?1,'expired','system',?2,'输入状态漂移或超时，建议过期')",
+                    rusqlite::params![id, timefmt::now()],
+                )? as i64;
+        }
+        Ok(n)
     })
 }
 
@@ -384,10 +466,12 @@ pub fn observations(
                 reviews,
             });
         }
-        // 误报率口径（同过滤域）。
+        // 误报率口径（P0-5：分母=已复核已决）。
         let mut stats = Stats {
             total: items.len() as i64,
             decided: 0,
+            reviewed: 0,
+            review_coverage: 0.0,
             false_positive_candidates: 0,
             false_positives: 0,
             false_positive_rate: 0.0,
@@ -395,6 +479,10 @@ pub fn observations(
         for o in &items {
             if let Some(d) = &o.decision {
                 stats.decided += 1;
+                let has_review = !o.reviews.is_empty();
+                if has_review {
+                    stats.reviewed += 1;
+                }
                 if d.decision == "rejected" || d.decision == "expired" {
                     stats.false_positive_candidates += 1;
                     if o.reviews.iter().any(|rv| rv.false_positive) {
@@ -404,7 +492,10 @@ pub fn observations(
             }
         }
         if stats.decided > 0 {
-            stats.false_positive_rate = stats.false_positives as f64 / stats.decided as f64;
+            stats.review_coverage = stats.reviewed as f64 / stats.decided as f64;
+        }
+        if stats.reviewed > 0 {
+            stats.false_positive_rate = stats.false_positives as f64 / stats.reviewed as f64;
         }
         Ok(Observations { items, stats })
     })
@@ -425,10 +516,13 @@ mod tests {
         let store = Store::open(&dir, "test").unwrap();
         store
             .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO automations(id, key, interval_secs, next_fire_at, created_at, updated_at)
-                     VALUES ('aut_t','shadow-t',60,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
-                    [],
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main','2026-01-01T00:00:00.000Z');
+                     INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi','pj','t','','[]','build','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');
+                     INSERT INTO automations(id, key, interval_secs, next_fire_at, created_at, updated_at)
+                     VALUES ('aut_t','shadow-t',60,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');",
                 )?;
                 Ok(())
             })
@@ -440,12 +534,14 @@ mod tests {
         SuggestionInput {
             source: "fast_track",
             automation_id: None,
-            workitem_id: None,
+            workitem_id: Some("wi"),
             suggestion_type: "gate_skip",
             suggestion_digest: digest,
             content: json!({"gate": "testing"}),
             hypothetical_action_digest: "sha256:hh",
             policy_version: "pv1",
+            input_state_digest: "sha256:state-1",
+            expires_at: None,
             model: "test-model",
             prompt_version: "pp1",
         }
@@ -456,17 +552,24 @@ mod tests {
         let store = setup();
         // 写入（含 automation 外键形态）。
         let mut inp = input("d1");
+        inp.source = "automation";
         inp.automation_id = Some("aut_t");
+        inp.workitem_id = None;
         let s1 = record(&store, &inp).unwrap();
-        assert_eq!(s1.source, "fast_track");
+        assert_eq!(s1.source, "automation");
         assert_eq!(s1.automation_id.as_deref(), Some("aut_t"));
-        // 非法 source / 空 digest 拒。
+        // 0051：scope_key 随 source 推导。
+        assert_eq!(s1.scope_key, "aut_t");
+        // 非法 source / 空 digest / scope 配对违约拒绝。
         let mut bad = input("d2");
         bad.source = "magic";
         assert!(record(&store, &bad).is_err());
         let mut nodigest = input("");
         nodigest.suggestion_digest = "";
         assert!(record(&store, &nodigest).is_err());
+        let mut noscope = input("d3");
+        noscope.workitem_id = None; // fast_track 无 workitem → 违约
+        assert!(record(&store, &noscope).is_err());
         // 决定 → 重放幂等 → 改判 Conflict。
         let d = decide(&store, &s1.id, "accepted", "owner", "采纳").unwrap();
         assert_eq!(d.decision, "accepted");
@@ -483,6 +586,46 @@ mod tests {
         assert!(decide(&store, "shs_none", "accepted", "o", "").is_err());
         // 非法 decision 枚举拒绝。
         assert!(decide(&store, &s1.id, "maybe", "o", "").is_err());
+    }
+
+    #[test]
+    fn expire_stale_only_undecided_and_drifted() {
+        let store = setup();
+        // s1：输入摘要一致的未决建议 → 不过期。
+        let s1 = record(&store, &input("e1")).unwrap();
+        // s2：已决定（accepted）→ 永不过期。
+        let mut s2 = input("e2");
+        s2.suggestion_digest = "e2";
+        let s2 = record(&store, &s2).unwrap();
+        decide(&store, &s2.id, "accepted", "owner", "").unwrap();
+        // s3：已过期（expires_at 过去）→ 到期过期。
+        let mut s3 = input("e3");
+        s3.suggestion_digest = "e3";
+        s3.expires_at = Some("2020-01-01T00:00:00.000Z");
+        let s3 = record(&store, &s3).unwrap();
+
+        let n = expire_stale(&store, "fast_track", "wi", "sha256:state-1").unwrap();
+        assert_eq!(n, 1, "只有 s3（超时）被过期");
+        let conflict = decide(&store, &s3.id, "accepted", "owner", "")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            conflict.contains("不可改判") && conflict.contains("expired"),
+            "过期建议不可再人工决定：{conflict}"
+        );
+
+        // 输入漂移（state-2）：s1 未决且摘要不同 → 过期。
+        let n2 = expire_stale(&store, "fast_track", "wi", "sha256:state-2").unwrap();
+        assert_eq!(n2, 1, "摘要漂移使未决建议过期");
+        let obs = observations(&store, Some("fast_track"), None).unwrap();
+        let by_digest: std::collections::HashMap<&str, Option<&Decision>> = obs
+            .items
+            .iter()
+            .map(|o| (o.suggestion.suggestion_digest.as_str(), o.decision.as_ref()))
+            .collect();
+        assert_eq!(by_digest["e1"].as_ref().unwrap().decision, "expired");
+        assert_eq!(by_digest["e2"].as_ref().unwrap().decision, "accepted");
+        assert_eq!(by_digest["e3"].as_ref().unwrap().decision, "expired");
     }
 
     #[test]

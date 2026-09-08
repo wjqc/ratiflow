@@ -498,8 +498,8 @@ mod tests {
         // AI 建议采纳：1 accepted（<30 → insufficient）。
         let _ = store.with_conn(|c| {
             c.execute(
-                "INSERT INTO shadow_suggestions(id, source, workitem_id, suggestion_type, suggestion_digest, content_json, generated_at)
-                 VALUES ('shs1','fast_track','wi0','gate_fast_track','d1','{}',?1)",
+                "INSERT INTO shadow_suggestions(id, source, workitem_id, scope_key, suggestion_type, suggestion_digest, content_json, generated_at)
+                 VALUES ('shs1','fast_track','wi0','wi0','gate_fast_track','d1','{}',?1)",
                 [timefmt::now()],
             )
             .unwrap();

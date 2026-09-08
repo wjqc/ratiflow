@@ -399,22 +399,6 @@
       "result": "value"
     },
     {
-      "name": "workitem.archive",
-      "params": [
-        {
-          "name": "workItemId",
-          "type": "string",
-          "required": true
-        },
-        {
-          "name": "archived",
-          "type": "boolean",
-          "required": false
-        }
-      ],
-      "result": "value"
-    },
-    {
       "name": "workitem.create",
       "params": [
         {
@@ -725,7 +709,7 @@
         {
           "name": "idempotencyKey",
           "type": "string",
-          "required": false,
+          "required": true,
           "description": "幂等键（重放返回同一 runId）"
         }
       ],
@@ -2315,6 +2299,12 @@
           "name": "reason",
           "type": "string",
           "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
         }
       ],
       "result": "value"
@@ -2357,6 +2347,143 @@
           "name": "substituteEvidenceIds",
           "type": "array",
           "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
+        },
+        {
+          "name": "expectedStateDigest",
+          "type": "string",
+          "required": false,
+          "description": "调用方冻结的工作项状态摘要；漂移即冲突"
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.decideSkip",
+      "params": [
+        {
+          "name": "approvalId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "type": "string",
+          "required": true,
+          "description": "approved|rejected"
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.resumeSkip",
+      "params": [
+        {
+          "name": "skipRequestId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.applyWaiver",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "gate",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "waivedKind",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "substituteEvidenceId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "rationale",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "suggestionId",
+          "type": "string",
+          "required": false,
+          "description": "关联的已采纳 fast-track 建议（可选）"
+        },
+        {
+          "name": "decidedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "gate.revokeWaiver",
+      "params": [
+        {
+          "name": "waiverId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "revokedBy",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
         }
       ],
       "result": "value"
@@ -2375,9 +2502,16 @@
           "required": true
         },
         {
-          "name": "factors",
-          "type": "object",
-          "required": true
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
+        },
+        {
+          "name": "expectedStateDigest",
+          "type": "string",
+          "required": false,
+          "description": "调用方冻结的工作项状态摘要（cas_digest 同源）；漂移即冲突"
         }
       ],
       "result": "value"
@@ -2440,6 +2574,12 @@
           "name": "requestedBy",
           "type": "string",
           "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
         }
       ],
       "result": "value"
@@ -2466,9 +2606,39 @@
           "name": "reason",
           "type": "string",
           "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "rework.resume",
+      "params": [
+        {
+          "name": "operationId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "resumedBy",
+          "type": "string",
+          "required": false,
+          "description": "恢复发起者（默认 system）"
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
+        }
+      ],
+      "result": "value",
+      "description": "按 progress 游标 + 双 digest 幂等恢复中断的返工两步执行（P0-4/0053）"
     },
     {
       "name": "rework.get",
@@ -2510,7 +2680,14 @@
     },
     {
       "name": "workitem.searchRebuild",
-      "params": [],
+      "params": [
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
+        }
+      ],
       "result": "value"
     },
     {
@@ -2530,6 +2707,12 @@
           "name": "expectedRevision",
           "type": "integer",
           "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
         }
       ],
       "result": "value"
@@ -2554,9 +2737,10 @@
           "required": true
         },
         {
-          "name": "stableId",
+          "name": "sourceId",
           "type": "string",
-          "required": true
+          "required": true,
+          "description": "manifest stableId（项目作用域内解析；P0-6）"
         },
         {
           "name": "outcome",
@@ -2572,6 +2756,18 @@
           "name": "evidenceRef",
           "type": "string",
           "required": false
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
+        },
+        {
+          "name": "verificationOpId",
+          "type": "string",
+          "required": false,
+          "description": "验证操作幂等键（跨 transport key；缺省服务端生成）"
         }
       ],
       "result": "value"
@@ -2762,7 +2958,8 @@
         {
           "name": "idempotencyKey",
           "type": "string",
-          "required": false
+          "required": true,
+          "description": "调用方生成的唯一幂等键；同 key 同参重放返回首次响应"
         }
       ],
       "result": "value"
@@ -4794,6 +4991,12 @@
           "name": "note",
           "type": "string",
           "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
         }
       ],
       "result": "value"
@@ -4820,6 +5023,12 @@
           "name": "note",
           "type": "string",
           "required": true
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": true,
+          "description": "调用方生成的唯一幂等键（uuid）；同 key 同参重放返回首次响应（P0-1）"
         }
       ],
       "result": "value"

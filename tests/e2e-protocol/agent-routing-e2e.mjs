@@ -148,6 +148,7 @@ async function main() {
     const startFrontend = await client.call('stage.startActivity', {
       workItemId: wi.id, gate: 'development', activityKey: 'frontend',
       goal: '实现前端组件', requiredCapabilities: ['frontend'], toolAllowlist: ['read_file'],
+      idempotencyKey: 'route-frontend',
     });
     assert(startFrontend.selection.source_scope === 'project_binding', 'frontend 命中项目绑定（AC-SW-08）');
     assert(startFrontend.selection.fallback_used === false, 'frontend 无回退');
@@ -157,12 +158,14 @@ async function main() {
     const startBackend = await client.call('stage.startActivity', {
       workItemId: wi.id, gate: 'development', activityKey: 'backend',
       goal: '实现后端接口', requiredCapabilities: ['backend'], toolAllowlist: ['read_file'],
+      idempotencyKey: 'route-backend',
     });
     assert(startBackend.selection.resolved_profile_version_id === backendVersion.id, 'backend 命中后端分身（AC-SW-10）');
 
     const startAnalysis = await client.call('stage.startActivity', {
       workItemId: wi.id, gate: 'development', activityKey: 'code_analysis',
       goal: '静态分析', toolAllowlist: ['read_file'],
+      idempotencyKey: 'route-analysis',
     });
     assert(startAnalysis.selection.source_scope === 'builtin_generic' && startAnalysis.selection.fallback_used === true, 'code_analysis 未绑定回退通用（AC-SW-10）');
 
@@ -205,6 +208,7 @@ async function main() {
       await client.call('stage.startActivity', {
         workItemId: wi.id, gate: 'testing', activityKey: 'e2e_testing',
         goal: '发布计划 FC', requiredCapabilities: ['e2e_testing'],
+        idempotencyKey: 'route-fc',
       });
     } catch (e) {
       fcError = /agent_profile_unavailable/.test(e.code ?? e.message);
@@ -222,6 +226,7 @@ async function main() {
     const startTesting = await client.call('stage.startActivity', {
       workItemId: wi.id, gate: 'testing', activityKey: 'e2e_testing',
       goal: '执行 E2E', requiredCapabilities: ['e2e_testing'], toolAllowlist: ['read_file'],
+      idempotencyKey: 'route-testing',
     });
     assert(startTesting.selection.source_scope === 'builtin_generic' && startTesting.selection.fallback_used === true, 'AC-SW-09：不健康专属回退通用');
     assert(/adapter_unhealthy/.test(startTesting.selection.reason_code), `回退原因被记录（${startTesting.selection.reason_code}）`);

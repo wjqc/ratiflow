@@ -294,7 +294,8 @@ pub fn latest_baseline(
     let row: Option<BaselineRow> = store.with_conn(|conn| {
         conn.query_row(
             "SELECT id, gate, revision_map, inputs_sha256, COALESCE(gitlab_commit_sha,''), frozen_at, superseded_by
-             FROM baselines WHERE workitem_id=?1 AND gate=?2 AND superseded_by IS NULL
+             FROM baselines WHERE workitem_id=?1 AND gate=?2
+               AND superseded_by IS NULL AND invalidated_by_rework_id IS NULL
              ORDER BY frozen_at DESC LIMIT 1",
             [workitem_id, gate],
             |r| {
@@ -358,7 +359,7 @@ pub fn freeze(
 
     store.with_conn(|conn| {
         conn.execute(
-            "UPDATE baselines SET superseded_by='pending' WHERE workitem_id=?1 AND gate=?2 AND superseded_by IS NULL",
+            "UPDATE baselines SET superseded_by='pending' WHERE workitem_id=?1 AND gate=?2 AND superseded_by IS NULL AND invalidated_by_rework_id IS NULL",
             rusqlite::params![workitem_id, gate],
         )?;
         Ok(())

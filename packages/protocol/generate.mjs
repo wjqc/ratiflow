@@ -81,4 +81,58 @@ if (missing.length > 0) {
   console.error('契约中声明但 Rust 未实现的方法：', missing.map((m) => m.name));
   process.exit(1);
 }
-console.log(`生成 ${contract.methods.length} 个方法类型；Rust 实现对齐检查通过。`);
+
+// --- P0-1 mutation registry 双向静态校验（审计 §7 P0-1 退出标准）---
+// 注册表（crates/ratiflow-core/src/mutation_registry.rs）是 read/mutation、receipt
+// 模式的单一声明源：方法集与契约严格一致；Required ⇔ 契约必填 idempotencyKey。
+const registrySource = readFileSync('crates/ratiflow-core/src/mutation_registry.rs', 'utf8');
+const markerBegin = '// BEGIN_REGISTRY_ENTRIES';
+const markerEnd = '// END_REGISTRY_ENTRIES';
+const beginIdx = registrySource.indexOf(markerBegin);
+const endIdx = registrySource.indexOf(markerEnd);
+if (beginIdx < 0 || endIdx < 0 || endIdx < beginIdx) {
+  console.error('mutation registry 缺少 BEGIN/END_REGISTRY_ENTRIES 标记（勿删标记行）');
+  process.exit(1);
+}
+const registryBlock = registrySource.slice(beginIdx + markerBegin.length, endIdx);
+const entryRe = /Entry\s*\{\s*method:\s*"([^"]+)",\s*kind:\s*Kind::(Read|Mutation),\s*receipt:\s*ReceiptMode::(None|Required)/g;
+const registry = new Map();
+for (const [, method, kind, receipt] of registryBlock.matchAll(entryRe)) {
+  if (registry.has(method)) {
+    console.error(`mutation registry 重复方法：${method}`);
+    process.exit(1);
+  }
+  registry.set(method, { kind, receipt });
+}
+const contractNames = contract.methods.map((m) => m.name);
+const contractSet = new Set(contractNames);
+if (contractNames.length !== contractSet.size) {
+  console.error('契约存在重复方法声明：', contractNames.filter((n, i) => contractNames.indexOf(n) !== i));
+  process.exit(1);
+}
+const registryOnly = [...registry.keys()].filter((m) => !contractSet.has(m));
+if (registryOnly.length > 0) {
+  console.error('注册表有而契约没有的方法（先改契约或删条目）：', registryOnly);
+  process.exit(1);
+}
+const contractOnly = contractNames.filter((m) => !registry.has(m));
+if (contractOnly.length > 0) {
+  console.error('契约有而注册表未声明的方法（新增方法必须先入注册表）：', contractOnly);
+  process.exit(1);
+}
+const keyMismatch = contract.methods
+  .filter((m) => {
+    const declared = m.params.some((p) => p.name === 'idempotencyKey' && p.required);
+    const registered = registry.get(m.name)?.receipt === 'Required';
+    return declared !== registered;
+  })
+  .map((m) => m.name);
+if (keyMismatch.length > 0) {
+  console.error('receipt 模式与契约 idempotencyKey 声明不一致的方法：', keyMismatch);
+  process.exit(1);
+}
+const receiptCount = [...registry.values()].filter((e) => e.receipt === 'Required').length;
+console.log(
+  `生成 ${contract.methods.length} 个方法类型；Rust 实现对齐检查通过；` +
+  `mutation registry 双向一致（${registry.size} 方法，${receiptCount} 个 receipt 门控 mutation）。`,
+);

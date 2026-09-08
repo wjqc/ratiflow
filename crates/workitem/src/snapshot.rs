@@ -59,6 +59,7 @@ fn control_manifest(
     workitem_id: &str,
     gate_id: &str,
     attempt_id: &str,
+    skip_linkage: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, Error> {
     let wi = crate::get(store, workitem_id)?;
     let stages = crate::stages(store, workitem_id)?;
@@ -84,7 +85,7 @@ fn control_manifest(
             }));
         }
     }
-    Ok(serde_json::json!({
+    let mut manifest = serde_json::json!({
         "workItemId": workitem_id,
         "snapshotGate": gate_id,
         "attemptId": attempt_id,
@@ -96,7 +97,12 @@ fn control_manifest(
         "stages": stages.iter().map(|s| serde_json::json!({
             "gate": s.gate, "state": s.state, "inputBaselineSha": s.input_baseline_sha,
         })).collect::<Vec<_>>(),
-    }))
+    });
+    // P0-3：跳关联接（skip waiver/替代证据 digest 冻结进清单——下一关输入可追溯）。
+    if let Some(linkage) = skip_linkage {
+        manifest["skipWaiver"] = linkage.clone();
+    }
+    Ok(manifest)
 }
 
 fn git_output(root: &std::path::Path, args: &[&str]) -> Option<String> {
@@ -337,7 +343,37 @@ pub fn create(
     attempt_id: &str,
     kind: &str,
 ) -> Result<Snapshot, Error> {
-    let control = control_manifest(store, workitem_id, gate_id, attempt_id)?;
+    create_inner(store, workitem_id, gate_id, attempt_id, kind, None)
+}
+
+/// P0-3：跳关下一关 entry snapshot（v1.4 §WP-8 Step B——清单含 skip 联接：
+/// skipRequestId/waiver/替代证据 digest；对象写内容寻址幂等，可重入）。
+pub fn create_for_skip(
+    store: &Store,
+    workitem_id: &str,
+    gate_id: &str,
+    attempt_id: &str,
+    skip_linkage: &serde_json::Value,
+) -> Result<Snapshot, Error> {
+    create_inner(
+        store,
+        workitem_id,
+        gate_id,
+        attempt_id,
+        "stage_entry",
+        Some(skip_linkage),
+    )
+}
+
+fn create_inner(
+    store: &Store,
+    workitem_id: &str,
+    gate_id: &str,
+    attempt_id: &str,
+    kind: &str,
+    skip_linkage: Option<&serde_json::Value>,
+) -> Result<Snapshot, Error> {
+    let control = control_manifest(store, workitem_id, gate_id, attempt_id, skip_linkage)?;
     let (workspace, mut resources) = workspace_manifest(store, workitem_id)?;
     let (external, ext_resources) = external_manifest(store, workitem_id)?;
     resources.extend(ext_resources);

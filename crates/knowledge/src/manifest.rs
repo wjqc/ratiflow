@@ -362,7 +362,7 @@ fn receipt_fail(store: &Store, op_id: &str, err: &str) {
 }
 
 /// git worktree 状态（§6.1 三档，porcelain 全量判据；git 不可用返回空串=未知）。
-fn git_worktree_state(root: &Path, rel: &str) -> String {
+pub fn git_worktree_state(root: &Path, rel: &str) -> String {
     let out = std::process::Command::new("git")
         .args([
             "-C",

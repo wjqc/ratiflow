@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// RPC 回执 lease 三态协议级 E2E（RDWS 实施计划 v1.4 WP-0 / RDWS-001）：
+// RPC 回执 lease 三态协议级 E2E（RDWS 实施计划 v1.4 WP-0 / RDWS-001；P0-1 扩展）：
 // ① 缺 idempotencyKey 拒绝（idempotency_key_required，不退化为直接执行）；
 // ② 同 key 异指纹拒绝（receipt_fingerprint_mismatch，执行前拦截）；
 // ③ 同 key 同参重放返回首次响应（版本不追加 = 不重执行）；
 // ④ deterministic 错误 envelope 重放（同 key 重试返回首次错误，版本不追加）；
-// ⑤ 并发同 key 只一 owner 获得执行权（双发 create 只追加一个版本）。
+// ⑤ 并发同 key 只一 owner 获得执行权（双发 create 只追加一个版本）；
+// ⑥ P0-1 新收口的 10 个 RDWS mutation 缺 key 一律拒绝（入口门控先于 feature flag）；
+// ⑦ P0-1 searchRebuild：同 key 重放不重执行（数据变化可观察）+ 异指纹拒绝。
 // 前置：cargo build --release -p ratiflow-core。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -148,12 +150,63 @@ async function main() {
       `⑤ 竞争失败方只允许 in_flight 冲突（实际 ${JSON.stringify(rejected)}）`);
     assert(await templateVersions(c, 'race-tpl') === 1, '⑤ 并发只追加一个版本（单 owner 执行）');
 
+    // ⑥ P0-1：本轮收口的 RDWS mutation 缺 key 一律拒绝——入口门控先于
+    //    feature flag 与 handler（部分方法 flag 未开，仍必须先报缺 key）。
+    const P01_MUTATIONS = [
+      ['gate.requestManualConfirmation', { workItemId: 'wi', gate: 'g', element: {}, requestedBy: 'a' }],
+      ['gate.requestSkip', { workItemId: 'wi', gateId: 'g', waiver: 'w', substituteEvidenceIds: ['e'] }],
+      ['gate.evaluateFastTrack', { workItemId: 'wi', gate: 'g', factors: {} }],
+      ['rework.request', { workItemId: 'wi', targetGate: 'g', reasonCode: 'regression' }],
+      ['rework.decide', { approvalId: 'appr', decision: 'approved', decidedBy: 'o' }],
+      ['automation.decideSuggestion', { suggestionId: 'shs', decision: 'accepted', decidedBy: 'o', note: '' }],
+      ['automation.reviewSuggestion', { suggestionId: 'shs', falsePositive: true, reviewer: 'q', note: '' }],
+      ['automation.setShadowMode', { automationId: 'auto', shadowMode: false, expectedRevision: 1 }],
+      ['knowledge.verifySource', { projectId: 'pj', stableId: 's', outcome: 'pass', verifier: 'v' }],
+      ['workitem.searchRebuild', {}],
+    ];
+    for (const [m, p] of P01_MUTATIONS) {
+      await expectErrorCode(() => c.call(m, p), 'idempotency_key_required', `⑥ ${m} 缺 key 拒绝`);
+    }
+
     console.log('rpc-receipt-e2e 全部通过');
   } catch (error) {
     fail(error);
   } finally {
     c.kill();
     rmSync(dataDir, { recursive: true, force: true });
+  }
+
+  // ⑦ P0-1 searchRebuild（flag 开启的独立实例）：同 key 重放不重执行——
+  //    首次重建后新增工作项，重放若重执行 indexed 会变为 2；返回 1 = transport 重放。
+  {
+    const dataDir = mkdtempSync(join(tmpdir(), 'sg-rpc-receipt-ft-'));
+    const c = new CoreClient(dataDir, { RATIFLOW_WORKFLOW_TEMPLATE_V2: '1', RATIFLOW_WORKITEM_FTS: '1' });
+    try {
+      await c.hello_();
+      await c.call('project.create', { gitlabInstance: 'local', namespace: 'e2e', project: 'rbreceipt', name: 'RbReceipt' });
+      const pj = (await c.call('project.list', {})).items[0].id;
+      await c.call('workitem.create', { projectId: pj, title: '索引样本' });
+      const k7 = 'rb-key-1';
+      const rb1 = await c.call('workitem.searchRebuild', { idempotencyKey: k7 });
+      assert(rb1.indexed === 1, '⑦ 首次重建索引 1 条');
+      await c.call('workitem.create', { projectId: pj, title: '第二条（重放期间新增）' });
+      const rb2 = await c.call('workitem.searchRebuild', { idempotencyKey: k7 });
+      assert(rb2.indexed === 1, `⑦ 同 key 重放返回首次响应（不重执行；实际 ${rb2.indexed}）`);
+      await expectErrorCode(
+        () => c.call('workitem.searchRebuild', { idempotencyKey: k7, extraParam: '指纹漂移' }),
+        'receipt_fingerprint_mismatch',
+        '⑦ 同 key 异指纹拒绝',
+      );
+      console.log('rpc-receipt-e2e ⑦（searchRebuild receipt）通过');
+    } catch (error) {
+      console.error(`E2E 失败：${error.message}`);
+      c.kill();
+      rmSync(dataDir, { recursive: true, force: true });
+      process.exit(1);
+    } finally {
+      c.kill();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   }
 }
 

@@ -14,6 +14,7 @@ pub mod requirements;
 pub mod rework;
 pub mod rollback;
 pub mod search;
+pub mod skip;
 pub mod snapshot;
 pub mod stages;
 pub mod worktree;

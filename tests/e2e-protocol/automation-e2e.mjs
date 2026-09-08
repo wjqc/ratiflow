@@ -12,6 +12,10 @@ import * as readline from 'node:readline';
 
 const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 
+// P0-1：decide/review/setShadowMode 为 receipt 门控 mutation（每次调用唯一 key）。
+let keySeq = 0;
+const idem = (prefix) => `${prefix}-${++keySeq}`;
+
 class CoreClient {
   constructor(dataDir, env = {}) {
     this.proc = spawn(CORE, ['app-server', '--data-dir', dataDir], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } });
@@ -65,9 +69,17 @@ function git(dir, ...args) {
 
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), 'sg-auto-e2e-'));
+  // P0-5：live 消费链的 agent run 需要 fake 模型（run_intent → agent_run → terminal）。
+  const scriptPath = join(tmpdir(), `sg-auto-script-${Date.now()}.json`);
+  writeFileSync(scriptPath, JSON.stringify(
+    Array.from({ length: 8 }, (_, i) => ({
+      content: `{"action":"final","summary":"自动化巡检 ${i} 完成"}`, tokensIn: 5, tokensOut: 5,
+    })),
+  ));
   const c = new CoreClient(dataDir, {
     RATIFLOW_AUTOMATIONS: '1',
     RATIFLOW_SKILL_REGISTRY_LOCAL: '1',
+    RATIFLOW_FAKE_MODEL_SCRIPT: scriptPath,
   });
   try {
     const proj = await c.call('project.create', { gitlabInstance: 'g', namespace: 'n', project: 'auto', name: 'Auto' });
@@ -184,19 +196,19 @@ async function main() {
       );
       // 不存在建议 → NotFound 族。
       await expectErrorContains(
-        () => c.call('automation.decideSuggestion', { suggestionId: 'shs_ghost', decision: 'accepted', decidedBy: 'owner', note: '' }),
+        () => c.call('automation.decideSuggestion', { suggestionId: 'shs_ghost', decision: 'accepted', decidedBy: 'owner', note: '', idempotencyKey: idem('dec-miss') }),
         'shadow_suggestion_missing',
         '不存在建议决定拒绝',
       );
       // 非法 decision 枚举。
       await expectErrorContains(
-        () => c.call('automation.decideSuggestion', { suggestionId: 'shs_ghost', decision: 'maybe', decidedBy: 'owner', note: '' }),
+        () => c.call('automation.decideSuggestion', { suggestionId: 'shs_ghost', decision: 'maybe', decidedBy: 'owner', note: '', idempotencyKey: idem('dec-bad') }),
         'shadow_decision_invalid',
         '非法 decision 枚举拒绝',
       );
       // 复核前置：建议须已决定（不存在 → shadow_suggestion_missing）。
       await expectErrorContains(
-        () => c.call('automation.reviewSuggestion', { suggestionId: 'shs_ghost', falsePositive: true, reviewer: 'qa', note: '' }),
+        () => c.call('automation.reviewSuggestion', { suggestionId: 'shs_ghost', falsePositive: true, reviewer: 'qa', note: '', idempotencyKey: idem('rev-miss') }),
         'shadow_suggestion_missing',
         '复核不存在建议拒绝',
       );
@@ -205,7 +217,7 @@ async function main() {
         const cOff = new CoreClient(dataDir);
         try {
           await expectErrorContains(
-            () => cOff.call('automation.decideSuggestion', { suggestionId: 'shs_x', decision: 'accepted', decidedBy: 'o', note: '' }),
+            () => cOff.call('automation.decideSuggestion', { suggestionId: 'shs_x', decision: 'accepted', decidedBy: 'o', note: '', idempotencyKey: 'dec-off' }),
             'feature_disabled',
             'Flag 关闭：decideSuggestion 拒绝',
           );
@@ -217,8 +229,8 @@ async function main() {
       }
     }
 
-    // --- 8. WP-12：shadow policy——shadow tick 只产建议不执行；人工切 live 过
-    //     观察门槛（29/30 边界）；误报率超阈值自动回 shadow + 通知 ---
+    // --- 8. WP-12/P0-5：shadow policy v2——误报率分母=已复核已决（coverage 门槛）、
+    //     两窗迟滞自动回退（CAS）、durable run_intent 消费链（run → terminal）---
     {
       const grant3 = await c.call('autonomy.createGrant', {
         workItemId: wi.id,
@@ -243,46 +255,89 @@ async function main() {
       assert(true, '33 次 shadow tick 全部 shadowed（无副作用）');
       const obs = await c.call('automation.observations', { source: 'automation', automationId: autoW12.id });
       assert(obs.items.length === 33, `33 条 shadow 建议在册（实际 ${obs.items.length}）`);
-      // 决定前：切 live 被门槛拒（decided=0<30）。
-      await expectErrorContains(
-        () => c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision }),
-        'automation_shadow_gate',
-        '未达观察门槛不可切 live',
-      );
-      // 决定 29 条：27 accepted + 2 rejected（1 条 fp=1 复核）→ 29<30 仍拒。
       const toDecide = obs.items.map((x) => x.id);
-      for (let i = 0; i < 29; i++) {
-        const decision = i < 27 ? 'accepted' : 'rejected';
-        await c.call('automation.decideSuggestion', { suggestionId: toDecide[i], decision, decidedBy: 'owner', note: '' });
-        if (i === 28) {
-          await c.call('automation.reviewSuggestion', { suggestionId: toDecide[i], falsePositive: true, reviewer: 'qa', note: '误报' });
-        }
-      }
+      const decide = (i, decision, note = '') =>
+        c.call('automation.decideSuggestion', { suggestionId: toDecide[i], decision, decidedBy: 'owner', note, idempotencyKey: idem(`w12dec${i}`) });
+      const review = (i, fp, note = '') =>
+        c.call('automation.reviewSuggestion', { suggestionId: toDecide[i], falsePositive: fp, reviewer: 'qa', note, idempotencyKey: idem(`w12rev${i}`) });
+
+      // 决定前：切 live 被拒（reviewed=0）。
       await expectErrorContains(
-        () => c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision }),
+        () => c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision, idempotencyKey: idem('lg0') }),
         'automation_shadow_gate',
-        '29 条决定 <min_sample 仍拒（边界 29/30）',
+        '零复核不可切 live',
       );
-      // 第 30 条：rejected + fp=1 → decided=30、fp=2（6.7%≤10%）→ 切 live 成功。
-      await c.call('automation.decideSuggestion', { suggestionId: toDecide[29], decision: 'rejected', decidedBy: 'owner', note: '' });
-      await c.call('automation.reviewSuggestion', { suggestionId: toDecide[29], falsePositive: true, reviewer: 'qa', note: '误报' });
-      const live = await c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision });
-      assert(live.shadowMode === false, '30 条决定且误报率≤阈值 → 切 live 成功');
-      // live tick：恢复真实执行（intent_created）。
+
+      // P0-5 coverage 门槛：30 决定只复核 14（coverage 46.7%<50%）→ 拒。
+      // 口径：28 accepted + 2 rejected，复核前 14 条（fp 全 0）。
+      for (let i = 0; i < 28; i++) await decide(i, 'accepted');
+      await decide(28, 'rejected');
+      await decide(29, 'rejected');
+      for (let i = 0; i < 14; i++) await review(i, false);
+      await expectErrorContains(
+        () => c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision, idempotencyKey: idem('lg1') }),
+        'automation_shadow_gate',
+        'coverage<50% 不可切 live（分母=已复核已决）',
+      );
+      // 补齐复核至全覆盖（fp=2/30=6.7%≤10%）→ 切 live 成功。
+      for (let i = 14; i < 30; i++) await review(i, i >= 28);
+      const live = await c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision, idempotencyKey: idem('lg2') });
+      assert(live.shadowMode === false, '全覆盖复核且误报率≤阈值 → 切 live 成功');
+
+      // P0-5 durable 消费链：live tick → run_intent 入队 → consumer（5s tick）
+      // 经 agent.start 创建 run → 回填 run_id → 终态。轮询 history 直到 runId 落位。
       const liveTick = await tick(40);
-      assert(liveTick.status === 'intent_created', `live tick 恢复执行（实际 ${liveTick.status}）`);
-      // 误报率抬升：剩余 3 条全 rejected + fp=1 → 5/33>10% → 下次 tick 自动回 shadow。
-      for (let i = 30; i < 33; i++) {
-        await c.call('automation.decideSuggestion', { suggestionId: toDecide[i], decision: 'rejected', decidedBy: 'owner', note: '' });
-        await c.call('automation.reviewSuggestion', { suggestionId: toDecide[i], falsePositive: true, reviewer: 'qa', note: '误报' });
+      assert(liveTick.status === 'intent_created', `live tick 入队 intent（实际 ${liveTick.status}）`);
+      const intentId = liveTick.note;
+      let runId = '';
+      for (let i = 0; i < 60 && !runId; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        const hist = (await c.call('automation.history', { automationId: autoW12.id })).items;
+        const row = hist.find((h) => h.scheduledFor === '2026-09-08T12:40:00.000Z');
+        if (row?.runId) runId = row.runId;
       }
-      const fb = await tick(41);
-      assert(fb.status === 'shadow_fallback', `误报率超阈值 → 自动回 shadow（实际 ${fb.status}）`);
-      const afterFb = await tick(42);
+      assert(!!runId, 'run_intent 消费后回填 runId（durable 链）');
+      let run = null;
+      for (let i = 0; i < 60; i++) {
+        run = await c.call('agent.get', { runId });
+        if (['completed_execution', 'failed', 'cancelled'].includes(run.status)) break;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      assert(run && run.status === 'completed_execution', `agent run 终态（实际 ${run?.status}）`);
+      const histRow = (await c.call('automation.history', { automationId: autoW12.id })).items
+        .find((h) => h.scheduledFor === '2026-09-08T12:40:00.000Z');
+      assert(histRow.runIntentId === intentId && histRow.runIntentState === 'consumed',
+        `history 携带 intent/run（实际 ${JSON.stringify(histRow)}）`);
+
+      // P0-5 两窗迟滞（每个窗口需不同 metric digest——同 digest 重复 tick 幂等跳过）：
+      // 窗一：决定 30/31 为 rejected+fp → 32 决定 32 复核 fp=4（12.5%>10%）
+      // → streak=1，tick 仍 live（不回退）。
+      for (const i of [30, 31]) {
+        await decide(i, 'rejected');
+        await review(i, true, '误报');
+      }
+      const t41 = await tick(41);
+      assert(t41.status === 'intent_created', `第一窗超阈值不回退（streak=1，实际 ${t41.status}）`);
+      // 同 digest 幂等：同窗口重复评估不叠加 streak（下一个不同 digest 窗口才推进）。
+      // 窗二（新 digest）：决定最后一条 32 为 rejected+fp → 33/33 fp=5（15.2%）→ 回退。
+      await decide(32, 'rejected');
+      await review(32, true, '误报');
+      const t42 = await tick(42);
+      assert(t42.status === 'shadow_fallback', `第二窗超阈值 → 自动回 shadow（实际 ${t42.status}）`);
+      const afterFb = await tick(43);
       assert(afterFb.status === 'shadowed', '回退后 tick 恢复 shadow 语义');
-      // （通知断言移至 WP-12 场景）
+      // cooldown：自动回退后人工切 live 被冷静期拒绝（安全迟滞）。
+      const autoAfter = await c.call('automation.list', {});
+      const rec = autoAfter.items.find((a) => a.id === autoW12.id);
+      await expectErrorContains(
+        () => c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: rec.revision, idempotencyKey: idem('lg3') }),
+        'automation_cooldown',
+        '回退 cooldown 内不可人工切 live',
+      );
+      // 通知幂等：shadow_fallback 通知恰一条（幂等键唯一）。
       const notes = (await c.call('notification.list', {})).items;
-      assert(notes.some((n) => n.kind === 'automation_blocked' && JSON.stringify(n.payload ?? {}).includes('shadow_fallback')), '回退落 automation_blocked 通知');
+      const fbNotes = notes.filter((n) => n.kind === 'automation_blocked' && JSON.stringify(n.payload ?? {}).includes('shadow_fallback'));
+      assert(fbNotes.length === 1, `回退只发一条通知（实际 ${fbNotes.length}）`);
       console.log('场景三（WP-12 shadow policy）通过');
     }
 

@@ -126,6 +126,39 @@ pub fn for_proposal(store: &Store, proposal_id: &str) -> Result<ImpactResult, Er
     impact_from_root(store, &workitem_id, &root)
 }
 
+/// workitem 全图影响面（P0-2 fast-track `provenance_complete` 因素的数据源）：
+/// 不做子图遍历，直接按全图节点数对照 IMPACT_NODE_CAP 判定 completeness——
+/// 空图（trace_writes 历史关闭/无写谱系）= Unknown（诚实，不伪造 complete）；
+/// 节点数超限 = Incomplete。impact_digest 即全图 facts digest（与
+/// workitem_facts_digest 同源），任何行内 UPDATE 必变（v1.4 RDWS-009 语义）。
+pub fn for_workitem(store: &Store, workitem_id: &str) -> Result<ImpactResult, Error> {
+    let (nodes, edges) = load_graph(store, workitem_id)?;
+    let completeness = if nodes.is_empty() {
+        Completeness::Unknown
+    } else if nodes.len() > IMPACT_NODE_CAP {
+        Completeness::Incomplete
+    } else {
+        Completeness::Complete
+    };
+    let digest = facts_digest(&nodes, &edges);
+    let reason = match completeness {
+        Completeness::Complete => format!("全图 {} 节点 / {} 边", nodes.len(), edges.len()),
+        Completeness::Incomplete => format!("全图 {} 节点超上限 {}", nodes.len(), IMPACT_NODE_CAP),
+        Completeness::Unknown => "无谱系节点（trace_writes 关闭或尚未建立）".into(),
+    };
+    Ok(ImpactResult {
+        nodes: nodes
+            .iter()
+            .take(DISPLAY_NODES_CAP)
+            .map(|n| n.0.clone())
+            .collect(),
+        completeness,
+        reason,
+        impact_digest: digest.clone(),
+        workitem_facts_digest: digest,
+    })
+}
+
 fn load_graph(store: &Store, workitem_id: &str) -> Result<(Vec<FactNode>, Vec<FactEdge>), Error> {
     store.with_conn(|conn| {
         let mut nodes: Vec<FactNode> = Vec::new();

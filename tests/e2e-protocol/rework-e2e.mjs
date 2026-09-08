@@ -132,18 +132,22 @@ async function main() {
       // 2) 并发双打回：第二个操作（不同 CAS 不可得——同状态同 note 会幂等重放；
       //    用不同 note 造第二操作）待审中；第一个批准后第二个 CAS 不符 failed。
       const pv2 = await c.call('rework.preview', { workItemId: wi.id, targetGate: 'design', reasonCode: 'regression', note: '第二次打回', requestedBy: 'agent' });
-      const req2 = await c.call('rework.request', { workItemId: wi.id, targetGate: 'design', reasonCode: 'regression', note: '第二次打回', requestedBy: 'agent' });
+      const req2 = await c.call('rework.request', { workItemId: wi.id, targetGate: 'design', reasonCode: 'regression', note: '第二次打回', requestedBy: 'agent', idempotencyKey: 'rwk-2' });
       assert(req2.state === 'awaiting_approval', '第二个操作待审');
 
       // 3) 第一个操作请求+批准（CAS 与 preview 时一致）。
-      const req1 = await c.call('rework.request', { workItemId: wi.id, targetGate: 'design', reasonCode: 'regression', note: '回归打回', requestedBy: 'agent' });
+      const req1 = await c.call('rework.request', { workItemId: wi.id, targetGate: 'design', reasonCode: 'regression', note: '回归打回', requestedBy: 'agent', idempotencyKey: 'rwk-1' });
       assert(req1.state === 'awaiting_approval' && req1.approvalId, '第一个操作待审');
       const done1 = await c.call('approval.decide', { approvalId: req1.approvalId, decision: 'approved', decidedBy: 'owner', reason: '批准打回' });
       assert(done1.state === 'completed' && done1.completed_at, '批准 → 两步执行 → completed');
+      assert(done1.progress === 'step_b_committed', `progress 游标到 step_b_committed（实际 ${done1.progress}）`);
+      // P0-4/0053：恢复入口幂等——completed 操作 resume 原样返回，不重复执行。
+      const resumed = await c.call('rework.resume', { operationId: req1.id, resumedBy: 'owner', idempotencyKey: 'rwk-res-1' });
+      assert(resumed.state === 'completed' && resumed.progress === 'step_b_committed', `resume 幂等（实际 ${JSON.stringify(resumed)}）`);
 
       // 4) 第二个操作：CAS 已漂移 → decide 拒 + failed。
       await expectErrorContains(
-        () => c.call('rework.decide', { approvalId: req2.approvalId, decision: 'approved', decidedBy: 'owner', reason: '' }),
+        () => c.call('rework.decide', { approvalId: req2.approvalId, decision: 'approved', decidedBy: 'owner', reason: '', idempotencyKey: 'rwk-decide-2' }),
         'rework_state_changed',
         '并发第二个操作 CAS 不符拒绝',
       );

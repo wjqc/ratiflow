@@ -256,7 +256,9 @@ pub fn record_intent(
         )?;
         Ok(())
     })?;
-    if matches!(status, "blocked_no_grant" | "failed" | "shadow_fallback") {
+    // P0-5：shadow_fallback 通知由 force_shadow_mode_v2 单一权威发出
+    //（metric digest 幂等键）；此处只发 blocked_no_grant/failed。
+    if matches!(status, "blocked_no_grant" | "failed") {
         // 通知 outbox（桌面通知首期消费）。
         store.with_conn(|conn| {
             conn.execute(
@@ -348,23 +350,245 @@ pub fn set_shadow_mode(
     store.with_conn(|conn| row(conn, automation_id))
 }
 
-/// WP-12：误报率触发（WP-8a 口径）下系统强制回 shadow（无 CAS——治理自动动作）。
-pub fn force_shadow_mode(store: &Store, automation_id: &str) -> Result<(), Error> {
-    store.with_conn(|conn| {
-        conn.execute(
-            "UPDATE automations SET shadow_mode=1, revision=revision+1, updated_at=?1 WHERE id=?2",
-            rusqlite::params![timefmt::now(), automation_id],
+/// P0-5：误报率自动回 shadow——**带 CAS 的两窗迟滞**（审计 §7 P0-5）：
+/// - 触发条件（新口径）：reviewed≥min_sample 且 review_coverage≥50% 且 rate>阈值；
+/// - metric 快照 digest 冻结（decided/reviewed/fp/coverage/window/阈值/策略版本），
+///   同快照重复评估幂等跳过（防同窗多 tick 重复计数）；
+/// - 连续两个**不同**超阈值快照（bad_window_streak≥2）才回退；
+/// - 回退 CAS：expected revision + shadow_mode=0 命中才写（用户并发改配置不覆盖）；
+/// - 同事务写 automations（shadow_mode/revision/cooldown/streak/last_metric_snapshot_digest）、
+///   automation_policy_transitions（UNIQUE 兜底）、audit、notification_outbox
+///   （幂等键 = fallback|automation|metric_digest，0051 唯一索引防重复通知）。
+///
+/// 返回 (本窗是否超阈值, 是否已回退)。
+pub fn force_shadow_mode_v2(
+    store: &Store,
+    automation_id: &str,
+    stats: (i64, i64, i64, f64, f64), // (decided, reviewed, fp, rate, coverage)
+    window_days: i64,
+) -> Result<(bool, bool), Error> {
+    let (decided, reviewed, fp, rate, coverage) = stats;
+    let digest = {
+        use sha2::Digest;
+        format!(
+            "sha256:{}",
+            ids::hex(&sha2::Sha256::digest(
+                format!(
+                    "fpmetrics|{automation_id}|{decided}|{reviewed}|{fp}|{rate:.6}|{coverage:.6}|{window_days}|{}|{}",
+                    shadow_fp_threshold(),
+                    shadow_min_sample()
+                )
+                .as_bytes()
+            ))
+        )
+    };
+    let min = shadow_min_sample();
+    let threshold = shadow_fp_threshold();
+    let breach = reviewed >= min && coverage >= 0.5 && rate > threshold;
+    let now = timefmt::now();
+    store.with_tx(|conn| {
+        let (revision, streak, last_digest): (i64, i64, String) = conn.query_row(
+            "SELECT revision, bad_window_streak, last_metric_snapshot_digest
+             FROM automations WHERE id=?1",
+            [automation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        Ok(())
+        // 同快照幂等：本窗已按此 digest 评估过（streak 已计）——不重复计数/通知。
+        // 是否"已回退"以 transition 事实为准（streak 阶段 shadow_mode 仍是 0）。
+        if !last_digest.is_empty() && last_digest == digest {
+            let transitioned: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM automation_policy_transitions
+                 WHERE automation_id=?1 AND metric_snapshot_digest=?2",
+                rusqlite::params![automation_id, digest],
+                |r| r.get(0),
+            )?;
+            return Ok((breach, transitioned > 0));
+        }
+        let new_streak = if breach { streak + 1 } else { 0 };
+        if !breach {
+            conn.execute(
+                "UPDATE automations SET bad_window_streak=0, last_metric_snapshot_digest=?1, updated_at=?2
+                 WHERE id=?3",
+                rusqlite::params![digest, now, automation_id],
+            )?;
+            return Ok((false, false));
+        }
+        // 超阈值但未到两窗：只累计 streak + 快照（不回退、不通知）。
+        if new_streak < 2 {
+            conn.execute(
+                "UPDATE automations SET bad_window_streak=?1, last_metric_snapshot_digest=?2, updated_at=?3
+                 WHERE id=?4",
+                rusqlite::params![new_streak, digest, now, automation_id],
+            )?;
+            sg_store::audit::append_at(
+                conn,
+                "system",
+                "automation.bad_window",
+                "automation",
+                automation_id,
+                serde_json::json!({"streak": new_streak, "metricDigest": digest,
+                                   "reviewed": reviewed, "falsePositives": fp, "rate": rate,
+                                   "reviewCoverage": coverage}),
+            )?;
+            return Ok((true, false));
+        }
+        // 两窗迟滞满足 → 回退（CAS：expected revision + shadow_mode=0；
+        // 命中 0 行 = 用户并发改配置 → 不覆盖，下轮重评）。
+        let changed = conn.execute(
+            "UPDATE automations SET shadow_mode=1, revision=revision+1, bad_window_streak=0,
+                    cooldown_started_at=?1, last_metric_snapshot_digest=?2, updated_at=?1
+             WHERE id=?3 AND revision=?4 AND shadow_mode=0",
+            rusqlite::params![now, digest, automation_id, revision],
+        )?;
+        if changed == 0 {
+            return Ok((true, false));
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO automation_policy_transitions
+             (id, automation_id, metric_snapshot_digest, target_mode, expected_revision,
+              review_coverage, sample_size, false_positives, window_days, policy_version, actor, created_at)
+             VALUES (?1,?2,?3,1,?4,?5,?6,?7,?8,'sp2','system',?9)",
+            rusqlite::params![
+                ids::new_id("apt"),
+                automation_id,
+                digest,
+                revision,
+                coverage,
+                reviewed,
+                fp,
+                window_days,
+                now
+            ],
+        )?;
+        sg_store::audit::append_at(
+            conn,
+            "system",
+            "automation.shadow_fallback",
+            "automation",
+            automation_id,
+            serde_json::json!({"metricDigest": digest, "reviewed": reviewed,
+                               "falsePositives": fp, "rate": rate, "reviewCoverage": coverage}),
+        )?;
+        // 通知幂等：同 (automation, metric digest) 只一条（0051 唯一索引兜底）。
+        conn.execute(
+            "INSERT OR IGNORE INTO notification_outbox
+             (id, kind, automation_id, payload_json, idempotency_key, created_at)
+             VALUES (?1,'automation_blocked',?2,?3,?4,?5)",
+            rusqlite::params![
+                ids::new_id("ntf"),
+                automation_id,
+                serde_json::json!({
+                    "status": "shadow_fallback",
+                    "note": format!("两窗误报率 {rate:.2}>{threshold:.2}（{fp}/{reviewed}，coverage {coverage:.2}），自动回 shadow"),
+                    "metricDigest": digest,
+                })
+                .to_string(),
+                format!("fallback|{automation_id}|{digest}"),
+                now
+            ],
+        )?;
+        outbox::emit_at(
+            conn,
+            "automation",
+            automation_id,
+            "automation.shadow_fallback",
+            serde_json::json!({"automationId": automation_id, "reason": "false_positive_rate",
+                               "metricDigest": digest}),
+        )?;
+        Ok((true, true))
+    })
+}
+
+/// P0-5：cooldown 窗口（回退后的人工冷静期；env 可配，默认 24h）。
+/// Some(until) = 冷静期内（不可人工切 live）。
+pub fn cooldown_until(store: &Store, automation_id: &str) -> Result<Option<String>, Error> {
+    let started: Option<String> = store.with_conn(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT cooldown_started_at FROM automations WHERE id=?1",
+                [automation_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten())
     })?;
-    outbox::emit(
-        store,
-        "automation",
-        automation_id,
-        "automation.shadow_fallback",
-        serde_json::json!({"automationId": automation_id, "reason": "false_positive_rate"}),
-    )?;
-    Ok(())
+    let Some(started) = started.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let hours = std::env::var("RATIFLOW_AUTOMATION_COOLDOWN_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(24);
+    let Some(t0) = timefmt::parse(&started) else {
+        return Ok(None);
+    };
+    let until = (t0 + time::Duration::hours(hours))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    if timefmt::now() < until {
+        Ok(Some(until))
+    } else {
+        Ok(None)
+    }
+}
+
+/// P0-5：durable run intent 入队（幂等：ri|automation|scheduled_for）。
+/// 返回 intent id。
+pub fn enqueue_run_intent(
+    store: &Store,
+    automation_id: &str,
+    workitem_id: Option<&str>,
+    scheduled_for: &str,
+    intent: &serde_json::Value,
+    grant_digest: &str,
+    policy_snapshot: &str,
+) -> Result<String, Error> {
+    let idempotency_key = format!("ri|{automation_id}|{scheduled_for}");
+    let existing: Option<String> = store.with_conn(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT id FROM run_intents WHERE idempotency_key=?1",
+                [&idempotency_key],
+                |r| r.get(0),
+            )
+            .ok())
+    })?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let id = ids::new_id("rint");
+    let now = timefmt::now();
+    let inserted = store.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO run_intents
+             (id, source, automation_id, workitem_id, intent_json, policy_snapshot,
+              context_digest, grant_digest, idempotency_key, state, created_at, updated_at)
+             VALUES (?1,'automation',?2,?3,?4,?5,'',?6,?7,'pending',?8,?8)",
+            rusqlite::params![
+                id,
+                automation_id,
+                workitem_id,
+                intent.to_string(),
+                policy_snapshot,
+                grant_digest,
+                idempotency_key,
+                now
+            ],
+        )?;
+        Ok(conn.changes() == 1)
+    })?;
+    if inserted {
+        return Ok(id);
+    }
+    store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT id FROM run_intents WHERE idempotency_key=?1",
+            [&idempotency_key],
+            |r| r.get(0),
+        )
+        .map_err(Error::from)
+    })
 }
 
 /// WP-12 门槛配置（本地假设，env 可覆盖）：最小样本/窗口天数/误报率阈值。
@@ -392,14 +616,36 @@ pub fn shadow_fp_threshold() -> f64 {
         .unwrap_or(0.10)
 }
 
-/// 影子误报率（WP-8a 口径，按 automation 作用域、decided_at 入窗）：
+/// 窗内已复核的已决建议数（分母口径，P0-5）。
+fn reviewed_of(
+    conn: &rusqlite::Connection,
+    automation_id: &str,
+    window_days: i64,
+) -> rusqlite::Result<i64> {
+    let start = (timefmt::parse(&timefmt::now()).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        - time::Duration::days(window_days))
+    .format(&time::format_description::well_known::Rfc3339)
+    .unwrap_or_default();
+    conn.query_row(
+        "SELECT COUNT(*) FROM shadow_decisions d
+         JOIN shadow_suggestions s ON s.id = d.suggestion_id
+         WHERE s.source='automation' AND s.automation_id=?1 AND d.decided_at >= ?2
+           AND EXISTS(SELECT 1 FROM shadow_reviews r WHERE r.suggestion_id = d.suggestion_id)",
+        rusqlite::params![automation_id, start],
+        |r| r.get(0),
+    )
+}
+
+/// 影子误报率（P0-5 修正口径，按 automation 作用域、decided_at 入窗）：
 /// 分子 = decision∈{rejected,expired} 且存在 false_positive=1 复核；
-/// 分母 = 窗内已决定建议数。返回 (decided, fp, rate)。
+/// **分母 = 已复核的已决建议**（不以未复核 rejection 稀释）；
+/// 同时输出 review_coverage = 已复核/已决。
+/// 返回 (decided, reviewed, fp, rate, coverage)。
 pub fn shadow_false_positive_stats(
     store: &Store,
     automation_id: &str,
     window_days: i64,
-) -> Result<(i64, i64, f64), Error> {
+) -> Result<(i64, i64, i64, f64, f64), Error> {
     let start = (timefmt::parse(&timefmt::now()).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
         - time::Duration::days(window_days))
     .format(&time::format_description::well_known::Rfc3339)
@@ -418,12 +664,18 @@ pub fn shadow_false_positive_stats(
             |r| {
                 let decided: i64 = r.get(0)?;
                 let fp: i64 = r.get(1)?;
-                let rate = if decided > 0 {
-                    fp as f64 / decided as f64
+                let reviewed = reviewed_of(conn, automation_id, window_days)?;
+                let rate = if reviewed > 0 {
+                    fp as f64 / reviewed as f64
                 } else {
                     0.0
                 };
-                Ok((decided, fp, rate))
+                let coverage = if decided > 0 {
+                    reviewed as f64 / decided as f64
+                } else {
+                    0.0
+                };
+                Ok((decided, reviewed, fp, rate, coverage))
             },
         )
         .map_err(Error::from)
@@ -455,6 +707,314 @@ mod tests {
             })
             .unwrap();
         store
+    }
+
+    // ---- P0-5：误报率口径 / 两窗迟滞 CAS / cooldown / durable intents ----
+
+    fn automation_with_suggestions(
+        store: &Store,
+        decided_reviewed: &[(bool, bool)], // (第 i 条: decision 是否 rejected, 是否已复核)
+        fp: &[usize],                      // fp=1 的复核集合
+    ) -> String {
+        let id = ids::new_id("auto");
+        let now = timefmt::now();
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO automations(id, key, interval_secs, next_fire_at, shadow_mode, created_at, updated_at)
+                     VALUES (?1,'k',60,?2,0,?2,?2)",
+                    rusqlite::params![id, now],
+                )?;
+                for (i, (rejected, reviewed)) in decided_reviewed.iter().enumerate() {
+                    let sid = format!("shs_p5_{i}");
+                    c.execute(
+                        "INSERT INTO shadow_suggestions(id, source, automation_id, workitem_id, scope_key,
+                             suggestion_type, suggestion_digest, content_json, input_state_digest, generated_at)
+                         VALUES (?1,'automation',?2,NULL,?2,'automation_intent',?3,'{}','',?4)",
+                        rusqlite::params![sid, id, format!("sha256:p5{i}"), now],
+                    )?;
+                    c.execute(
+                        "INSERT INTO shadow_decisions(suggestion_id, decision, decided_by, decided_at, note)
+                         VALUES (?1,?2,'o',?3,'')",
+                        rusqlite::params![sid, if *rejected { "rejected" } else { "accepted" }, now],
+                    )?;
+                    if *reviewed {
+                        let is_fp = fp.contains(&i);
+                        c.execute(
+                            "INSERT INTO shadow_reviews(id, suggestion_id, false_positive, reviewer, note, reviewed_at)
+                             VALUES (?1,?2,?3,'qa','',?4)",
+                            rusqlite::params![format!("shr_p5_{i}"), sid, is_fp as i64, now],
+                        )?;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn p5_stats_reviewed_denominator_and_coverage() {
+        let store = setup();
+        // 30 决定：29 accepted（10 复核）+ 1 rejected（已复核 fp=1）。
+        let mut plan = vec![(false, true); 10];
+        plan.extend(vec![(false, false); 19]);
+        plan.push((true, true));
+        let id = automation_with_suggestions(&store, &plan, &[29]);
+        let (decided, reviewed, fp, rate, coverage) =
+            shadow_false_positive_stats(&store, &id, 14).unwrap();
+        assert_eq!((decided, reviewed, fp), (30, 11, 1));
+        assert!(
+            (rate - 1.0 / 11.0).abs() < 1e-9,
+            "分母=已复核已决（{rate}）"
+        );
+        assert!(
+            (coverage - 11.0 / 30.0).abs() < 1e-9,
+            "coverage=已复核/已决"
+        );
+    }
+
+    #[test]
+    fn p5_two_window_hysteresis_cas_and_digest_idempotency() {
+        let store = setup();
+        // 窗一：decided=30 全复核（reviewed=30 达 min_sample、coverage=1.0）、
+        // fp=6（20%>10%）→ 超阈值但 streak=1 不回退。
+        let plan = [vec![(false, true); 24], vec![(true, true); 6]].concat();
+        let id = automation_with_suggestions(&store, &plan, &(24..30).collect::<Vec<_>>());
+        let s1 = shadow_false_positive_stats(&store, &id, 14).unwrap();
+        let (breach1, fell1) = force_shadow_mode_v2(&store, &id, s1, 14).unwrap();
+        assert!(breach1 && !fell1, "第一窗只累计 streak 不回退");
+        let mode: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT shadow_mode FROM automations WHERE id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(mode, 0, "仍在 live");
+        // 同 digest 幂等：重复评估不重复计数。
+        let (_b, f) = force_shadow_mode_v2(&store, &id, s1, 14).unwrap();
+        assert!(!f, "同 metric digest 幂等跳过");
+        let streak: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT bad_window_streak FROM automations WHERE id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(streak, 1, "幂等跳过不叠加 streak");
+        // 窗二（新 digest：新增 1 条 fp 复核 → 7/31）→ streak=2 → 回退 + cooldown + transition + 单通知。
+        let plan2 = [plan, vec![(true, true); 1]].concat();
+        let mut fp2 = (24..30).collect::<Vec<_>>();
+        fp2.push(30);
+        store.with_conn(|c| {
+            let sid = "shs_p5_30";
+            c.execute(
+                "INSERT INTO shadow_suggestions(id, source, automation_id, workitem_id, scope_key,
+                     suggestion_type, suggestion_digest, content_json, input_state_digest, generated_at)
+                 VALUES (?1,'automation',?2,NULL,?2,'automation_intent','sha256:p5b','{}','',?3)",
+                rusqlite::params![sid, id, timefmt::now()],
+            )?;
+            c.execute(
+                "INSERT INTO shadow_decisions(suggestion_id, decision, decided_by, decided_at, note)
+                 VALUES (?1,'rejected','o',?2,'')",
+                rusqlite::params![sid, timefmt::now()],
+            )?;
+            c.execute(
+                "INSERT INTO shadow_reviews(id, suggestion_id, false_positive, reviewer, note, reviewed_at)
+                 VALUES ('shr_p5_30',?1,1,'qa','',?2)",
+                rusqlite::params![sid, timefmt::now()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let _ = plan2;
+        let s2 = shadow_false_positive_stats(&store, &id, 14).unwrap();
+        let (breach2, fell2) = force_shadow_mode_v2(&store, &id, s2, 14).unwrap();
+        assert!(breach2 && fell2, "第二窗回退");
+        let (mode, cooldown): (i64, String) = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT shadow_mode, cooldown_started_at FROM automations WHERE id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(mode, 1, "已回 shadow");
+        assert!(!cooldown.is_empty(), "cooldown 已置");
+        let transitions: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM automation_policy_transitions WHERE automation_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(transitions, 1, "回退只有一条 transition");
+        let notes: i64 = store.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM notification_outbox WHERE automation_id=?1 AND kind='automation_blocked'",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap())
+        })
+        .unwrap();
+        assert_eq!(notes, 1, "回退只发一条通知（幂等键唯一）");
+        // 同 digest 重复评估 → 幂等（transition/通知不增）。
+        force_shadow_mode_v2(&store, &id, s2, 14).unwrap();
+        let transitions2: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM automation_policy_transitions WHERE automation_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(transitions2, 1);
+        // cooldown 生效。
+        assert!(
+            cooldown_until(&store, &id).unwrap().is_some(),
+            "cooldown 窗口内"
+        );
+    }
+
+    #[test]
+    fn p5_cas_drift_does_not_override_user_config() {
+        let store = setup();
+        // 两窗超阈值后，手工并发改 revision（模拟用户同时改配置）→ CAS 不命中不覆盖。
+        let plan = vec![(true, true); 30];
+        let id = automation_with_suggestions(&store, &plan, &(0..30).collect::<Vec<_>>());
+        let s = shadow_false_positive_stats(&store, &id, 14).unwrap();
+        let _ = force_shadow_mode_v2(&store, &id, s, 14).unwrap(); // streak=1
+                                                                   // 用户并发动作：自行切回 shadow（revision+1 且 shadow_mode=1）——
+                                                                   // 系统 CAS（AND shadow_mode=0）不再命中，不得覆盖/再推进 revision。
+        store.with_conn(|c| {
+            c.execute(
+                "UPDATE automations SET revision=revision+1, shadow_mode=1, interval_secs=120, updated_at=?1 WHERE id=?2",
+                [timefmt::now(), id.clone()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        // 新 digest（再补一条 fp）→ streak 应到 2，但 CAS 漂移 → 不回退。
+        store.with_conn(|c| {
+            let sid = "shs_p5_cas";
+            c.execute(
+                "INSERT INTO shadow_suggestions(id, source, automation_id, workitem_id, scope_key,
+                     suggestion_type, suggestion_digest, content_json, input_state_digest, generated_at)
+                 VALUES (?1,'automation',?2,NULL,?2,'automation_intent','sha256:cas','{}','',?3)",
+                rusqlite::params![sid, id, timefmt::now()],
+            )?;
+            c.execute(
+                "INSERT INTO shadow_decisions(suggestion_id, decision, decided_by, decided_at, note)
+                 VALUES (?1,'rejected','o',?2,'')",
+                rusqlite::params![sid, timefmt::now()],
+            )?;
+            c.execute(
+                "INSERT INTO shadow_reviews(id, suggestion_id, false_positive, reviewer, note, reviewed_at)
+                 VALUES ('shr_p5_cas',?1,1,'qa','',?2)",
+                rusqlite::params![sid, timefmt::now()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let s2 = shadow_false_positive_stats(&store, &id, 14).unwrap();
+        let (_b, fell) = force_shadow_mode_v2(&store, &id, s2, 14).unwrap();
+        assert!(!fell, "CAS 不命中（用户已自行切 shadow）不重复回退");
+        let (mode, revision): (i64, i64) = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT shadow_mode, revision FROM automations WHERE id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(mode, 1, "用户配置保持");
+        let transitions: i64 = store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM automation_policy_transitions WHERE automation_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap())
+            })
+            .unwrap();
+        assert_eq!(transitions, 0, "系统不写 transition（未覆盖用户配置）");
+        let _ = revision;
+    }
+
+    #[test]
+    fn p5_enqueue_run_intent_idempotent() {
+        let store = setup();
+        let id = ids::new_id("auto");
+        let now = timefmt::now();
+        store.with_conn(|c| {
+            c.execute(
+                "INSERT INTO automations(id, key, interval_secs, next_fire_at, created_at, updated_at)
+                 VALUES (?1,'k',60,?2,?2,?2)",
+                rusqlite::params![id, now],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let intent = serde_json::json!({"goal": "巡检"});
+        let r1 = enqueue_run_intent(
+            &store,
+            &id,
+            None,
+            "2026-09-08T12:00:00Z",
+            &intent,
+            "g",
+            "sp2",
+        )
+        .unwrap();
+        let r2 = enqueue_run_intent(
+            &store,
+            &id,
+            None,
+            "2026-09-08T12:00:00Z",
+            &intent,
+            "g",
+            "sp2",
+        )
+        .unwrap();
+        assert_eq!(r1, r2, "同 scheduled_for 幂等");
+        let n: i64 = store
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT COUNT(*) FROM run_intents", [], |r| r.get(0))
+                        .unwrap(),
+                )
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+        let (state, attempt): (String, i64) = store
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT state, attempt FROM run_intents", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .unwrap(),
+                )
+            })
+            .unwrap();
+        assert_eq!((state.as_str(), attempt), ("pending", 0));
     }
 
     #[test]
