@@ -1,11 +1,12 @@
-// 执行与沙箱：executor.settings + executor.check 运行自检。
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+// 执行与沙箱：executor.settings + executor.check 运行自检。改动即保存（无保存按钮）。
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { rpc } from '../../../rpc/client';
 import { SettingsPageHeader } from '../components/SettingsPageHeader';
 import { SettingsRow, SettingsToggle } from '../components/SettingsRow';
 import { SettingsSection } from '../components/SettingsSection';
 import { StatusPill } from '../components/StatusPill';
-import { IconCheck, IconZap } from '../../../components/Icons';
+import { IconZap } from '../../../components/Icons';
+import { useAutoSave } from '../hooks/useAutoSave';
 
 interface ExecutorSettings {
   mode?: string;
@@ -37,42 +38,47 @@ const MODE_HINT: Record<string, string> = {
 };
 
 export function ExecutionPage() {
-  const [value, setValue] = useState<ExecutorSettings | null>(null);
   const [draft, setDraft] = useState<ExecutorSettings>({ revision: 0 });
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState<CheckResponse | null>(null);
+  const revisionRef = useRef(0);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
       const res = await rpc<ExecutorSettings>('executor.settings.get', {});
-      setValue(res); setDraft(res);
+      revisionRef.current = typeof res.revision === 'number' ? res.revision : 0;
+      setDraft(res);
     } catch (e) {
       setError(e instanceof Error ? e.message : '执行设置加载失败');
     } finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(value);
-  const set = (key: keyof ExecutorSettings, v: unknown) => setDraft((d) => ({ ...d, [key]: v }));
-
-  const save = async (e: FormEvent) => {
-    e.preventDefault();
-    setSaving(true); setError(null); setNotice(null);
+  const persist = async () => {
+    const current = draftRef.current;
+    const expected = revisionRef.current;
     try {
-      await rpc('executor.settings.update', {
-        settings: { ...draft, unsafeConfirmed: draft.mode === 'unsafe_explicit' },
-        expectedRevision: value?.revision ?? 0,
+      const res = await rpc<{ revision: number }>('executor.settings.update', {
+        settings: { ...current, unsafeConfirmed: current.mode === 'unsafe_explicit' },
+        expectedRevision: expected,
       });
-      setNotice('执行设置已保存');
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '保存失败');
-    } finally { setSaving(false); }
+      revisionRef.current = typeof res.revision === 'number' ? res.revision : expected + 1;
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存失败');
+    }
+  };
+
+  const { pending, schedule } = useAutoSave(persist);
+
+  const set = (key: keyof ExecutorSettings, v: unknown, immediate = false) => {
+    setDraft((d) => ({ ...d, [key]: v }));
+    schedule(immediate ? 0 : 400);
   };
 
   const runCheck = async () => {
@@ -89,17 +95,28 @@ export function ExecutionPage() {
       <SettingsPageHeader
         title="执行与沙箱"
         scope="本地"
-        status={loading ? <StatusPill kind="checking" /> : dirty ? <StatusPill kind="pending" label="有未保存更改" /> : <StatusPill kind="ready" label="已保存" />}
+        status={loading ? <StatusPill kind="checking" /> : pending ? <StatusPill kind="pending" label="保存中…" /> : <StatusPill kind="ready" label="已保存" />}
         description="Agent 命令执行模式与资源限制。"
       />
 
       {error ? <div className="sg-banner sg-banner--error" role="alert">操作失败：{error}</div> : null}
-      {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
 
       <SettingsSection title="模式与资源">
-        <form className="sg-setting-list" onSubmit={save}>
+        <div className="sg-setting-list">
           <SettingsRow title="执行模式" htmlFor="ex-mode" description={MODE_HINT[draft.mode ?? 'safe_restricted']}>
-            <select id="ex-mode" className="sg-select" value={draft.mode ?? 'safe_restricted'} onChange={(e) => set('mode', e.target.value)}>
+            <select
+              id="ex-mode"
+              className="sg-select"
+              value={draft.mode ?? 'safe_restricted'}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (next === 'unsafe_explicit') {
+                  const ok = window.confirm('不安全模式不提供容器级隔离。确定切换到显式不安全模式吗？');
+                  if (!ok) return;
+                }
+                set('mode', next, true);
+              }}
+            >
               <option value="docker">Docker（推荐）</option>
               <option value="kernel_restricted">内核沙箱（无 Docker 时推荐）</option>
               <option value="safe_restricted">本机白名单（非强隔离）</option>
@@ -114,7 +131,7 @@ export function ExecutionPage() {
           ) : null}
           {draft.mode === 'unsafe_explicit' ? (
             <div className="sg-banner sg-banner--warning sg-set-item-banner" role="alert">
-              不安全模式不提供容器级隔离；保存即视为二次确认。
+              不安全模式不提供容器级隔离；已二次确认，改动即时生效。
             </div>
           ) : null}
           <SettingsRow title="内存（MB）" htmlFor="ex-mem" narrow>
@@ -131,15 +148,9 @@ export function ExecutionPage() {
           </SettingsRow>
           <SettingsRow title="默认禁网" description="工具执行默认切断网络出口">
             <SettingsToggle label="默认禁网" checked={draft.networkOff !== false}
-              onChange={(checked) => set('networkOff', checked)} />
+              onChange={(checked) => set('networkOff', checked, true)} />
           </SettingsRow>
-          <div className="sg-set-form-actions">
-            <button type="submit" className="sg-btn sg-btn--primary" disabled={!dirty || saving}>
-              <IconCheck size={14} />
-              {saving ? '保存中…' : '保存更改'}
-            </button>
-          </div>
-        </form>
+        </div>
       </SettingsSection>
 
       <SettingsSection title="运行自检" description="内核沙箱验证（允许面读/敏感面拒/禁网）或一次性容器全流程">

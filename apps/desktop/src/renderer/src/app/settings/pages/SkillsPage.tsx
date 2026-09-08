@@ -457,13 +457,6 @@ export function SkillsPage() {
 
       {tab === 'installed' ? (
         <>
-      <section className="sg-memory-master" aria-label="技能说明">
-        <div>
-          <strong>Agent 技能</strong>
-          <p>启用的技能会在 Agent 执行时注入提示词，用于固化工作方式与检查清单。总注入预算 32KB。</p>
-        </div>
-      </section>
-
       {error ? <div role="alert" className="sg-memory-banner sg-memory-banner--error">{error}</div> : null}
       {notice ? <div role="status" className="sg-memory-banner sg-memory-banner--ok">{notice}</div> : null}
 
@@ -758,11 +751,6 @@ export function SkillsPage() {
             )}
           </div>
 
-          <p className="sg-set-item-desc" style={{ marginTop: 12 }}>
-            远程 Git 仓库：仅 https，浏览按清单列插件，安装按 pin SHA/引用拉取插件仓库、只提取其中 SKILL.md；
-            本机目录：读取本机已安装插件。每个技能的开关即安装状态：开 = 安装（经秘密扫描，版本 draft 待激活），
-            关 = 卸载。绝不执行市场内任何文件。
-          </p>
         </>
       )}
 

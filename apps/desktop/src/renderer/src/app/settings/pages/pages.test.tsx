@@ -113,13 +113,21 @@ describe('设置页接线', () => {
     expect(screen.getByLabelText('访问凭证（密码或私钥）')).toBeInTheDocument();
   });
 
-  it('常规页合并外观设置并一次保存两个设置域', async () => {
+  it('常规页合并外观设置并自动保存两个设置域（无保存按钮）', async () => {
     rpcMock.mockImplementation((method: string) => {
       if (method === 'settings.get') {
         return ok({
           items: [
             { key: 'app.general', value: { language: 'zh-CN' }, revision: 2 },
             { key: 'app.appearance', value: { density: 'comfortable' }, revision: 3 },
+          ],
+        });
+      }
+      if (method === 'settings.update') {
+        return ok({
+          items: [
+            { key: 'app.general', revision: 3 },
+            { key: 'app.appearance', revision: 4 },
           ],
         });
       }
@@ -132,7 +140,8 @@ describe('设置页接线', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: /^外观$/ })).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText('语言'), { target: { value: 'system' } });
     fireEvent.change(screen.getByLabelText('界面密度'), { target: { value: 'compact' } });
-    fireEvent.click(screen.getByRole('button', { name: '保存更改' }));
+    // 改动即保存：无「保存更改」按钮，自动触发 settings.update。
+    expect(screen.queryByRole('button', { name: '保存更改' })).not.toBeInTheDocument();
     await waitFor(() => expect(rpcMock).toHaveBeenCalledWith(
       'settings.update',
       expect.objectContaining({

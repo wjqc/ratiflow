@@ -3361,7 +3361,6 @@ button.sg-step { cursor: pointer; }
 
 .sg-reference-empty strong { color: var(--sg-text-primary); font-size: 13.5px; }
 .sg-reference-empty span { font-size: 12px; }
-.sg-reference-page .sg-setting-toggle input:checked + span { background: #111214; }
 
 .sg-mcp-new,
 .sg-mcp-save {
@@ -3517,7 +3516,6 @@ button.sg-step { cursor: pointer; }
 .sg-mcp-json-editor p { margin: 0; color: var(--sg-text-secondary); font-size: 11.5px; }
 .sg-mcp-create-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 0 -16px; padding: 13px 16px; border-top: 1px solid var(--sg-border-default); }
 
-[data-theme='dark'] .sg-reference-page .sg-setting-toggle input:checked + span,
 [data-theme='dark'] .sg-mcp-new,
 [data-theme='dark'] .sg-mcp-save {
   border-color: #e8eaed;
