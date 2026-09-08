@@ -1,0 +1,39 @@
+apps/desktop/src/renderer/src/app/settings/pages/pages.test.tsx
+  s_10cee4de082fa1::t_b982c6623bcb9e 116,126-133,143-144
+apps/desktop/src/renderer/src/app/settings/pages/ExecutionPage.tsx
+  s_10cee4de082fa1::t_0623e9d8f9ddcf 1-2,8-9,46-48,54-55,62-64,66-68,70-81,98,105,107-119,134,151,153
+apps/desktop/src/renderer/src/app/settings/hooks/useAutoSave.ts
+  s_10cee4de082fa1::t_42a97a1031becf 1-60
+apps/desktop/src/renderer/src/app/settings/pages/GeneralPage.tsx
+  s_10cee4de082fa1::t_fa4e8ba179ff46 1-2,8,14-15,18-25,34-43,55-65,67-70,72-74,76,79,85-95,104-105,113-142,144-165
+apps/desktop/src/renderer/src/app/settings/pages/KnowledgeDefaultsPage.tsx
+  s_10cee4de082fa1::t_fc5996ce899a8a 2-3,9,44-46,53-54,62-64,67-68,70-81,89,95-108,110-122,124-137,139-152,154-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "54b1e7e41b6799be7b6e55e352fc685d048dfc9c",
+  "prompts": {},
+  "sessions": {
+    "s_10cee4de082fa1": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a9fabe05cadd09adcca2446",
+        "model": "deepseek_v4_flash_official__dev"
+      },
+      "human_author": "wenjian3 <wenjian3@asiainfo.com>",
+      "custom_attributes": {
+        "client_type": "ide",
+        "external_session_id": "6a9fabe05cadd09adcca2446",
+        "operation_id": "6a9fb57b5cadd09adcca25ba",
+        "source_scene": "agent",
+        "session_id": "6a9fabe05cadd09adcca2446",
+        "edit_kind": "bash",
+        "tool_name": "RunCommand",
+        "display_model_name": "DeepSeek-V4-Flash 正式版",
+        "tool_use_id": "6a9fb57b5cadd09adcca25ba",
+        "runtime_client": "trae-tob-git-ai"
+      }
+    }
+  }
+}
