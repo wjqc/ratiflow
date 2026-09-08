@@ -101,6 +101,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         48,
         include_str!("../migrations/0048_automation_runs_shadow.sql"),
     ),
+    (
+        49,
+        include_str!("../migrations/0049_knowledge_verification_receipts.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

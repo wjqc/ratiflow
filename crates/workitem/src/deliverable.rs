@@ -381,3 +381,79 @@ mod tests {
         assert!(entries.iter().all(|e| e["satisfied"] == json!(true)));
     }
 }
+
+#[cfg(test)]
+mod b9_release_notes_tests {
+    use super::*;
+    use sg_store::{ids, timefmt, Store};
+
+    fn setup() -> Store {
+        let dir =
+            std::env::temp_dir().join(format!("sg-b9-{}-{}", std::process::id(), ids::new_id("t")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir, "test").unwrap();
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj','u','n','p','main',?1)",
+                    [timefmt::now()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// B9：release_notes 为模板可配置 deliverable kind——落在 requirements 关
+    ///（非 Deployment）照常经冻结与满足判定，无任何 Deployment 硬编码阻挡。
+    #[test]
+    fn release_notes_kind_is_template_configurable_anywhere() {
+        let store = setup();
+        let t = sg_workflow::template::create_template(&store, "b9-notes", "发布说明前置").unwrap();
+        let v = sg_workflow::template::create_version(
+            &store,
+            &t.id,
+            &[sg_workflow::template::GateDefInput {
+                gate_id: "requirements".into(),
+                title: "需求关".into(),
+                purpose: String::new(),
+                deliverables: vec!["release_notes".into()],
+                acceptance: vec![],
+                context_policy_ref: None,
+                team_policy_ref: None,
+                workspace_policy_ref: None,
+                skip_policy: None,
+                fast_track_policy: None,
+            }],
+            "tester",
+        )
+        .unwrap();
+        sg_workflow::template::activate(&store, &v.id).unwrap();
+        let wi =
+            crate::create_with_template(&store, "pj", "B9 任务", "", None, &[], Some("b9-notes"))
+                .unwrap();
+        let wi = wi.id;
+        // kind 按模板透传。
+        assert_eq!(
+            required_kinds_for(&store, &wi, "requirements").unwrap(),
+            vec!["release_notes".to_string()]
+        );
+        // 常规冻结流程满足（artifact → draft → review → freeze）。
+        let art = sg_artifact::create_artifact(&store, &wi, "release_notes", "发布说明").unwrap();
+        let rev =
+            sg_artifact::create_draft(&store, &art.id, "# Release Notes\n- 变更条目").unwrap();
+        sg_artifact::add_review(&store, &rev.id, "t", "approved", "", None).unwrap();
+        sg_artifact::freeze(
+            &store,
+            &wi,
+            "requirements",
+            std::slice::from_ref(&rev.id),
+            "",
+            "",
+        )
+        .unwrap();
+        let st = status(&store, &wi, "requirements").unwrap();
+        assert_eq!(st["satisfied"], json!(true), "{st}");
+    }
+}

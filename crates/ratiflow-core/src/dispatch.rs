@@ -2602,7 +2602,38 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let scope = str_param(params, "scope")?;
             sg_workflow::metrics::overview(store, &scope).map_err(store_err)
         }
-        "triage.list" => sg_workflow::metrics::triage_list(store).map_err(store_err),
+        "triage.list" => {
+            let mut out = sg_workflow::metrics::triage_list(store).map_err(store_err)?;
+            // WP-13：block 级知识源未验证进 Triage（衔接 WP-11）。
+            let mut knowledge_blocked = Vec::new();
+            let projects: Vec<String> = store
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare("SELECT id FROM projects ORDER BY created_at")?;
+                    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                    rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+                })
+                .unwrap_or_default();
+            for pj in &projects {
+                if let Ok(ov) = sg_knowledge::freshness::freshness_overview(store, pj) {
+                    for item in ov["items"].as_array().cloned().unwrap_or_default() {
+                        let severity = item["verificationPolicy"]["severity"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        let state = item["state"].as_str().unwrap_or("verified").to_string();
+                        if severity == "block" && state != "verified" {
+                            knowledge_blocked.push(json!({
+                                "projectId": pj,
+                                "stableId": item["stableId"],
+                                "state": state,
+                            }));
+                        }
+                    }
+                }
+            }
+            out["knowledgeBlocked"] = json!(knowledge_blocked);
+            Ok(out)
+        }
         // --- WP-11：A6 判重（FTS5 trigram；flag=RATIFLOW_WORKITEM_FTS；仅提示禁自动合并）---
         "workitem.searchRebuild" => {
             if std::env::var("RATIFLOW_WORKITEM_FTS").ok().as_deref() != Some("1") {
@@ -2624,6 +2655,27 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let items = sg_workitem::search::similar(store, &str_param(params, "workItemId")?)
                 .map_err(store_err)?;
             Ok(json!({ "items": items }))
+        }
+        // --- WP-13：B10 知识验证事实（本机 SQLite 权威；manifest 只声明策略）---
+        "knowledge.verifySource" => {
+            let project_id = str_param(params, "projectId")?;
+            let stable_id = str_param(params, "stableId")?;
+            let outcome = str_param(params, "outcome")?;
+            let verifier = str_param(params, "verifier")?;
+            let evidence_ref = opt_str_param(params, "evidenceRef").unwrap_or_default();
+            sg_knowledge::freshness::verify_source(
+                store,
+                &project_id,
+                &stable_id,
+                &outcome,
+                &verifier,
+                &evidence_ref,
+            )
+            .map_err(store_err)
+        }
+        "knowledge.freshnessOverview" => {
+            let project_id = str_param(params, "projectId")?;
+            sg_knowledge::freshness::freshness_overview(store, &project_id).map_err(store_err)
         }
         "stage.attempts" => {
             let workitem_id = str_param(params, "workItemId")?;

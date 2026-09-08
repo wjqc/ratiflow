@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use sg_store::{ids, objects, outbox, scan, timefmt, Error, Store};
 
 pub mod flags;
+pub mod freshness;
 pub mod gc;
 pub mod manifest;
 pub mod reconcile;

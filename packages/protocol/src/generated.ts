@@ -155,6 +155,8 @@ export type RpcMethodName =
   | 'workitem.searchRebuild'
   | 'automation.setShadowMode'
   | 'workitem.similar'
+  | 'knowledge.verifySource'
+  | 'knowledge.freshnessOverview'
   | 'stage.attempts'
   | 'stage.package'
   | 'snapshot.get'
@@ -445,6 +447,8 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'workitem.searchRebuild',
   'automation.setShadowMode',
   'workitem.similar',
+  'knowledge.verifySource',
+  'knowledge.freshnessOverview',
   'stage.attempts',
   'stage.package',
   'snapshot.get',
@@ -1470,6 +1474,18 @@ export interface AutomationSetShadowModeParams {
 
 export interface WorkitemSimilarParams {
   workItemId: string;
+}
+
+export interface KnowledgeVerifySourceParams {
+  projectId: string;
+  stableId: string;
+  outcome: string;
+  verifier: string;
+  evidenceRef?: string;
+}
+
+export interface KnowledgeFreshnessOverviewParams {
+  projectId: string;
 }
 
 export interface StageAttemptsParams {

@@ -2546,6 +2546,48 @@
       "result": "value"
     },
     {
+      "name": "knowledge.verifySource",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "stableId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "outcome",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "verifier",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "evidenceRef",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "knowledge.freshnessOverview",
+      "params": [
+        {
+          "name": "projectId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "stage.attempts",
       "params": [
         {

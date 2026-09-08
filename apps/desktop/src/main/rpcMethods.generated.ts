@@ -152,6 +152,8 @@ export const RPC_METHODS: readonly string[] = [
   'workitem.searchRebuild',
   'automation.setShadowMode',
   'workitem.similar',
+  'knowledge.verifySource',
+  'knowledge.freshnessOverview',
   'stage.attempts',
   'stage.package',
   'snapshot.get',

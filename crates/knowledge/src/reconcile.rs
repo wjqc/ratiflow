@@ -25,7 +25,9 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// 未来/未知 schema 与未知字段 fail-closed（§3.4）。
-const KNOWN_FIELDS: [&str; 7] = [
+/// WP-13 B10：v2 增 contentOwner / verificationPolicy（策略 shape 见
+/// freshness::parse_verification_policy，未知子字段同样 fail-closed）。
+const KNOWN_FIELDS: [&str; 9] = [
     "schemaVersion",
     "stableId",
     "kind",
@@ -33,17 +35,45 @@ const KNOWN_FIELDS: [&str; 7] = [
     "locator",
     "enabled",
     "contentSha256",
+    "contentOwner",
+    "verificationPolicy",
 ];
 
-struct ValidManifest {
-    stable_id: String,
-    kind: String,
-    name: String,
-    locator: String,
-    enabled: bool,
+pub struct ValidManifest {
+    pub stable_id: String,
+    pub kind: String,
+    pub name: String,
+    pub locator: String,
+    pub enabled: bool,
+    pub content_sha256: String,
+    pub schema_version: i64,
+    /// v2 才有：contentOwner / 验证策略（v1 视为未设定）。
+    pub content_owner: Option<String>,
+    pub verification_policy: Option<crate::freshness::VerificationPolicy>,
 }
 
 /// §3.3/§3.4 校验：schemaVersion、未知字段、identity 派生一致、fileSlug 前缀一致。
+/// WP-13 B10：读取某项目全部 source manifest（freshness 面消费）。
+pub fn load_source_manifests(
+    root: &Path,
+) -> Result<Vec<(std::path::PathBuf, ValidManifest)>, Error> {
+    let dir = manifest_dir(root);
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        out.push((path.clone(), validate_file(&path)?));
+    }
+    Ok(out)
+}
+
 fn validate_file(path: &Path) -> Result<ValidManifest, Error> {
     let (_, bytes) =
         read_manifest(path)?.ok_or_else(|| Error::Message("manifest_missing".into()))?;
@@ -52,7 +82,8 @@ fn validate_file(path: &Path) -> Result<ValidManifest, Error> {
     let obj = v
         .as_object()
         .ok_or_else(|| Error::Message("manifest_invalid_json".into()))?;
-    if v.get("schemaVersion").and_then(|x| x.as_i64()) != Some(1) {
+    let schema_version = v.get("schemaVersion").and_then(|x| x.as_i64()).unwrap_or(0);
+    if !matches!(schema_version, 1 | 2) {
         return Err(Error::Message("manifest_schema_unsupported".into()));
     }
     for key in obj.keys() {
@@ -80,6 +111,28 @@ fn validate_file(path: &Path) -> Result<ValidManifest, Error> {
         .and_then(|x| x.as_str())
         .ok_or_else(|| Error::Message("manifest_missing_locator".into()))?;
     let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+    let content_sha256 = v
+        .get("contentSha256")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    // WP-13 B10：v2 要求 contentOwner + verificationPolicy 显式存在；v1 未设定。
+    let (content_owner, verification_policy) = if schema_version == 2 {
+        let owner = v
+            .get("contentOwner")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::Message("manifest_v2_missing_content_owner".into()))?;
+        let policy_v = v
+            .get("verificationPolicy")
+            .ok_or_else(|| Error::Message("manifest_v2_missing_verification_policy".into()))?;
+        (
+            Some(owner.to_string()),
+            Some(crate::freshness::parse_verification_policy(policy_v)?),
+        )
+    } else {
+        (None, None)
+    };
     // identity 派生一致。
     let expect = match kind {
         "repo_path" => {
@@ -118,6 +171,10 @@ fn validate_file(path: &Path) -> Result<ValidManifest, Error> {
         return Err(Error::Message("manifest_identity_mismatch".into()));
     }
     Ok(ValidManifest {
+        content_sha256,
+        schema_version,
+        content_owner,
+        verification_policy,
         stable_id: stable_id.to_string(),
         kind: kind.to_string(),
         name: name.to_string(),
