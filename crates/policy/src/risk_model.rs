@@ -157,9 +157,81 @@ pub fn assess_registry_tool(
     }
 }
 
+/// P1-1：能力声明驱动的评估（Provider capabilities 面）。
+/// 与 `assess_registry_tool` 的差异：supports/reconcile 来自 Provider 声明
+/// （descriptor.capabilities），而非注册表启发；`key_forwarded` 必须是
+/// **执行证据**（ProviderCall.key_forwarded），评估时（未执行）一律 false——
+/// 「声明支持但未转发」因此不可能自动批准（硬规则）。
+#[allow(clippy::too_many_arguments)]
+pub fn assess_provider_declared(
+    tool: &str,
+    effect_class: &str,
+    reversibility: &str,
+    protected_target: bool,
+    operation_idempotency_key: Option<&str>,
+    key_forwarded: bool,
+    idempotency_scope: Option<&str>,
+    compensation: Option<&str>,
+    supports_idempotency_key: bool,
+    reconcile_query: bool,
+) -> ExecutionRiskAssessment {
+    let external_write = matches!(effect_class, "external_write" | "irreversible");
+    ExecutionRiskAssessment {
+        tool: tool.to_string(),
+        effect_class: effect_class.to_string(),
+        reversibility: Reversibility::parse(reversibility).unwrap_or(Reversibility::Manual),
+        compensation: compensation.map(String::from),
+        supports_idempotency_key,
+        operation_idempotency_key: operation_idempotency_key.map(String::from),
+        idempotency_scope: idempotency_scope.map(String::from),
+        key_forwarded,
+        reconcile_query,
+        external_write,
+        protected_target,
+        policy_version: POLICY_VERSION.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P1-1 退出标准：「声明支持但未转发」必须人工审批——
+    /// external_write + supports=true + op key 在场 + key_forwarded=false
+    /// → auto_approvable=false（硬规则不因声明放宽）。
+    #[test]
+    fn declared_but_not_forwarded_requires_manual_approval() {
+        let a = assess_provider_declared(
+            "mcp:fake:send",
+            "external_write",
+            "manual",
+            false,
+            Some("op_stable_1"),
+            false, // 未转发（执行证据缺失）
+            None,
+            None,
+            true, // 声明支持幂等键
+            true, // 声明可查证
+        );
+        assert!(a.external_write);
+        assert!(a.supports_idempotency_key);
+        assert!(!a.key_forwarded, "声明≠转发：证据缺失");
+        assert!(!auto_approvable(&a), "声明支持但未转发 → 强制人工审批");
+        // 对照：转发证据齐全 + 可查证 → 硬规则放行（仍受 ToolRule 风险分级约束）。
+        let b = assess_provider_declared(
+            "mcp:fake:send",
+            "external_write",
+            "compensatable",
+            false,
+            Some("op_stable_1"),
+            true,
+            Some("per-server, 24h"),
+            Some("snapshot-1"),
+            true,
+            true,
+        );
+        assert!(auto_approvable(&b), "证据齐全的外部写通过硬上限");
+    }
 
     fn base() -> ExecutionRiskAssessment {
         ExecutionRiskAssessment {

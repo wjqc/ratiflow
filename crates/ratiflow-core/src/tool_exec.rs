@@ -30,7 +30,7 @@ fn changes_after_from_reversed(
 /// M5：`apply_patch` 执行——dry-run → CAS（base HEAD / file hash）→ 三态判定 →
 /// 原子落盘 → patch 工件/恢复点/git diff --check。
 /// 治理边界：提案与审批在 Agent 层已完成；此处是写入前最后一次漂移校验。
-fn apply_patch_exec(
+pub(crate) fn apply_patch_exec(
     ctx: &tools::ToolCtx,
     proposal: &sg_agent::Proposal,
     args: &Value,
@@ -377,122 +377,47 @@ fn execute_tool(
     project_id: &str,
     p: &sg_agent::Proposal,
 ) -> Result<String, String> {
-    use sg_agent::provider::ToolId;
-    let tool_id = ToolId::parse(&p.tool);
-    // 治理白名单（PlanGuard/Grant allowed_tools）词汇为 legacy 短名——canonical
-    // 持久化形态不进治理匹配（WP-2：解析后比较，写读两形态等价）。
-    let gov_name = tool_id.short_name();
-    match tool_id {
-        ToolId::Mcp { server, tool } => {
-            // M6：MCP 工具不走静态注册表（动态注册+审批治理），结果按 64KiB 裁剪。
-            // Registry 步：活跃注册解析（撤销 → tool_revoked，先于 PlanGuard）。
-            let active = resolve_active_mcp(store, &server, &tool)?;
-            // WP-4：导入型 server 每次 call 前复核内容冻结五元组（同 canonical 算法
-            // 重算工作树 Merkle + porcelain）——漂移 → tool_source_drift fail-closed，
-            // 仅可重新 import 产新候选（改依赖模块不改入口文件同样被拒）。
-            if !active.import_id.is_empty() {
-                sg_settings::mcp_import::verify_freeze(store, &store.data_dir, &active.import_id)?;
+    // P1-1（RDWS-004 闭环）：orchestrator 只依赖 ToolProvider trait——
+    // 解析（registry/激活/冻结复核，治理）→ descriptor 分类 → PlanGuard/
+    // Autonomy/Grant ledger（治理）→ provider.execute(args, op_key)（执行面，
+    // key_forwarded 证据随调用返回）→ outcome/ledger/截断收口。
+    let (gov_name, resolved) = crate::tool_providers::resolve_provider(store, p)?;
+    let effect = crate::tool_providers::effect_class_of(&resolved);
+    // PlanGuard 步（M2-08）：phase 判定，planning 只放行只读。
+    plan_guard_check(store, &p.run_id, &gov_name, parse_effect(effect))?;
+    // Autonomy 步（评审 P0-1）：Ask 只读边界 + Grant 白名单/scope。
+    autonomy_check(store, &p.run_id, &gov_name, parse_effect(effect))?;
+    // WP-1：Grant tool_calls 消费行（超限拒绝执行）。
+    let ledger = ledger_tool_consume(store, p)?;
+    let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
+    // P1-1（RDWS-002）：Core 生成的稳定操作幂等键（proposal 级）——评估与执行
+    // 同键；转发证据由 adapter 如实回报（未转发 = false → 外部写不可自动批准）。
+    let op_key = sg_agent::provider::operation_key(&p.run_id, &p.id);
+    let provider = crate::tool_providers::make_provider(ctx, store, project_id, p, &resolved);
+    provider.probe()?;
+    let call = provider.execute(&args, &op_key)?;
+    let out = match call.outcome {
+        sg_agent::provider::ProviderOutcome::Completed { output } => {
+            if let Some(g) = &ledger {
+                ledger_tool_settle(store, g, p, false);
             }
-            // 分类步：readOnlyHint → read；否则保守 external_write。
-            let effect = if active.read_only {
-                sg_policy::plan_guard::EffectClass::Read
-            } else {
-                sg_policy::plan_guard::EffectClass::ExternalWrite
-            };
-            // PlanGuard 步（M2-08）：phase 判定，planning 只放行只读 MCP。
-            plan_guard_check(store, &p.run_id, &gov_name, Some(effect))?;
-            // Autonomy 步（评审 P0-1）：Ask 只读边界 + Grant 白名单/scope。
-            autonomy_check(store, &p.run_id, &gov_name, Some(effect))?;
-            // WP-1：Grant tool_calls 消费行（超限拒绝执行）。
-            let ledger = ledger_tool_consume(store, p)?;
-            let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
-            let out = match mcp_invoke(ctx, store, p, &server, &tool, &active, &args) {
-                Ok(out) => {
-                    if let Some(g) = &ledger {
-                        ledger_tool_settle(store, g, p, false);
-                    }
-                    out
-                }
-                Err(e) => {
-                    // unknown/indeterminate 是对账面：不 settle 1，保留 reserve。
-                    let unknown = e.contains("unknown") || e.contains("indeterminate");
-                    if let Some(g) = &ledger {
-                        ledger_tool_settle(store, g, p, unknown);
-                    }
-                    return Err(e);
-                }
-            };
-            Ok(tools::truncate_output(&out, 64 * 1024))
+            output
         }
-        ToolId::Builtin { name } => {
-            let def = tools::find(&name).ok_or_else(|| format!("unknown tool: {}", p.tool))?;
-            // PlanGuard 步（M2-08）：注册表 effect_class 分类 → phase 判定。
-            plan_guard_check(store, &p.run_id, &gov_name, parse_effect(def.effect_class))?;
-            // Autonomy 步（评审 P0-1）：Ask 只读边界 + Grant 白名单/scope。
-            autonomy_check(store, &p.run_id, &gov_name, parse_effect(def.effect_class))?;
-            // WP-1：Grant tool_calls 消费行（超限拒绝执行）。
-            let ledger = ledger_tool_consume(store, p)?;
-            let args: Value = serde_json::from_str(&p.arguments).unwrap_or(Value::Null);
-            let executed = (|| -> Result<String, String> {
-                match name.as_str() {
-                    "write_file" => tools::write_draft(ctx, &args),
-                    "apply_patch" => apply_patch_exec(ctx, p, &args),
-                    "search_knowledge" => {
-                        let query = args
-                            .get("query")
-                            .and_then(|v| v.as_str())
-                            .ok_or("missing argument: query")?;
-                        let limit = args
-                            .get("limit")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(5)
-                            .clamp(1, 20);
-                        let hits = sg_knowledge::search_v2(store, project_id, query, false, limit)
-                            .map_err(|e| e.to_string())?;
-                        serde_json::to_string(&hits).map_err(|e| e.to_string())
-                    }
-                    _ => {
-                        // P0-4：隔离执行域不可用时拒绝可写命令（read_file/search_knowledge 只读放行）。
-                        if ctx.read_only && name == "run_command" {
-                            return Err(
-                                "action_denied: 隔离 worktree 不可用，拒绝在用户主工作区执行命令"
-                                    .into(),
-                            );
-                        }
-                        let manifest = tools::build_manifest(def, &args, ctx)?;
-                        // 取消面（缺陷审计 P1-9）：在途子进程随 CancelToken 即时中止。
-                        let result = sg_executor::execute_with_cancel(
-                            ctx.mode,
-                            &manifest,
-                            ctx.cancel.as_deref(),
-                        )
-                        .map_err(|e| e.to_string())?;
-                        if result.cancelled {
-                            return Err("run_cancelled: 取消请求已中止在途工具执行".into());
-                        }
-                        serde_json::to_string(&result).map_err(|e| e.to_string())
-                    }
-                }
-            })();
-            let out = match executed {
-                Ok(out) => {
-                    if let Some(g) = &ledger {
-                        ledger_tool_settle(store, g, p, false);
-                    }
-                    out
-                }
-                Err(e) => {
-                    let unknown = e.contains("unknown") || e.contains("indeterminate");
-                    if let Some(g) = &ledger {
-                        ledger_tool_settle(store, g, p, unknown);
-                    }
-                    return Err(e);
-                }
-            };
-            // 输出截断（F05）：进模型消息的是截断版。
-            Ok(tools::truncate_output(&out, def.max_result_bytes))
+        sg_agent::provider::ProviderOutcome::Failed { error }
+        | sg_agent::provider::ProviderOutcome::Indeterminate { note: error, .. } => {
+            // unknown/indeterminate 是对账面：不 settle 1，保留 reserve。
+            let unknown = error.contains("unknown") || error.contains("indeterminate");
+            if let Some(g) = &ledger {
+                ledger_tool_settle(store, g, p, unknown);
+            }
+            return Err(error);
         }
-    }
+    };
+    // 输出截断（F05）：进模型消息的是截断版（MCP 64KiB / builtin 注册表上限）。
+    Ok(tools::truncate_output(
+        &out,
+        crate::tool_providers::max_result_bytes_of(&resolved),
+    ))
 }
 
 #[cfg(test)]
@@ -1128,7 +1053,7 @@ mod apply_patch_flow_tests {
 /// 撤销/未激活 → tool_revoked（先于 PlanGuard——未知工具不进 phase 判定）。
 /// 活跃注册解析（WP-2：ToolId 解析后直接定位——server/tool 名约束 [A-Za-z0-9_-]，
 /// 首个 `__` 切分即唯一解，废除逐段试探 loop）。
-fn resolve_active_mcp(
+pub(crate) fn resolve_active_mcp(
     store: &Arc<Store>,
     server: &str,
     tool: &str,
@@ -1198,7 +1123,7 @@ fn advance_send_phase(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn mcp_invoke(
+pub(crate) fn mcp_invoke(
     ctx: &tools::ToolCtx,
     store: &Arc<Store>,
     proposal: &sg_agent::Proposal,

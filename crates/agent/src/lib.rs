@@ -1091,26 +1091,35 @@ fn propose_and_execute(
     let needs_approval = if needs_approval || !sg_policy::risk_model::enabled() {
         needs_approval
     } else {
+        // P1-1（RDWS-002 空缺修复）：Core 生成稳定 operation key（proposal 级，
+        // 重放同键）+ Provider 能力声明进评估；key_forwarded 为执行证据——
+        // 评估时（未执行）恒 false，「声明支持但未转发」不可能自动批准。
+        let caps = crate::provider::capabilities_for(store, &decision.action);
+        let op_key = crate::provider::operation_key(&run.id, &proposal.id);
         let assessment = match crate::tools::find(&decision.action) {
-            Some(def) => sg_policy::risk_model::assess_registry_tool(
+            Some(def) => sg_policy::risk_model::assess_provider_declared(
                 &decision.action,
                 def.effect_class,
                 def.reversibility,
                 def.protected_target,
-                None,
+                Some(&op_key),
                 false,
+                caps.idempotency_scope.as_deref(),
                 None,
-                None,
+                caps.supports_idempotency_key,
+                caps.reconcile_query,
             ),
-            None => sg_policy::risk_model::assess_registry_tool(
+            None => sg_policy::risk_model::assess_provider_declared(
                 &decision.action,
                 "external_write",
                 "manual",
                 false,
-                None,
+                Some(&op_key),
                 false,
+                caps.idempotency_scope.as_deref(),
                 None,
-                None,
+                caps.supports_idempotency_key,
+                caps.reconcile_query,
             ),
         };
         let auto = sg_policy::risk_model::auto_approvable(&assessment);

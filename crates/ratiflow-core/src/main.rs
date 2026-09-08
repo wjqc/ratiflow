@@ -25,6 +25,7 @@ mod plan_runtime;
 mod settings_dispatch;
 mod state;
 mod tool_exec;
+mod tool_providers;
 mod trace_dispatch;
 mod workflow_dispatch;
 

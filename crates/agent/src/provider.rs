@@ -102,6 +102,39 @@ pub enum ProviderOutcome {
     },
 }
 
+/// 一次 Provider 调用的执行证据（P1-1：external write 的幂等键转发面）。
+/// `key_forwarded` = adapter 已把 Core 生成的稳定 operation key 放进
+/// Provider 请求且获得可审计证据（如响应确认）；**声明支持但未转发 = false**
+/// ——风险评估据此强制人工审批（auto_approvable 硬规则）。
+#[derive(Debug, Clone)]
+pub struct ProviderCall {
+    pub outcome: ProviderOutcome,
+    pub key_forwarded: bool,
+}
+
+/// Provider 幂等/对账能力声明（P1-1；descriptor 治理消费面）。
+/// 声明与执行证据分离：capabilities 说"能"，ProviderCall 证明"做了"。
+#[derive(Debug, Clone)]
+pub struct ProviderCapabilities {
+    /// Provider 是否支持幂等键去重（≠ 本次已传键）。
+    pub supports_idempotency_key: bool,
+    /// 去重作用域/有效期说明（能力描述；None = 未声明）。
+    pub idempotency_scope: Option<String>,
+    /// 结果查证能力（对账查询可否）。
+    pub reconcile_query: bool,
+}
+
+impl ProviderCapabilities {
+    /// 保守缺省：不支持幂等键、不可查证——外部写自动批准被硬规则关死。
+    pub fn conservative() -> Self {
+        ProviderCapabilities {
+            supports_idempotency_key: false,
+            idempotency_scope: None,
+            reconcile_query: false,
+        }
+    }
+}
+
 /// 工具执行能力描述（descriptor 面；治理消费）。
 #[derive(Debug, Clone)]
 pub struct ProviderDescriptor {
@@ -110,6 +143,7 @@ pub struct ProviderDescriptor {
     pub reversibility: String,
     pub protected_target: bool,
     pub schema_digest: String,
+    pub capabilities: ProviderCapabilities,
 }
 
 /// ToolProvider：可执行工具型插件的执行面。Core orchestrator 是唯一调用方；
@@ -118,12 +152,56 @@ pub trait ToolProvider {
     fn descriptor(&self) -> Result<ProviderDescriptor, String>;
     /// 可用性探测（失败 = 不可执行，orchestrator 拒绝派发）。
     fn probe(&self) -> Result<(), String>;
-    /// 执行一次调用。返回 ProviderOutcome；实现不重试、不写治理事实。
-    fn execute(&self, args: &Value) -> Result<ProviderOutcome, String>;
+    /// 执行一次调用。`op_key` = Core 为本次外部写生成的稳定操作幂等键
+    /// （proposal 级稳定，重放同键）；adapter 负责转发进 Provider 请求并在
+    /// `ProviderCall.key_forwarded` 如实回报证据。实现不重试、不写治理事实。
+    fn execute(&self, args: &Value, op_key: &str) -> Result<ProviderCall, String>;
     /// 结果查证能力（对账查询；不可查证返回 None）。
     fn query_result(&self, call_ref: &str) -> Result<Option<Value>, String>;
     /// 取消在途执行（尽力而为；无在途面返回 Ok(())）。
     fn cancel(&self) -> Result<(), String>;
+}
+
+/// 按工具身份从注册表/激活面派生能力声明（评估时消费；执行时以 ProviderCall
+/// 证据为准——声明与证据分离）。保守缺省：未注册/不可解析 → 全 false。
+pub fn capabilities_for(store: &sg_store::Store, tool: &str) -> ProviderCapabilities {
+    match ToolId::parse(tool) {
+        ToolId::Builtin { name } => crate::tools::find(&name)
+            .map(|_| ProviderCapabilities {
+                // builtin 本地执行结果同步确定性可知；无外部 Provider 幂等面
+                //（硬规则只在 external_write 时要求键链证据）。
+                supports_idempotency_key: true,
+                idempotency_scope: None,
+                reconcile_query: true,
+            })
+            .unwrap_or_else(ProviderCapabilities::conservative),
+        ToolId::Mcp { server, tool: t } => {
+            sg_settings::mcp_ext::active_tool_for_invocation(store, &server, &t)
+                .ok()
+                .map(|_| ProviderCapabilities {
+                    // MCP P1-1 阶段：无键转发 adapter 证据——声明不支持
+                    //（外部写自动批准关死；转发证据落地后翻转为声明支持 +
+                    // ProviderCall.key_forwarded 证据）。
+                    supports_idempotency_key: false,
+                    idempotency_scope: None,
+                    reconcile_query: false,
+                })
+                .unwrap_or_else(ProviderCapabilities::conservative)
+        }
+    }
+}
+
+/// Core 生成的稳定操作幂等键（P1-1 / RDWS-002）：sha256(op|run|proposal)——
+/// 同一 proposal 的重放/对账恒同键；评估与执行两处共用（冻结进 proposal 详情
+/// 与 audit risk.assessment）。
+pub fn operation_key(run_id: &str, proposal_id: &str) -> String {
+    use sha2::Digest;
+    format!(
+        "op_{}",
+        sg_store::ids::hex(&sha2::Sha256::digest(
+            format!("op|{run_id}|{proposal_id}").as_bytes()
+        ))
+    )
 }
 
 #[cfg(test)]
