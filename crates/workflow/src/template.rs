@@ -128,6 +128,11 @@ pub fn is_deployment_class_kind(kind: &str) -> bool {
     k.starts_with("deployment") || k.starts_with("migration")
 }
 
+/// B9（RDWS v1.4 WP-13）：发布说明 deliverable kind 常量——模板可配置的合法值，
+/// 可落在任意关；不与 Deployment 关逻辑硬编码绑定（非 deployment-class，
+/// 不触发 skip forbidden 类别）。
+pub const DELIVERABLE_KIND_RELEASE_NOTES: &str = "release_notes";
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GateDefinition {
     pub id: String,

@@ -420,7 +420,7 @@ mod b9_release_notes_tests {
                 gate_id: "requirements".into(),
                 title: "需求关".into(),
                 purpose: String::new(),
-                deliverables: vec!["release_notes".into()],
+                deliverables: vec![sg_workflow::template::DELIVERABLE_KIND_RELEASE_NOTES.into()],
                 acceptance: vec![],
                 context_policy_ref: None,
                 team_policy_ref: None,

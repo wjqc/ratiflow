@@ -142,6 +142,7 @@ export const RPC_METHODS: readonly string[] = [
   'gate.requestSkip',
   'gate.decideSkip',
   'gate.resumeSkip',
+  'gate.skipRequests',
   'gate.applyWaiver',
   'gate.revokeWaiver',
   'gate.evaluateFastTrack',

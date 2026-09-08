@@ -145,6 +145,7 @@ export type RpcMethodName =
   | 'gate.requestSkip'
   | 'gate.decideSkip'
   | 'gate.resumeSkip'
+  | 'gate.skipRequests'
   | 'gate.applyWaiver'
   | 'gate.revokeWaiver'
   | 'gate.evaluateFastTrack'
@@ -441,6 +442,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'gate.requestSkip',
   'gate.decideSkip',
   'gate.resumeSkip',
+  'gate.skipRequests',
   'gate.applyWaiver',
   'gate.revokeWaiver',
   'gate.evaluateFastTrack',
@@ -1438,6 +1440,10 @@ export interface GateDecideSkipParams {
 export interface GateResumeSkipParams {
   skipRequestId: string;
   idempotencyKey: string;
+}
+
+export interface GateSkipRequestsParams {
+  workItemId: string;
 }
 
 export interface GateApplyWaiverParams {

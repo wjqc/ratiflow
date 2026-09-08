@@ -26,6 +26,7 @@ import {
   IconX,
 } from '../components/Icons';
 import { ModelPicker } from './ModelPicker';
+import RecoveryPanel from './RecoveryPanel';
 import { renderMarkdown } from '../lib/markdown';
 import { isDeltaEvent, streamBuffer, type RunStreamSnapshot } from '../lib/streamBuffer';
 import { useTwoStepConfirm } from './settings/components/useTwoStepConfirm';
@@ -420,6 +421,7 @@ export function Workbench({
             </span>
           </div>
         )}
+        <RecoveryPanel workItemId={workItemId} />
         <Conversation runs={runs} trace={trace} workItemId={workItemId} onOpenRevision={openRevision} />
       </div>
 

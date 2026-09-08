@@ -12,6 +12,7 @@ import {
   IconPlus,
   IconSearch,
   IconShield,
+  IconTarget,
   IconX,
 } from '../components/Icons';
 
@@ -210,6 +211,13 @@ export function ProjectSidebar({
         >
           <IconShield size={15} />
           审批中心
+        </button>
+        <button
+          className={`sg-nav-item ${route.page === 'governance' ? 'sg-nav-item--active' : ''}`}
+          onClick={() => onNavigate({ page: 'governance' })}
+        >
+          <IconTarget size={15} />
+          治理总览
         </button>
       </nav>
 

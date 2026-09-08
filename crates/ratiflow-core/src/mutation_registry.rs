@@ -138,6 +138,7 @@ pub const REGISTRY: &[Entry] = &[
     Entry { method: "gate.requestSkip", kind: Kind::Mutation, receipt: ReceiptMode::Required, domain_key: "gate_skip_requests UNIQUE(action_digest)（0052）" },
     Entry { method: "gate.resumeSkip", kind: Kind::Mutation, receipt: ReceiptMode::Required, domain_key: "gate_skip_requests progress 游标幂等（0052）" },
     Entry { method: "gate.revokeWaiver", kind: Kind::Mutation, receipt: ReceiptMode::Required, domain_key: "gate_fast_track_waivers status CAS active→revoked（0052）" },
+    Entry { method: "gate.skipRequests", kind: Kind::Read, receipt: ReceiptMode::None, domain_key: "" },
     Entry { method: "gitlabProfile.capabilities", kind: Kind::Read, receipt: ReceiptMode::None, domain_key: "" },
     Entry { method: "gitlabProfile.checkProjectPermissions", kind: Kind::Read, receipt: ReceiptMode::None, domain_key: "" },
     Entry { method: "gitlabProfile.create", kind: Kind::Mutation, receipt: ReceiptMode::None, domain_key: "" },

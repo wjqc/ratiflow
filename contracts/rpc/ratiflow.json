@@ -2414,6 +2414,18 @@
       "result": "value"
     },
     {
+      "name": "gate.skipRequests",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value",
+      "desc": "P1-5:任务全部跳关操作读面（含 progress/blocked）——UI 恢复状态展示用，纯读"
+    },
+    {
       "name": "gate.applyWaiver",
       "params": [
         {

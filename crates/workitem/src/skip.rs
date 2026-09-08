@@ -162,6 +162,20 @@ fn by_action_digest(store: &Store, digest: &str) -> Result<Option<SkipRequest>, 
     })
 }
 
+/// 某任务全部跳关操作（新→旧）——UI 恢复状态读面（P1-5：只展示服务器状态，
+/// 不拥有推进权；恢复入口经 gate.resumeSkip intent）。
+pub fn list(store: &Store, workitem_id: &str) -> Result<Vec<Value>, Error> {
+    let reqs: Vec<SkipRequest> = store.with_conn(|conn| {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SKIP_COLUMNS} FROM gate_skip_requests WHERE workitem_id=?1
+             ORDER BY created_at DESC, rowid DESC"
+        ))?;
+        let rows = stmt.query_map([workitem_id], row_to_request)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    })?;
+    reqs.iter().map(|r| view(store, r)).collect()
+}
+
 pub fn view(store: &Store, req: &SkipRequest) -> Result<Value, Error> {
     let (approval_state, stage_state, pointer): (String, String, String) =
         store.with_conn(|conn| {

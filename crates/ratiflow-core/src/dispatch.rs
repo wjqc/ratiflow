@@ -3074,6 +3074,12 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let gate_name = str_param(params, "gate")?;
             sg_workitem::deliverable::status(store, &workitem_id, &gate_name).map_err(store_err)
         }
+        // P1-5：跳关恢复状态读面（纯读；UI 只展示服务器状态 + 经 resumeSkip 发 intent）。
+        "gate.skipRequests" => {
+            let items = sg_workitem::skip::list(store, &str_param(params, "workItemId")?)
+                .map_err(store_err)?;
+            Ok(json!({ "items": items }))
+        }
         "stage.package" => {
             let workitem_id = str_param(params, "workItemId")?;
             let gate_name = str_param(params, "gate")?;

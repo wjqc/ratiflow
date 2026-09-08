@@ -5,6 +5,7 @@ import type { KnowledgeSourceInfo, Project, WorkItemSummary } from './ProjectSid
 import { Workbench } from './Workbench';
 import NewTaskPage from './NewTaskPage';
 import ApprovalsPage from './ApprovalsPage';
+import GovernancePage from './GovernancePage';
 import KnowledgePage from './KnowledgePage';
 import SettingsShell from './settings/SettingsShell';
 import { SettingsSidebar } from './settings/SettingsSidebar';
@@ -24,6 +25,7 @@ export type Route =
   | { page: 'new'; projectId: string }
   | { page: 'task'; projectId: string; workItemId: string }
   | { page: 'approvals' }
+  | { page: 'governance' }
   | { page: 'knowledge'; projectId: string }
   | { page: 'settings'; section?: SettingsRouteId };
 
@@ -401,6 +403,7 @@ export default function AppShell() {
                 onDecided={() => activeProjectId && void loadProjectData(activeProjectId)}
               />
             )}
+            {route.page === 'governance' && <GovernancePage />}
             {route.page === 'knowledge' && (
               <KnowledgePage projectId={route.projectId} projectName={activeProject?.name} />
             )}
