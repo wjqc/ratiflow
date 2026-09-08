@@ -84,6 +84,16 @@ function num(v: number | null | undefined): string {
   return String(v);
 }
 
+/** 键值行标签列：固定宽度 + 次级色，保证数值列起始对齐（页内约定，不动全局样式）。 */
+const LABEL_TD: React.CSSProperties = { width: 132, color: 'var(--sg-text-secondary)' };
+/** 值内明细行：块级小字，主值与样本明细分行不再挤一行。 */
+const DETAIL: React.CSSProperties = {
+  display: 'block',
+  fontSize: 12,
+  color: 'var(--sg-text-secondary)',
+  marginTop: 2,
+};
+
 export default function GovernancePage() {
   const [metrics, setMetrics] = useState<MetricsOverview | null>(null);
   const [triage, setTriage] = useState<TriageList | null>(null);
@@ -136,6 +146,7 @@ export default function GovernancePage() {
         <span className="sg-page-head-status">纯读投影 · 服务器权威</span>
       </header>
       <div className="sg-scroll">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingBottom: 24 }}>
         {error ? (
           <div className="sg-banner sg-banner--error" role="alert">
             {error}
@@ -153,39 +164,33 @@ export default function GovernancePage() {
             <table className="sg-table">
               <tbody>
                 <tr data-testid="metrics-orphan">
-                  <td>谱系孤儿率</td>
+                  <td style={LABEL_TD}>谱系孤儿率</td>
                   <td>
-                    {pct(metrics.orphanRate.rate)}（孤儿 {metrics.orphanRate.orphanCount}/
-                    {metrics.orphanRate.totalNodes} 节点）
-                    {metrics.orphanRate.insufficientData ? (
-                      <span className="sg-muted"> · 样本不足（&lt;5 节点）</span>
-                    ) : null}
+                    {pct(metrics.orphanRate.rate)}
+                    <span style={DETAIL}>
+                      孤儿 {metrics.orphanRate.orphanCount}/{metrics.orphanRate.totalNodes} 节点
+                      {metrics.orphanRate.insufficientData ? ' · 样本不足（<5 节点）' : ''}
+                    </span>
                   </td>
                 </tr>
                 <tr data-testid="metrics-loop">
-                  <td>回环率</td>
+                  <td style={LABEL_TD}>回环率</td>
                   <td>
                     平均返工次数 {num(metrics.loopRate.averageReworkCount)} · 返工任务占比{' '}
                     {pct(metrics.loopRate.reworkWorkitemRate)}
-                    <span className="sg-muted">
-                      {' '}
-                      （{metrics.loopRate.completedReworks} 次返工 /{' '}
-                      {metrics.loopRate.reworkedWorkitems} 个任务 /{' '}
-                      {metrics.loopRate.workitemsWithReleases} 个放行任务）
+                    <span style={DETAIL}>
+                      {metrics.loopRate.completedReworks} 次返工 · {metrics.loopRate.reworkedWorkitems}{' '}
+                      个任务发生返工 · {metrics.loopRate.workitemsWithReleases} 个放行任务
+                      {metrics.loopRate.insufficientData ? ' · 样本不足（<5 放行）' : ''}
                     </span>
-                    {metrics.loopRate.insufficientData ? (
-                      <span className="sg-muted"> · 样本不足（&lt;5 放行）</span>
-                    ) : null}
                   </td>
                 </tr>
                 <tr data-testid="metrics-adoption">
-                  <td>建议采纳率</td>
+                  <td style={LABEL_TD}>建议采纳率</td>
                   <td>
                     {pct(metrics.aiSuggestionAdoption.rate)}
-                    <span className="sg-muted">
-                      {' '}
-                      （{metrics.aiSuggestionAdoption.accepted}/
-                      {metrics.aiSuggestionAdoption.decided}）
+                    <span style={DETAIL}>
+                      采纳 {metrics.aiSuggestionAdoption.accepted}/{metrics.aiSuggestionAdoption.decided}
                     </span>
                   </td>
                 </tr>
@@ -208,23 +213,34 @@ export default function GovernancePage() {
                 </tr>
               </thead>
               <tbody>
-                {metrics.approvalLayers.layers.map((l) => (
-                  <tr key={`${l.subjectType}:${l.risk}`}>
-                    <td>{l.subjectType}</td>
-                    <td>{l.risk}</td>
-                    <td>{l.approved}</td>
-                    <td>{l.rejected}</td>
-                    <td>{l.pending}</td>
-                    <td>{l.expired}</td>
-                    <td>{l.changesRequested}</td>
-                    <td data-testid={`approval-pass-rate-${l.subjectType}-${l.risk}`}>
-                      {pct(l.passRate)}
-                      {l.rubberStampSuspect ? (
-                        <span className="sg-muted"> · 疑橡皮章</span>
-                      ) : null}
+                {metrics.approvalLayers.layers.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={8}
+                      style={{ textAlign: 'center', color: 'var(--sg-text-secondary)', padding: '14px 12px' }}
+                    >
+                      暂无审批数据（窗口期内无审批记录）
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  metrics.approvalLayers.layers.map((l) => (
+                    <tr key={`${l.subjectType}:${l.risk}`}>
+                      <td>{l.subjectType}</td>
+                      <td>{l.risk}</td>
+                      <td>{l.approved}</td>
+                      <td>{l.rejected}</td>
+                      <td>{l.pending}</td>
+                      <td>{l.expired}</td>
+                      <td>{l.changesRequested}</td>
+                      <td data-testid={`approval-pass-rate-${l.subjectType}-${l.risk}`}>
+                        {pct(l.passRate)}
+                        {l.rubberStampSuspect ? (
+                          <span className="sg-muted"> · 疑橡皮章</span>
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -239,42 +255,44 @@ export default function GovernancePage() {
             <table className="sg-table">
               <tbody>
                 <tr data-testid="triage-unknown">
-                  <td>unknown / 对账</td>
+                  <td style={LABEL_TD}>unknown / 对账</td>
                   <td>
-                    run intent {triage.unknownReconciliation?.runIntents ?? 0} · 工具结果 unknown{' '}
-                    {triage.unknownReconciliation?.toolOutcomesUnknown ?? 0} · 对账 pending{' '}
-                    {triage.unknownReconciliation?.toolOutcomesReconciliationPending ?? 0}
+                    <span style={DETAIL}>run intent {triage.unknownReconciliation?.runIntents ?? 0}</span>
+                    <span style={DETAIL}>工具结果 unknown {triage.unknownReconciliation?.toolOutcomesUnknown ?? 0}</span>
+                    <span style={DETAIL}>对账 pending {triage.unknownReconciliation?.toolOutcomesReconciliationPending ?? 0}</span>
                   </td>
                 </tr>
                 <tr data-testid="triage-orphans">
-                  <td>对象库无引用</td>
+                  <td style={LABEL_TD}>对象库无引用</td>
                   <td>
                     {triage.objectOrphans?.count ?? 0} / {triage.objectOrphans?.total ?? 0}
                     {triage.objectOrphans?.pruneGated ? (
-                      <span className="sg-muted"> · 清理受 GC PRUNE 门控（只计数）</span>
+                      <span style={DETAIL}>清理受 GC PRUNE 门控（只计数）</span>
                     ) : null}
                   </td>
                 </tr>
                 <tr data-testid="triage-knowledge-blocked">
-                  <td>知识 block 级未验证</td>
+                  <td style={LABEL_TD}>知识 block 级未验证</td>
                   <td>
                     {triage.knowledgeBlocked.length === 0 ? (
                       '无'
                     ) : (
-                      triage.knowledgeBlocked
-                        .map((k) => `${k.stableId}（${k.state}）`)
-                        .join('、')
+                      triage.knowledgeBlocked.map((k, i) => (
+                        <span key={`${k.projectId}:${k.stableId}`} style={DETAIL}>
+                          {k.stableId}（{k.state}）
+                        </span>
+                      ))
                     )}
                   </td>
                 </tr>
               </tbody>
             </table>
             {triage.items.length > 0 ? (
-              <table className="sg-table">
+              <table className="sg-table" style={{ marginTop: -1 }}>
                 <thead>
                   <tr>
-                    <th>任务</th>
-                    <th>谱系缺口（孤儿/未验证/未覆盖）</th>
+                    <th style={{ width: '55%' }}>任务</th>
+                    <th>谱系缺口（孤儿 / 未验证 / 未覆盖）</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -314,8 +332,8 @@ export default function GovernancePage() {
             </span>
           </div>
           {freshness.length === 0 ? (
-            <div className="sg-empty" style={{ padding: '24px' }}>
-              该项目暂无声明验证策略的知识源
+            <div style={{ padding: '14px 16px', color: 'var(--sg-text-secondary)', fontSize: 13 }}>
+              该项目暂无声明验证策略的知识源（在知识库页为知识源配置验证策略后，这里显示验证状态与到期）
             </div>
           ) : (
             <table className="sg-table">
@@ -341,6 +359,7 @@ export default function GovernancePage() {
               </tbody>
             </table>
           )}
+        </div>
         </div>
       </div>
     </>

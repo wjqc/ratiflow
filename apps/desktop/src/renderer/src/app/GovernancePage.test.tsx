@@ -97,6 +97,20 @@ describe('GovernancePage 治理总览（纯读）', () => {
     expect(screen.getByTestId('metrics-adoption')).toHaveTextContent('样本不足');
   });
 
+  it('审批分层窗口期无数据 → 空态行而非裸表头', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'project.list') return ok({ items: [{ id: 'pj_1', name: '主项目' }] });
+      if (method === 'metrics.overview') {
+        return ok({ ...METRICS, approvalLayers: { dimensions: ['subjectType', 'risk'], layers: [] } });
+      }
+      if (method === 'triage.list') return ok(TRIAGE);
+      if (method === 'knowledge.freshnessOverview') return ok(FRESHNESS);
+      return ok({});
+    });
+    render(<GovernancePage />);
+    await waitFor(() => expect(screen.getByText('暂无审批数据（窗口期内无审批记录）')).toBeInTheDocument());
+  });
+
   it('Triage 聚合：unknown 对账 / 对象库无引用（PRUNE 门控提示）/ knowledge block', async () => {
     render(<GovernancePage />);
     await waitFor(() => expect(screen.getByTestId('triage-card')).toBeInTheDocument());
