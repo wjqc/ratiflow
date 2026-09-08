@@ -19,6 +19,7 @@ import { SkillsPage } from './pages/SkillsPage';
 import { AgentCenterPage } from './pages/AgentCenterPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { IntegrationsPage } from './pages/IntegrationsPage';
+import { WorkflowTemplatesPage } from './pages/WorkflowTemplatesPage';
 
 export default function SettingsShell({ section }: { section?: string }) {
   const route: SettingsRouteId = isSettingsRouteId(section) ? section : DEFAULT_SETTINGS_ROUTE;
@@ -35,6 +36,8 @@ export default function SettingsShell({ section }: { section?: string }) {
         return <UpdatesPage />;
       case 'app-general':
         return <GeneralPage />;
+      case 'workflow-templates':
+        return <WorkflowTemplatesPage />;
       case 'knowledge-defaults':
         return <KnowledgeDefaultsPage />;
       case 'memory':

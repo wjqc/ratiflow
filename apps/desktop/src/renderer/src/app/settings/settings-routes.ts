@@ -10,6 +10,7 @@ import {
   IconDownload,
   IconFolder,
   IconGear,
+  IconLayers,
   IconLink,
   IconServer,
   IconTarget,
@@ -20,6 +21,7 @@ export type SettingsRouteId =
   | 'app-general'
   | 'updates'
   | 'projects'
+  | 'workflow-templates'
   | 'knowledge-defaults'
   | 'memory'
   | 'models'
@@ -62,6 +64,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     label: '工作区',
     items: [
       { id: 'projects', code: 'S10', name: '项目与目录', availability: 'real', icon: IconFolder },
+      { id: 'workflow-templates', code: 'S13', name: '工作流与关卡模板', availability: 'real', icon: IconLayers },
       { id: 'knowledge-defaults', code: 'S11', name: '知识库默认策略', availability: 'real', icon: IconBook },
       { id: 'memory', code: 'S12', name: '项目记忆', availability: 'real', icon: IconDb },
     ],
@@ -117,6 +120,7 @@ export const SETTINGS_PRIMARY_ITEMS = settingsItems([
 
 /** 低频、治理或排障能力按需展开；未完成的编辑器页不在导航中曝光。 */
 export const SETTINGS_ADVANCED_ITEMS = settingsItems([
+  'workflow-templates',
   'knowledge-defaults',
   'memory',
   'agent-center',

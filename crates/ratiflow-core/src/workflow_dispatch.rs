@@ -162,6 +162,22 @@ pub fn dispatch(_state: &AppState, store: &Store, method: &str, params: &Value) 
                 "createdAt": t.created_at, "updatedAt": t.updated_at,
                 "versions": versions.iter().map(version_json).collect::<Vec<_>>(),
             });
+            // 指定 versionId：内联该版本（任意状态）的关卡定义。
+            // 模板管理页编辑草稿时需读回草稿内容，仅靠 activeVersion 不够。
+            if let Some(vid) = params.get("versionId").and_then(|v| v.as_str()) {
+                let Some(version) = versions.iter().find(|v| v.id == vid) else {
+                    return Err(err_invalid(format!(
+                        "workflow_version_not_active: 版本 {vid} 不属于模板 {template_id}"
+                    )));
+                };
+                let defs =
+                    sg_workflow::template::definitions_via_store(store, vid).map_err(store_err)?;
+                out["version"] = json!({
+                    "version": version_json(version),
+                    "gates": defs,
+                });
+                return Ok(out);
+            }
             // 激活版本的关卡定义内联返回（read model 一次取全）。
             if let Some(active) = versions.iter().find(|v| v.status == "active") {
                 let defs = sg_workflow::template::definitions_via_store(store, &active.id)

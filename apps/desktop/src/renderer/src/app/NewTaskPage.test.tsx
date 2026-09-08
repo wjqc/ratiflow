@@ -44,6 +44,7 @@ describe('新建任务', () => {
         onCreated={onCreated}
         onWorkspaceChanged={() => undefined}
         onOpenRemote={() => undefined}
+        onManageTemplates={() => undefined}
         onBack={() => undefined}
       />,
     );

@@ -115,9 +115,9 @@ export function GeneralPage() {
       <form id="sg-general-settings-form" className="sg-settings-form-page" onSubmit={save}>
         <SettingsSection title="启动与默认">
           <div className="sg-setting-list">
-            <SettingsRow title="恢复工作现场" description="启动时回到上次打开的项目与任务">
+            <SettingsRow title="恢复工作现场" description="启动时回到上次打开的项目与工作页（任务需从列表重新打开，避免草稿误发送）">
               <SettingsToggle
-                label="启动时恢复上次项目与任务"
+                label="启动时恢复上次项目与工作页"
                 checked={draft.restoreLastProject !== false}
                 onChange={(checked) => setGeneral('restoreLastProject', checked)}
               />

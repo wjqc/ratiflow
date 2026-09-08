@@ -27,8 +27,9 @@ export type Route =
   | { page: 'knowledge'; projectId: string }
   | { page: 'settings'; section?: SettingsRouteId };
 
-// 刷新/重启只恢复 section 级页面与最近项目，不恢复任务上下文
+// 刷新/重启只恢复工作页（当前仅审批中心）与最近项目，不恢复任务上下文
 // （产品决策：避免草稿误发送，见 dev-notes/2026-08-22-settings-center.md；FR-DESK-008 是自动更新签名，与此无关）。
+// 设置页是工具页不算"工作现场"：写入与恢复两侧都排除，启动永不落在设置页。
 const LS_ROUTE = 'sg:lastRoute';
 const LS_PROJECT = 'sg:lastProject';
 
@@ -37,9 +38,6 @@ function loadStoredRoute(): Route | null {
     const raw = localStorage.getItem(LS_ROUTE);
     if (!raw) return null;
     const r = JSON.parse(raw) as Route;
-    if (r.page === 'settings') {
-      return { page: 'settings', section: isSettingsRouteId(r.section) ? r.section : undefined };
-    }
     if (r.page === 'approvals') return { page: 'approvals' };
     return null;
   } catch {
@@ -57,7 +55,8 @@ function loadStoredProject(): string | null {
 
 function storeLast(route: Route, projectId: string | null): void {
   try {
-    localStorage.setItem(LS_ROUTE, JSON.stringify(route));
+    // settings 不覆盖已记录的工作页：在设置里退出应用，重启应回到之前的工作页。
+    if (route.page !== 'settings') localStorage.setItem(LS_ROUTE, JSON.stringify(route));
     if (projectId) localStorage.setItem(LS_PROJECT, projectId);
   } catch {
     /* 隐私模式等场景忽略 */
@@ -82,10 +81,23 @@ export default function AppShell() {
         const hello = await window.ratiflow.hello();
         if (hello && hello.ok === false) throw new Error(hello.error ?? 'core 未就绪');
         setCoreReady(true);
+        // 「恢复工作现场」开关（app.general.restoreLastProject，默认开）：
+        // 关闭时不恢复上次工作页路由与上次项目；读取失败按默认开处理。
+        let restore = true;
+        try {
+          const settings = await rpc<{
+            items: Array<{ key: string; value: Record<string, unknown> }>;
+          }>('settings.get', { scope: 'global', keys: ['app.general'] });
+          const general = settings.items?.find((item) => item.key === 'app.general');
+          restore = general?.value?.restoreLastProject !== false;
+        } catch {
+          /* 设置域不可用时保持默认行为 */
+        }
+        if (!restore) setRoute({ page: 'home' });
         const result = await rpc<{ items: Project[] }>('project.list');
         setProjects(result.items ?? []);
         if (result.items?.length) {
-          const stored = loadStoredProject();
+          const stored = restore ? loadStoredProject() : null;
           const hit = result.items.find((p) => p.id === stored);
           setActiveProjectId((prev) => prev ?? hit?.id ?? result.items[0].id);
         }
@@ -366,6 +378,7 @@ export default function AppShell() {
                 onCreated={(workItemId, createdProjectId) => openTask(createdProjectId, workItemId)}
                 onWorkspaceChanged={activateWorkspace}
                 onOpenRemote={() => navigate({ page: 'settings', section: 'integrations' })}
+                onManageTemplates={() => navigate({ page: 'settings', section: 'workflow-templates' })}
                 onBack={() => navigate({ page: 'home' })}
               />
             )}

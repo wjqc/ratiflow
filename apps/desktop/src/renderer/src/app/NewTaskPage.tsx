@@ -19,6 +19,7 @@ interface Props {
   onCreated: (workItemId: string, projectId: string) => void;
   onWorkspaceChanged: (project: Project) => void;
   onOpenRemote: () => void;
+  onManageTemplates: () => void;
   onBack: () => void;
 }
 
@@ -53,6 +54,7 @@ export default function NewTaskPage({
   onCreated,
   onWorkspaceChanged,
   onOpenRemote,
+  onManageTemplates,
 }: Props) {
   const [workspaceId, setWorkspaceId] = useState(projectId);
   const [mode, setMode] = useState<Mode>('text');
@@ -67,6 +69,8 @@ export default function NewTaskPage({
   // 关卡模板（配置化）：有 active 版本的模板可选；默认 six-gate-default。
   const [templates, setTemplates] = useState<{ key: string; name: string }[]>([]);
   const [templateKey, setTemplateKey] = useState('six-gate-default');
+  // 所选模板的关卡流预览：默认模板用本地常量（免请求），自定义模板读激活版本定义。
+  const [flowGates, setFlowGates] = useState<Array<{ name: string; sub: string }>>(GATE_FLOW);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,6 +94,31 @@ export default function NewTaskPage({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (templateKey === 'six-gate-default') {
+      setFlowGates(GATE_FLOW);
+      return;
+    }
+    let cancelled = false;
+    rpc<{ activeVersion?: { gates?: { gate_id: string; title: string; purpose?: string }[] } }>(
+      'workflowTemplate.get',
+      { templateId: templateKey },
+    )
+      .then((r) => {
+        if (cancelled) return;
+        const gates = r.activeVersion?.gates ?? [];
+        if (gates.length > 0) {
+          setFlowGates(gates.map((g) => ({ name: g.title || g.gate_id, sub: g.purpose ?? '' })));
+        }
+      })
+      .catch(() => {
+        // 读取失败保持当前预览（创建仍会冻结该模板激活版本）。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [templateKey]);
 
   // 点外部收起“+”来源菜单（与工作台输入器同一交互）。
   useEffect(() => {
@@ -279,6 +308,13 @@ export default function NewTaskPage({
               {templateKey !== 'six-gate-default' ? (
                 <span className="sg-muted">使用自定义关卡模板，创建时冻结当前激活版本</span>
               ) : null}
+              <button
+                className="sg-btn sg-btn--sm"
+                onClick={onManageTemplates}
+                title="在设置中管理关卡模板：复制草稿、编辑关卡、激活新版本"
+              >
+                管理关卡模板
+              </button>
             </div>
           ) : null}
 
@@ -403,9 +439,9 @@ export default function NewTaskPage({
             </div>
           ) : null}
 
-          <div className="sg-nt-flow-label">交付流程（六关）</div>
+          <div className="sg-nt-flow-label">交付流程（{flowGates.length} 关）</div>
           <div className="sg-nt-flow">
-            {GATE_FLOW.map((g, i) => (
+            {flowGates.map((g, i) => (
               <div className="sg-nt-step" key={g.name}>
                 {i > 0 && <span className="sg-nt-step-sep">→</span>}
                 <span className={`sg-nt-step-num ${i === 0 ? '' : 'sg-nt-step-num--idle'}`}>
