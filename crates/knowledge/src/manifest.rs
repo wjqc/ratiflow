@@ -511,6 +511,60 @@ fn validate_manifest_content(
     Ok(())
 }
 
+/// P1-4 阶段 B（审计 §8）：v2 writer flag——默认 0（审计 §1 建议关闭）。
+/// 开启：manifestCreate/Update 写 v2（contentOwner + verificationPolicy）；
+/// 关闭：写 v1（携带 v2 字段的请求显式拒绝——不静默丢字段）。
+/// 读侧（reconcile/freshness）始终双版本解析，不受此 flag 影响。
+pub fn manifest_v2_writer_enabled() -> bool {
+    std::env::var("RATIFLOW_KNOWLEDGE_MANIFEST_V2_WRITER")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+/// v2 写入面（owner + 已校验的 policy JSON）。
+#[derive(Debug)]
+struct V2Fields {
+    owner: String,
+    policy: Value,
+}
+
+/// 从 RPC 参数解析 v2 字段并按 writer flag 校验：
+/// - flag 开 + 参数全 → Some（policy 经严格校验）；
+/// - flag 开 + 参数缺 → 错误（v2 必填，不默认）；
+/// - flag 关 + 参数给 → 错误（writer 关闭不写 v2，防静默丢字段）；
+/// - flag 关 + 参数缺 → None（写 v1）。
+fn resolve_v2_fields(params: &Value) -> Result<Option<V2Fields>, Error> {
+    resolve_v2_fields_with(manifest_v2_writer_enabled(), params)
+}
+
+/// 显式 writer 开关版本（单测用——env 是进程全局量，并行测试下直接改
+/// env 会与其它 manifest 用例竞态；公共入口读 env 后委托至此）。
+fn resolve_v2_fields_with(writer_on: bool, params: &Value) -> Result<Option<V2Fields>, Error> {
+    let owner = params
+        .get("contentOwner")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let policy = params.get("verificationPolicy").cloned();
+    match (writer_on, owner, policy) {
+        (false, None, None) => Ok(None),
+        (false, Some(_), _) | (false, None, Some(_)) => Err(Error::Message(
+            "manifest_v2_writer_disabled: v2 writer 关闭（RATIFLOW_KNOWLEDGE_MANIFEST_V2_WRITER=0），不接受 v2 字段".into(),
+        )),
+        (true, owner, policy) => {
+            let owner = owner.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+                Error::Message("manifest_v2_fields_required: v2 写入须携带 contentOwner（非空）".into())
+            })?;
+            let policy = policy.ok_or_else(|| {
+                Error::Message("manifest_v2_fields_required: v2 写入须携带 verificationPolicy".into())
+            })?;
+            // 严格校验（shape/枚举/正整数——与读侧同一函数）。
+            crate::freshness::parse_verification_policy(&policy)?;
+            Ok(Some(V2Fields { owner, policy }))
+        }
+    }
+}
+
 fn render_manifest(
     stable_id: &str,
     kind: &str,
@@ -518,16 +572,30 @@ fn render_manifest(
     locator: &str,
     enabled: bool,
     content_sha: &str,
+    v2: Option<&V2Fields>,
 ) -> Vec<u8> {
-    let content = json!({
-        "contentSha256": content_sha,
-        "enabled": enabled,
-        "kind": kind,
-        "locator": locator,
-        "name": name,
-        "schemaVersion": 1,
-        "stableId": stable_id,
-    });
+    let content = match v2 {
+        None => json!({
+            "contentSha256": content_sha,
+            "enabled": enabled,
+            "kind": kind,
+            "locator": locator,
+            "name": name,
+            "schemaVersion": 1,
+            "stableId": stable_id,
+        }),
+        Some(f) => json!({
+            "contentSha256": content_sha,
+            "contentOwner": f.owner,
+            "enabled": enabled,
+            "kind": kind,
+            "locator": locator,
+            "name": name,
+            "schemaVersion": 2,
+            "stableId": stable_id,
+            "verificationPolicy": f.policy,
+        }),
+    };
     let mut s = canonical_json(&content).into_bytes();
     s.push(b'\n');
     s
@@ -640,6 +708,12 @@ pub fn manifest_create(store: &Store, params: &Value) -> Result<Value, Error> {
         _ => unreachable!(),
     };
 
+    // P1-4：v2 字段（writer flag 门控；指纹含 schema 标记——v1/v2 写入不互相重放）。
+    let v2 = resolve_v2_fields(params)?;
+    let v2_fp = match &v2 {
+        None => "v1".to_string(),
+        Some(f) => format!("v2|{}|{}", f.owner, canonical_json(&f.policy)),
+    };
     // 幂等键：同 opId 同指纹 → 原终态；不一致 → conflict（§6.4）。
     let fp = fingerprint(&[
         "create",
@@ -650,6 +724,7 @@ pub fn manifest_create(store: &Store, params: &Value) -> Result<Value, Error> {
         &locator,
         if enabled { "1" } else { "0" },
         "expectedAbsent",
+        &v2_fp,
     ]);
     if let Some(r) = load_receipt(store, &op_id)? {
         return receipt_replay(&r, &fp, &project_id, &stable_id);
@@ -677,7 +752,15 @@ pub fn manifest_create(store: &Store, params: &Value) -> Result<Value, Error> {
     } else {
         String::new()
     };
-    let bytes = render_manifest(&stable_id, &kind, &name, &locator, enabled, &content_sha);
+    let bytes = render_manifest(
+        &stable_id,
+        &kind,
+        &name,
+        &locator,
+        enabled,
+        &content_sha,
+        v2.as_ref(),
+    );
     let manifest_sha = sha256_hex(&bytes);
 
     if let Some((current_sha, current_bytes)) = read_manifest(&path)? {
@@ -833,13 +916,21 @@ pub fn manifest_update(store: &Store, params: &Value) -> Result<Value, Error> {
     let row = load_source_row(store, &project_id, &stable_id)?;
     let (row_id, kind, old_name, old_locator, old_content_sha, old_enabled) = row;
 
+    // P1-4：update 同样受 writer flag 门控（v1→v2 升级路径：flag 开 + v2 字段全）。
+    let v2 = resolve_v2_fields(params)?;
+    let v2_fp = match &v2 {
+        None => "v1".to_string(),
+        Some(f) => format!("v2|{}|{}", f.owner, canonical_json(&f.policy)),
+    };
+    let enabled_fp = enabled.map(|b| b.to_string()).unwrap_or_default();
     let fp = fingerprint(&[
         "update",
         &project_id,
         &stable_id,
         name.as_deref().unwrap_or(""),
-        enabled.map(|b| b.to_string()).as_deref().unwrap_or(""),
+        &enabled_fp,
         &expected,
+        &v2_fp,
     ]);
     if let Some(r) = load_receipt(store, &op_id)? {
         return receipt_replay(&r, &fp, &project_id, &stable_id);
@@ -875,6 +966,7 @@ pub fn manifest_update(store: &Store, params: &Value) -> Result<Value, Error> {
         &old_locator,
         new_enabled,
         &old_content_sha,
+        v2.as_ref(),
     );
     let new_sha = sha256_hex(&bytes);
 
@@ -1165,6 +1257,114 @@ mod tests {
             })
             .unwrap();
         (store, Tmp(dir), root)
+    }
+
+    /// P1-4：writer 开关矩阵（显式注入——env 是进程全局量，并行测试下
+    /// 改 env 会与其它 manifest 用例竞态）。
+    #[test]
+    fn v2_writer_flag_matrix() {
+        let base = json!({
+            "projectId": "pj", "opId": "op-1", "kind": "repo_path",
+            "name": "文档", "locator": "docs", "expectedAbsent": true,
+        });
+        // flag 关 + 无 v2 字段 → 写 v1。
+        assert!(resolve_v2_fields_with(false, &base).unwrap().is_none());
+        // flag 关 + 带 v2 字段 → 显式拒绝（不静默丢字段）。
+        let mut with_fields = base.clone();
+        with_fields["contentOwner"] = json!("doc-team");
+        with_fields["verificationPolicy"] = json!({"intervalDays": 7, "severity": "block"});
+        let err = resolve_v2_fields_with(false, &with_fields)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("manifest_v2_writer_disabled"), "{err}");
+        // flag 开 + 缺字段 → 拒绝。
+        let mut missing_policy = base.clone();
+        missing_policy["contentOwner"] = json!("doc-team");
+        let err = resolve_v2_fields_with(true, &missing_policy)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("manifest_v2_fields_required"), "{err}");
+        let mut missing_owner = base.clone();
+        missing_owner["verificationPolicy"] = json!({"intervalDays": 7, "severity": "block"});
+        let err = resolve_v2_fields_with(true, &missing_owner)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("manifest_v2_fields_required"), "{err}");
+        // flag 开 + 非法 policy → 拒绝（严格校验与读侧同函数）。
+        let mut bad = base.clone();
+        bad["contentOwner"] = json!("doc-team");
+        bad["verificationPolicy"] = json!({"intervalDays": 0, "severity": "mega"});
+        assert!(resolve_v2_fields_with(true, &bad).is_err());
+        // flag 开 + 字段全 → V2Fields。
+        let f = resolve_v2_fields_with(true, &with_fields).unwrap().unwrap();
+        assert_eq!(f.owner, "doc-team");
+        assert_eq!(f.policy["intervalDays"], json!(7));
+        // render：v1/v2 输出的 schemaVersion 与字段面。
+        let v1 = render_manifest("sid", "repo_path", "n", "docs", true, "sha", None);
+        let v1v: Value = serde_json::from_str(&String::from_utf8_lossy(&v1)).unwrap();
+        assert_eq!(v1v["schemaVersion"], json!(1));
+        assert!(v1v.get("contentOwner").is_none());
+        let v2b = render_manifest(
+            "sid",
+            "repo_path",
+            "n",
+            "docs",
+            true,
+            "sha",
+            Some(&V2Fields {
+                owner: "doc-team".into(),
+                policy: json!({"intervalDays": 7, "severity": "block"}),
+            }),
+        );
+        let v2v: Value = serde_json::from_str(&String::from_utf8_lossy(&v2b)).unwrap();
+        assert_eq!(v2v["schemaVersion"], json!(2));
+        assert_eq!(v2v["contentOwner"], json!("doc-team"));
+        assert_eq!(v2v["verificationPolicy"]["severity"], json!("block"));
+    }
+
+    /// P1-4：读侧双版本——手写 v1/v2 文件均通过 reconcile 校验
+    ///（v2 带 owner/policy；writer 关闭不影响读）。
+    #[test]
+    fn reader_parses_both_versions_independent_of_writer_flag() {
+        let (store, _t, root) = setup();
+        let _ = store;
+        let dir = manifest_dir(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        // v1 文件（writer 关闭时的产物形态）。
+        let (d1, s1, _) = repo_path_identity("docs", "文档一");
+        let slug1 = format!("repopath-{}-{}", "wen-dang-yi", &d1[..12]);
+        std::fs::write(
+            dir.join(format!("{slug1}.json")),
+            json!({
+                "contentSha256": "", "enabled": true, "kind": "repo_path",
+                "locator": "docs", "name": "文档一", "schemaVersion": 1, "stableId": s1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // v2 文件（writer 开启时的产物形态）。
+        let (d2, s2, _) = repo_path_identity("docs/a.md", "文档二");
+        let slug2 = format!("repopath-{}-{}", "wen-dang-er", &d2[..12]);
+        std::fs::write(
+            dir.join(format!("{slug2}.json")),
+            json!({
+                "contentSha256": "", "contentOwner": "doc-team", "enabled": true,
+                "kind": "repo_path", "locator": "docs/a.md", "name": "文档二",
+                "schemaVersion": 2, "stableId": s2,
+                "verificationPolicy": {"intervalDays": 7, "severity": "block"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let all = crate::reconcile::load_source_manifests(&root).unwrap();
+        assert_eq!(all.len(), 2, "双版本文件并存均通过校验");
+        let v1m = &all.iter().find(|(_, m)| m.stable_id == s1).unwrap().1;
+        let v2m = &all.iter().find(|(_, m)| m.stable_id == s2).unwrap().1;
+        assert_eq!(v1m.schema_version, 1);
+        assert!(v1m.verification_policy.is_none());
+        assert_eq!(v2m.schema_version, 2);
+        assert_eq!(v2m.content_owner.as_deref(), Some("doc-team"));
+        assert_eq!(v2m.verification_policy.as_ref().unwrap().interval_days, 7);
     }
 
     #[test]

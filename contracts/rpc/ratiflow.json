@@ -3704,6 +3704,18 @@
           "name": "expectedAbsent",
           "type": "boolean",
           "required": true
+        },
+        {
+          "name": "contentOwner",
+          "type": "string",
+          "required": false,
+          "description": "v2 字段（须开 RATIFLOW_KNOWLEDGE_MANIFEST_V2_WRITER=1；P1-4）"
+        },
+        {
+          "name": "verificationPolicy",
+          "type": "object",
+          "required": false,
+          "description": "v2 字段 {intervalDays>0, severity: info|warn|block}（须开 writer flag；P1-4）"
         }
       ],
       "result": "value"
@@ -3740,6 +3752,18 @@
           "name": "enabled",
           "type": "boolean",
           "required": false
+        },
+        {
+          "name": "contentOwner",
+          "type": "string",
+          "required": false,
+          "description": "v2 字段（须开 RATIFLOW_KNOWLEDGE_MANIFEST_V2_WRITER=1；P1-4）"
+        },
+        {
+          "name": "verificationPolicy",
+          "type": "object",
+          "required": false,
+          "description": "v2 字段 {intervalDays>0, severity: info|warn|block}（须开 writer flag；P1-4）"
         }
       ],
       "result": "value"

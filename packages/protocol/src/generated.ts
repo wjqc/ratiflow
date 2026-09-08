@@ -1790,6 +1790,8 @@ export interface KnowledgeManifestCreateParams {
   locator?: string;
   body?: string;
   enabled?: boolean;
+  contentOwner?: string;
+  verificationPolicy?: unknown;
 }
 
 export interface KnowledgeManifestUpdateParams {
@@ -1799,6 +1801,8 @@ export interface KnowledgeManifestUpdateParams {
   expectedManifestSha256: string;
   name?: string;
   enabled?: boolean;
+  contentOwner?: string;
+  verificationPolicy?: unknown;
 }
 
 export interface KnowledgeManifestRemoveParams {
