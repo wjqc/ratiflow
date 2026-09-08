@@ -75,7 +75,6 @@ describe('设置页接线', () => {
       openExternal: () => Promise.resolve(),
       appInfo: () => Promise.resolve({ desktopVersion: 'test', logDir: '/tmp', userDataDir: '/tmp' }),
       openLogs: () => Promise.resolve(),
-      revealMemoryExport: () => Promise.resolve(false),
       onEvent: () => () => {},
     };
   });

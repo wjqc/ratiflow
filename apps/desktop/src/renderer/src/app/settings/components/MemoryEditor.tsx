@@ -1,4 +1,4 @@
-// S12 记忆编辑器：标题/类型/正文(Markdown)/标签。新建可直接成为 active（用户确认即生效）；
+// S12 记忆编辑器：标题/类型/正文(Markdown)/标签（候选接受与编辑共用）；
 // 编辑时类型锁定；revision conflict 时保留本地草稿并给出重载入口（§3.6）。
 import { useState, type FormEvent } from 'react';
 import { MEMORY_KIND_LABEL, type MemoryKind } from '../types';
@@ -9,8 +9,6 @@ export interface MemoryDraft {
   body: string;
   tags: string;
 }
-
-export const EMPTY_DRAFT: MemoryDraft = { title: '', kind: 'lesson', body: '', tags: '' };
 
 export function MemoryEditor({
   mode,

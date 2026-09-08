@@ -374,20 +374,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let project_id = s(params, "projectId")?.to_string();
             let run_id = s(params, "runId")?.to_string();
             let key = idem(params)?;
-            let result = mem::capture::start_job(store, &project_id, &run_id, &key, "", 0)
-                .map_err(mem_err)?;
-            let job_id = result["jobId"].as_str().unwrap_or_default().to_string();
-            if !job_id.is_empty() {
-                let run_store = state.run_store.clone();
-                let model = state.model.clone();
-                let max_bytes = mem::repository::settings_get(store, &project_id)
-                    .map(|st| st.max_bytes)
-                    .unwrap_or(12288);
-                state.handle.spawn_blocking(move || {
-                    run_capture_worker(run_store, model, job_id, max_bytes);
-                });
-            }
-            Ok(result)
+            enqueue_capture(state, store, &project_id, &run_id, &key)
         }
         "memory.captureGet" => {
             Ok(
@@ -432,6 +419,66 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             ErrorCode::MethodNotFound,
             format!("method_not_found: 未知方法 {method}"),
         )),
+    }
+}
+
+/// capture 入队 + 后台 worker 启动（memory.captureStart RPC 与 Run 终态自动路径共用）。
+/// 入队治理（仅 completed_execution、capture_mode=suggest、脱敏摘要冻结、幂等收据）全在
+/// sg-memory capture::start_job 内裁决；此处 Err 即治理拒绝或状态机拒绝。
+fn enqueue_capture(
+    state: &AppState,
+    store: &Store,
+    project_id: &str,
+    run_id: &str,
+    idem_key: &str,
+) -> RpcResult {
+    let result = mem::capture::start_job(store, project_id, run_id, idem_key, "", 0)
+        .map_err(mem_err)?;
+    let job_id = result["jobId"].as_str().unwrap_or_default().to_string();
+    if !job_id.is_empty() {
+        let run_store = state.run_store.clone();
+        let model = state.model.clone();
+        let max_bytes = mem::repository::settings_get(store, project_id)
+            .map(|st| st.max_bytes)
+            .unwrap_or(12288);
+        state.handle.spawn_blocking(move || {
+            run_capture_worker(run_store, model, job_id, max_bytes);
+        });
+    }
+    Ok(result)
+}
+
+/// Run 终态自动沉淀（M4 接线）：任务成功结束后自动入队候选捕获。
+/// 治理拒绝（capture_mode=off / 幂等冲突 / 秘密命中）与状态机错误一律静默降级为
+/// stderr 日志——自动路径不得影响 Run 收尾，也不得向用户抛错。
+/// 幂等键固定 auto::<run_id>：同一 Run 重复触发返回既有收据；resume 后 rollout
+/// 变长导致的指纹冲突同样静默跳过（不重复沉淀同一 Run 的旧摘要）。
+pub(crate) fn auto_capture_after_run(
+    handle: &tokio::runtime::Handle,
+    run_store: &Arc<Store>,
+    model: &Arc<sg_agent::modelgw::Gateway>,
+    project_id: &str,
+    run_id: &str,
+) {
+    match mem::capture::start_job(run_store, project_id, run_id, &format!("auto::{run_id}"), "", 0) {
+        Ok(result) => {
+            let job_id = result["jobId"].as_str().unwrap_or_default().to_string();
+            if !job_id.is_empty() {
+                let max_bytes = mem::repository::settings_get(run_store, project_id)
+                    .map(|st| st.max_bytes)
+                    .unwrap_or(12288);
+                let run_store = run_store.clone();
+                let model = model.clone();
+                handle.spawn_blocking(move || {
+                    run_capture_worker(run_store, model, job_id, max_bytes);
+                });
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"debug\",\"msg\":\"memory auto-capture skipped for run {run_id}: {e}\"}}"
+            );
+        }
     }
 }
 
@@ -497,5 +544,111 @@ fn run_capture_worker(
             let (terminal, code) = mem::capture::classify_provider_error(&e);
             let _ = mem::capture::mark_terminal(&run_store, &job_id, terminal, code);
         }
+    }
+}
+
+#[cfg(test)]
+mod auto_capture_tests {
+    use super::*;
+    use sg_integrations::model::{CompletionRequest, CompletionResponse, ModelProvider};
+
+    /// 自动路径不需要真实模型：provider 直接失败即可（worker 落 failed，不影响入队断言）。
+    struct FailingProvider;
+    impl ModelProvider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn health_check(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn complete(&self, _req: &CompletionRequest) -> Result<CompletionResponse, String> {
+            Err("model_unavailable: test".into())
+        }
+    }
+
+    fn open_store(tag: &str) -> Store {
+        let dir = std::env::temp_dir().join(format!(
+            "sg-auto-cap-{tag}-{}",
+            sg_store::ids::new_id("t")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Store::open(&dir, "test").unwrap()
+    }
+
+    fn seed_completed_run(store: &Store, project_id: &str) -> String {
+        let run_id = format!("run-{project_id}");
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES (?1, 'u', 'ns', 'prj', 'main', ?2)",
+                    rusqlite::params![project_id, sg_store::timefmt::now()],
+                )?;
+                c.execute(
+                    "INSERT INTO workitems(id, project_id, title, created_at, updated_at)
+                     VALUES ('wi-1', ?1, 't', ?2, ?2)",
+                    rusqlite::params![project_id, sg_store::timefmt::now()],
+                )?;
+                c.execute(
+                    "INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('cm-1', 'wi-1', '{}', 'standard', ?1)",
+                    rusqlite::params![sg_store::timefmt::now()],
+                )?;
+                c.execute(
+                    "INSERT INTO agent_runs(
+                        id, workitem_id, goal, input_baseline_sha, context_manifest_id,
+                        budget, policy_snapshot, idempotency_key, status, created_at, updated_at
+                     ) VALUES (?1, 'wi-1', '部署 检查', 'sha', 'cm-1', '{}', '{}', 'idem-1',
+                               'completed_execution', ?2, ?2)",
+                    rusqlite::params![run_id, sg_store::timefmt::now()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        run_id
+    }
+
+    fn job_count(store: &Store, run_id: &str) -> i64 {
+        store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM memory_capture_jobs WHERE run_id=?1",
+                    [run_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn auto_capture_gated_by_mode_and_idempotent_per_run() {
+        // 自动路径全链走 run_store（生产上它就是同一 SQLite 的 Run 专属连接）。
+        let run_store = Arc::new(open_store("gate"));
+        let run_id = seed_completed_run(&run_store, "pj");
+        let model = Arc::new(sg_agent::modelgw::Gateway::new(Box::new(FailingProvider)));
+
+        // capture_mode=off（默认）：静默跳过，不产生 job。
+        auto_capture_after_run(&tokio::runtime::Handle::current(), &run_store, &model, "pj", &run_id);
+        assert_eq!(job_count(&run_store, &run_id), 0);
+
+        // suggest：completed run 入队一条 pending job。
+        sg_memory::settings_update(
+            &run_store,
+            "pj",
+            &sg_memory::SettingsPatch {
+                enabled: Some(true),
+                capture_mode: Some("suggest".into()),
+                ..Default::default()
+            },
+            1,
+            &sg_store::ids::new_id("k"),
+        )
+        .unwrap();
+        auto_capture_after_run(&tokio::runtime::Handle::current(), &run_store, &model, "pj", &run_id);
+        assert_eq!(job_count(&run_store, &run_id), 1);
+
+        // 同 run 重复触发（resume 后再次结束）：幂等键 auto::<run_id> 命中收据，不重复入队。
+        auto_capture_after_run(&tokio::runtime::Handle::current(), &run_store, &model, "pj", &run_id);
+        assert_eq!(job_count(&run_store, &run_id), 1);
     }
 }

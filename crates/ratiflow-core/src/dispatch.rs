@@ -4304,11 +4304,15 @@ fn spawn_run_task(
     let run_store = state.run_store.clone();
     let audit_store = state.run_store.clone();
     let gateway = state.model.clone();
+    // M4 自动记忆沉淀所需（gateway 已被内层 spawn_blocking move，这里独立克隆）。
+    let capture_model = state.model.clone();
+    let capture_handle = state.handle.clone();
     let policy = policy_snapshot.clone();
     let registry = state.runs.clone();
     let run_id_owned = run_id.to_string();
     let _ = run;
     let t_workitem = workitem_id;
+    let t_project = project_id.clone();
     let t_goal = goal;
     let t_manifest = manifest_id;
     let t_allow = allowlist;
@@ -4379,6 +4383,18 @@ fn spawn_run_task(
         let _ = result;
         // P0-3：活动终态回写——Run 结束时其绑定的 stage activity 不得停留在 running。
         if let Ok(run_row) = sg_agent::get_run(&audit_store, &run_id_owned) {
+            // M4 接线：任务成功结束自动入队记忆候选捕获（放在 rollout 收尾之后——
+            // worker 的脱敏摘要读的是刚 fsync 的 rollout 文件）。治理拒绝
+            // （capture_mode=off/幂等冲突/秘密命中）在 auto_capture_after_run 内静默。
+            if run_row.status == "completed_execution" {
+                crate::memory_dispatch::auto_capture_after_run(
+                    &capture_handle,
+                    &audit_store,
+                    &capture_model,
+                    &t_project,
+                    &run_id_owned,
+                );
+            }
             let activity_state = match run_row.status.as_str() {
                 "completed_execution" => Some("done"),
                 "failed" | "cancelled" => Some("failed"),

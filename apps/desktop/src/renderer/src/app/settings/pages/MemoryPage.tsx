@@ -1,12 +1,12 @@
 // S12 项目记忆页（参考稿对齐版）：工作区记忆开关卡片 → 项目/计数 + 搜索 →
-// 「文件」列表（slug.md + 相对时间 + 注入开关）；新建/导入/导出在列表工具行。
+// 「文件」列表（slug.md + 相对时间 + 注入开关）；记忆经候选确认/仓库同步进入，不提供手工新建/导入/导出。
 // 不区分类型；状态详情在抽屉内查看（§3.6 状态仍全覆盖）。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpc } from '../../../rpc/client';
 import { rpcErrText } from '../../../lib/rpcError';
 import { StatusPill } from '../components/StatusPill';
 import { SettingsToggle } from '../components/SettingsRow';
-import { IconMore, IconPlus, IconRefresh, IconSearch } from '../../../components/Icons';
+import { IconRefresh, IconSearch } from '../../../components/Icons';
 import { MemoryList } from '../components/MemoryList';
 import { MemoryDrawer } from '../components/MemoryDrawer';
 import { MemoryCandidates } from '../components/MemoryCandidates';
@@ -32,14 +32,12 @@ export function MemoryPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
-  const [revealExportId, setRevealExportId] = useState<string | null>(null);
-  const [drawer, setDrawer] = useState<{ id: string | null; create: boolean } | null>(null);
-  const [actionsOpen, setActionsOpen] = useState(false);
+  const [drawer, setDrawer] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const requestSeq = useRef(0);
   const debounceRef = useRef<number | null>(null);
 
-  // 项目已归档只影响写入路径；浏览/编辑/导入导出/归档/清除是数据控制路径，不受限（§3.3/§16.2/MEM-029）。
+  // 项目已归档只影响写入路径；浏览/编辑/归档/清除是数据控制路径，不受限（§3.3/§16.2/MEM-029）。
   const archivedProject = projects.find((p) => p.id === projectId)?.archivedAt != null;
 
   // 项目列表（首个未归档项目默认选中）。
@@ -126,14 +124,17 @@ export function MemoryPage() {
     debounceRef.current = window.setTimeout(() => setQuery(v), 250);
   };
 
+  // 开关联动注入与自动沉淀：开启 = 注入 + 任务完成后自动总结候选（captureMode=suggest）；
+  // 关闭 = 全关。候选仍需人工确认才成为正式记忆。
   const toggleEnabled = async () => {
     if (!projectId || !settings || toggling) return;
     setToggling(true);
     setNotice(null);
+    const enable = !settings.enabled;
     try {
       const updated = await rpc<MemorySettingsInfo>('memory.settingsUpdate', {
         projectId,
-        settings: { enabled: !settings.enabled },
+        settings: { enabled: enable, captureMode: enable ? 'suggest' : 'off' },
         expectedRevision: settings.revision,
         idempotencyKey: crypto.randomUUID(),
       });
@@ -174,49 +175,6 @@ export function MemoryPage() {
     }
   };
 
-  const doImport = async (mode: 'proposed' | 'active') => {
-    if (!projectId) return;
-    const picked = await window.ratiflow.selectFile();
-    if (!picked) return;
-    setNotice(null);
-    try {
-      const res = await rpc<{ created: unknown[]; duplicates: unknown[] }>('memory.import', {
-        projectId,
-        filename: picked.filename,
-        contentBase64: picked.contentBase64,
-        mode,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      setNotice(`导入完成：新建 ${res.created?.length ?? 0} 条，跳过/去重 ${res.duplicates?.length ?? 0} 条`);
-      setRefreshKey((k) => k + 1);
-      if (projectId) void loadList(projectId, query);
-    } catch (e) {
-      setNotice(rpcErrText(e) || '导入失败');
-    }
-  };
-
-  const doExport = async (includeArchived: boolean) => {
-    if (!projectId) return;
-    setNotice(null);
-    try {
-      const res = await rpc<{ exportId: string; count: number }>('memory.export', {
-        projectId,
-        includeArchived,
-        format: 'markdown',
-      });
-      setRevealExportId(res.exportId);
-      setNotice(`导出完成（${res.count} 条），导出 ID ${res.exportId}`);
-    } catch (e) {
-      setNotice(rpcErrText(e) || '导出失败');
-    }
-  };
-
-  const reveal = async () => {
-    if (!revealExportId) return;
-    const ok = await window.ratiflow.revealMemoryExport(revealExportId);
-    setNotice(ok ? '已在访达中显示' : '导出目录不存在或已被清理');
-  };
-
   const counts = list?.counts ?? {};
   const total =
     (counts.active ?? 0) + (counts.proposed ?? 0) + (counts.conflicted ?? 0) + (counts.archived ?? 0);
@@ -239,8 +197,8 @@ export function MemoryPage() {
         </>
       );
     }
-    if (settings?.enabled === false) return '当前项目未开启记忆。开启后新 Run 才会复用已确认记忆；也可以先新建或导入。';
-    return '还没有记忆。新建一条，或从 Markdown 导入。';
+    if (settings?.enabled === false) return '当前项目未开启记忆。开启后新 Run 才会复用已确认记忆。';
+    return '还没有记忆。Agent 运行沉淀的候选可在上方确认，或从仓库同步。';
   }, [queryInput, settings?.enabled]);
 
   return (
@@ -252,7 +210,7 @@ export function MemoryPage() {
       <section className="sg-memory-master" aria-label="工作区记忆">
         <div>
           <strong>工作区记忆</strong>
-          <p>在工作区中保存并复用长期上下文，新会话生效。开启后可能增加模型调用和 Token 成本。</p>
+          <p>开启后，Agent 任务完成会自动总结沉淀为候选记忆（需确认后生效），新 Run 复用已确认记忆。可能增加模型调用和 Token 成本。</p>
         </div>
         <SettingsToggle
           label="启用记忆注入"
@@ -287,10 +245,7 @@ export function MemoryPage() {
         </div>
       ) : null}
       {notice ? (
-        <div className="sg-memory-banner sg-memory-banner--ok">
-          {notice}
-          {revealExportId ? <button type="button" className="sg-btn" onClick={() => void reveal()}>在访达中显示</button> : null}
-        </div>
+        <div className="sg-memory-banner sg-memory-banner--ok">{notice}</div>
       ) : null}
 
       <div className="sg-reference-toolbar">
@@ -327,26 +282,6 @@ export function MemoryPage() {
               onChange={(event) => onQueryChange(event.target.value)}
             />
           </label>
-          <div className="sg-reference-more">
-            <button
-              type="button"
-              className="sg-reference-icon-btn"
-              aria-label="更多记忆操作"
-              aria-expanded={actionsOpen}
-              onClick={() => setActionsOpen((open) => !open)}
-            >
-              <IconMore size={16} />
-            </button>
-            {actionsOpen ? (
-              <div className="sg-reference-menu" role="menu">
-                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); setDrawer({ id: null, create: true }); }} disabled={!projectId || archivedProject}>
-                  <IconPlus size={14} />新建记忆
-                </button>
-                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); void doImport('proposed'); }} disabled={!projectId || archivedProject}>导入 Markdown</button>
-                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); void doExport(false); }} disabled={!projectId}>导出</button>
-              </div>
-            ) : null}
-          </div>
           <button type="button" className="sg-reference-icon-btn" aria-label="刷新记忆列表" onClick={() => projectId && void loadList(projectId, query)}>
             <IconRefresh size={15} />
           </button>
@@ -368,8 +303,8 @@ export function MemoryPage() {
           <MemoryList
             items={list?.items ?? []}
             loading={loading}
-            activeId={drawer?.id ?? null}
-            onSelect={(id) => setDrawer({ id, create: false })}
+            activeId={drawer}
+            onSelect={(id) => setDrawer(id)}
             onToggleActive={(item) => void toggleItemActive(item)}
             empty={emptyState}
           />
@@ -385,8 +320,7 @@ export function MemoryPage() {
       {drawer && projectId ? (
         <MemoryDrawer
           projectId={projectId}
-          memoryId={drawer.id}
-          createMode={drawer.create}
+          memoryId={drawer}
           readOnly={archivedProject}
           onClose={() => setDrawer(null)}
           onChanged={() => {

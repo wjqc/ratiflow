@@ -6,7 +6,7 @@ import { renderMarkdown } from '../../../lib/markdown';
 import { rpcErrText, rpcErrToken } from '../../../lib/rpcError';
 import { SettingsSection } from './SettingsSection';
 import { StatusPill } from './StatusPill';
-import { MemoryEditor, EMPTY_DRAFT, type MemoryDraft } from './MemoryEditor';
+import { MemoryEditor, type MemoryDraft } from './MemoryEditor';
 import { MemorySourceRefs } from './MemorySourceRefs';
 import { formatTime } from './MemoryList';
 import {
@@ -33,21 +33,19 @@ function errText(e: unknown): string {
 export function MemoryDrawer({
   projectId,
   memoryId,
-  createMode,
   readOnly,
   onClose,
   onChanged,
 }: {
   projectId: string;
-  memoryId: string | null;
-  createMode: boolean;
+  memoryId: string;
   readOnly: boolean;
   onClose: () => void;
   onChanged: () => void;
 }) {
   const [detail, setDetail] = useState<MemoryDetail | null>(null);
-  const [loading, setLoading] = useState(!createMode);
-  const [mode, setMode] = useState<'view' | 'edit' | 'create'>(createMode ? 'create' : 'view');
+  const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<'view' | 'edit'>('view');
   const [submitting, setSubmitting] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +65,6 @@ export function MemoryDrawer({
   }, []);
 
   const load = async () => {
-    if (!memoryId) return;
     setLoading(true);
     setError(null);
     try {
@@ -80,7 +77,7 @@ export function MemoryDrawer({
   };
 
   useEffect(() => {
-    if (!createMode) void load();
+    void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [memoryId, projectId]);
 
@@ -99,24 +96,6 @@ export function MemoryDrawer({
     } finally {
       setSubmitting(false);
     }
-  };
-
-  const saveCreate = (draft: MemoryDraft) => {
-    void mutate(() =>
-      rpc('memory.create', {
-        projectId,
-        title: draft.title,
-        kind: draft.kind,
-        body: draft.body,
-        tags: draft.tags ? draft.tags.split(/[,，]/).map((t) => t.trim()).filter(Boolean) : [],
-        idempotencyKey: uuid(),
-      }),
-    ).then((ok) => {
-      if (ok) {
-        onChanged();
-        onClose();
-      }
-    });
   };
 
   // 冲突精度：保存失败且 code=memory_conflict 时保留草稿。
@@ -171,7 +150,7 @@ export function MemoryDrawer({
       .finally(() => setPurging(false));
   };
 
-  const heading = createMode ? '新建记忆' : detail?.title || detail?.slug || '记忆详情';
+  const heading = detail?.title || detail?.slug || '记忆详情';
 
   return (
     <>
@@ -206,19 +185,7 @@ export function MemoryDrawer({
           ) : null}
           {notice ? <div className="sg-memory-banner sg-memory-banner--ok">{notice}</div> : null}
 
-          {mode === 'create' ? (
-            <MemoryEditor
-              mode="create"
-              initial={EMPTY_DRAFT}
-              submitting={submitting}
-              conflict={false}
-              submitting_label="创建（直接生效）"
-              onSubmit={saveCreate}
-              onCancel={onClose}
-            />
-          ) : null}
-
-          {!createMode && detail ? (
+          {detail ? (
             <>
               {detail.status === 'conflicted' ? (
                 <div role="alert" className="sg-memory-banner sg-memory-banner--warn">
