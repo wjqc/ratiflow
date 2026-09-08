@@ -1606,6 +1606,45 @@ mod tests {
             .unwrap();
     }
 
+
+    #[test]
+    fn migration_0056_workitem_search_shadow() {
+        let (store, _guard) = open();
+        assert!(store.schema_version().unwrap() >= 56);
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj56','u','n','p','main','t');
+                     INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi56','pj56','支付网关','描述','[]','requirements','t','t');",
+                )?;
+                // 影子表 FTS5 可写可查（与主表同构 trigram）。
+                c.execute(
+                    "INSERT INTO workitem_search_shadow(workitem_id, title, description)
+                     SELECT id, title, description FROM workitems",
+                    [],
+                )?;
+                let n: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM workitem_search_shadow WHERE workitem_search_shadow MATCH '支付网'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(n, 1, "影子表 trigram 检索可用");
+                // 切换协议：主表原子替换自影子。
+                c.execute("DELETE FROM workitem_search", [])?;
+                c.execute(
+                    "INSERT INTO workitem_search(workitem_id, title, description)
+                     SELECT workitem_id, title, description FROM workitem_search_shadow",
+                    [],
+                )?;
+                let m: i64 = c.query_row("SELECT COUNT(*) FROM workitem_search", [], |r| r.get(0))?;
+                assert_eq!(m, 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
     fn seed_minimal_fixtures(store: &Store) {
         store
             .with_conn(|c| {

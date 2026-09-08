@@ -2724,6 +2724,12 @@
           "name": "workItemId",
           "type": "string",
           "required": true
+        },
+        {
+          "name": "topK",
+          "type": "number",
+          "required": false,
+          "description": "请求级返回条数上限（服务端 clamp [1,20]，缺省取 RATIFLOW_WORKITEM_SIMILAR_LIMIT/5；P1-3）"
         }
       ],
       "result": "value"

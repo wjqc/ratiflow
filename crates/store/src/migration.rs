@@ -129,6 +129,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         55,
         include_str!("../migrations/0055_durable_run_intents.sql"),
     ),
+    (
+        56,
+        include_str!("../migrations/0056_workitem_search_shadow.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

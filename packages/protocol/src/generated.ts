@@ -1523,6 +1523,7 @@ export interface AutomationSetShadowModeParams {
 
 export interface WorkitemSimilarParams {
   workItemId: string;
+  topK?: number;
 }
 
 export interface KnowledgeVerifySourceParams {

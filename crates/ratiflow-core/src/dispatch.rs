@@ -2666,6 +2666,40 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 }
             }
             out["knowledgeBlocked"] = json!(knowledge_blocked);
+            // P1-3：Triage 顶层聚合扩展（纯读）。
+            // ① 对象库无引用（GC 引用扫描的 orphan 候选——只计数不清理，
+            //    清理受 RATIFLOW_OBJECTS_GC_PRUNE 门控）。
+            let object_orphans = sg_store::objects::gc_scan(store)
+                .map(|r| {
+                    json!({
+                        "count": r.orphans.len(),
+                        "total": r.total,
+                        "pruneGated": true,
+                        "manifest": r.orphans.iter().take(20).cloned().collect::<Vec<_>>(),
+                    })
+                })
+                .unwrap_or_else(|e| json!({"error": e.to_string()}));
+            out["objectOrphans"] = object_orphans;
+            // ② unknown reconciliation 聚合：durable run intent（P0-5 租约/重试耗尽）
+            // + 工具执行 outcome unknown / 对账 pending。
+            let (ri_unknown, tool_unknown, recon_pending): (i64, i64, i64) =
+                store.with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT
+                            (SELECT COUNT(*) FROM run_intents WHERE state IN ('unknown','reconciliation_required','manual_action_required')),
+                            (SELECT COUNT(*) FROM tool_execution_outcomes WHERE outcome = 'unknown'),
+                            (SELECT COUNT(*) FROM tool_execution_outcomes WHERE reconciliation = 'pending')",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .map_err(Error::from)
+                })
+                .unwrap_or((0, 0, 0));
+            out["unknownReconciliation"] = json!({
+                "runIntents": ri_unknown,
+                "toolOutcomesUnknown": tool_unknown,
+                "toolOutcomesReconciliationPending": recon_pending,
+            });
             Ok(out)
         }
         // --- WP-11：A6 判重（FTS5 trigram；flag=RATIFLOW_WORKITEM_FTS；仅提示禁自动合并）---
@@ -2691,9 +2725,19 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     "feature_disabled: RATIFLOW_WORKITEM_FTS 未开启",
                 ));
             }
-            let items = sg_workitem::search::similar(store, &str_param(params, "workItemId")?)
-                .map_err(store_err)?;
-            Ok(json!({ "items": items }))
+            // P1-3：请求级 topK（服务端 clamp [1,20]；缺省 env 配置）；
+            // 算法版本/上限随响应透出（契约消费者可判定可比性）。
+            let requested = params.get("topK").and_then(|v| v.as_i64());
+            let effective = sg_workitem::search::clamp_topk(requested);
+            let items =
+                sg_workitem::search::similar(store, &str_param(params, "workItemId")?, effective)
+                    .map_err(store_err)?;
+            Ok(json!({
+                "items": items,
+                "algorithmVersion": sg_workitem::search::SIMILAR_ALGORITHM_VERSION,
+                "topK": effective,
+                "requestedTopK": requested,
+            }))
         }
         // --- WP-13：B10 知识验证事实（本机 SQLite 权威；manifest 只声明策略）---
         "knowledge.verifySource" => {

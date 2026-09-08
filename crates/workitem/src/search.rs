@@ -21,6 +21,24 @@ fn similar_limit() -> i64 {
         .unwrap_or(5)
 }
 
+/// P1-3：请求级 topK 服务端 clamp——缺省走 env 配置（默认 5），
+/// 越界（<=0 或 > 上限）一律收敛到 [1, MAX]；上限硬编码 20（提示面足够，
+/// 防拉全库）。
+pub const SIMILAR_TOPK_MAX: i64 = 20;
+
+/// 算法版本（P1-3：随响应透出——契约消费者可判定结果可比性）。
+pub const SIMILAR_ALGORITHM_VERSION: &str = "bm25-trigram-v1";
+
+pub fn clamp_topk(requested: Option<i64>) -> i64 {
+    match requested {
+        Some(n) if (1..=SIMILAR_TOPK_MAX).contains(&n) => n,
+        // 越界请求收敛到边界（<=0 → 1，>上限 → 上限），不报错（提示面语义）。
+        Some(n) if n <= 0 => 1,
+        Some(_) => SIMILAR_TOPK_MAX,
+        None => similar_limit(),
+    }
+}
+
 /// 增量索引（create/update 挂钩；先删后插保证幂等）。flag 关闭时 no-op。
 pub fn index_workitem(
     store: &Store,
@@ -44,14 +62,26 @@ pub fn index_workitem(
     })
 }
 
-/// 全量回填（searchRebuild）：单事务清空重建（中断不留半空索引；P0-1 receipt
-/// lease 保证同 key 重放/并发单 owner；影子表切换在 P1-3）。返回索引条数。
+/// 全量回填（searchRebuild，P1-3 影子切换协议；表 0056）：
+/// ① 影子表清空+全量填充（可中断——半成品只存在于影子表，主索引不受影响，
+///    下轮重建覆盖；receipt lease 保证同 key 不双跑）；
+/// ② 单事务原子切换主表（DELETE + INSERT..SELECT 影子）——观察者永不看到
+///    空/半索引。返回主表索引条数。
 pub fn reindex_all(store: &Store) -> Result<i64, Error> {
+    store.with_conn(|conn| {
+        conn.execute("DELETE FROM workitem_search_shadow", [])?;
+        conn.execute(
+            "INSERT INTO workitem_search_shadow(workitem_id, title, description)
+             SELECT id, title, description FROM workitems",
+            [],
+        )?;
+        Ok(())
+    })?;
     store.with_tx(|conn| {
         conn.execute("DELETE FROM workitem_search", [])?;
         conn.execute(
             "INSERT INTO workitem_search(workitem_id, title, description)
-             SELECT id, title, description FROM workitems",
+             SELECT workitem_id, title, description FROM workitem_search_shadow",
             [],
         )?;
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM workitem_search", [], |r| r.get(0))?;
@@ -60,7 +90,12 @@ pub fn reindex_all(store: &Store) -> Result<i64, Error> {
 }
 
 /// 近似工作项（FTS5 bm25 rank 升序=相关度降序；排除自身；仅提示禁自动合并）。
-pub fn similar(store: &Store, workitem_id: &str) -> Result<Vec<serde_json::Value>, Error> {
+/// `top_k`：请求级上限（调用方负责 clamp——见 `clamp_topk`）。
+pub fn similar(
+    store: &Store,
+    workitem_id: &str,
+    top_k: i64,
+) -> Result<Vec<serde_json::Value>, Error> {
     let (title, _description): (String, String) = store.with_conn(|conn| {
         conn.query_row(
             "SELECT title, description FROM workitems WHERE id=?1",
@@ -88,16 +123,13 @@ pub fn similar(store: &Store, workitem_id: &str) -> Result<Vec<serde_json::Value
              WHERE workitem_search MATCH ?1 AND workitem_id != ?2
              ORDER BY rank LIMIT ?3",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![query, workitem_id, similar_limit()],
-            |r| {
-                Ok(serde_json::json!({
-                    "workitemId": r.get::<_, String>(0)?,
-                    "title": r.get::<_, String>(1)?,
-                    "rank": r.get::<_, f64>(2)?,
-                }))
-            },
-        )?;
+        let rows = stmt.query_map(rusqlite::params![query, workitem_id, top_k.max(1)], |r| {
+            Ok(serde_json::json!({
+                "workitemId": r.get::<_, String>(0)?,
+                "title": r.get::<_, String>(1)?,
+                "rank": r.get::<_, f64>(2)?,
+            }))
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
     })
 }
@@ -139,7 +171,7 @@ mod tests {
         let a = crate::create(&store, "pj", "支付网关超时修复", "描述A", None, &[]).unwrap();
         let b = crate::create(&store, "pj", "支付网关重试优化", "描述B", None, &[]).unwrap();
         let c = crate::create(&store, "pj", "知识库导入工具", "描述C", None, &[]).unwrap();
-        let sim = similar(&store, &a.id).unwrap();
+        let sim = similar(&store, &a.id, 5).unwrap();
         let ids: Vec<&str> = sim
             .iter()
             .map(|x| x["workitemId"].as_str().unwrap())
@@ -151,12 +183,12 @@ mod tests {
         // 全量回填：清空后重建条数完整，similar 依旧可用。
         let n = reindex_all(&store).unwrap();
         assert_eq!(n, 3);
-        let sim2 = similar(&store, &a.id).unwrap();
+        let sim2 = similar(&store, &a.id, 5).unwrap();
         assert_eq!(sim2.len(), 1);
         // flag 关闭：create 不索引 d（索引里只有 a/b/c 三条）；d 自身永不出现在结果里。
         std::env::remove_var("RATIFLOW_WORKITEM_FTS");
         let d = crate::create(&store, "pj", "支付网关限流兜底", "描述D", None, &[]).unwrap();
-        let sim3 = similar(&store, &d.id).unwrap();
+        let sim3 = similar(&store, &d.id, 5).unwrap();
         assert_eq!(
             sim3.len(),
             2,
@@ -168,7 +200,7 @@ mod tests {
         // 重建补齐 flag 关闭窗口期的缺口：d 入索引后亦作为结果出现。
         std::env::set_var("RATIFLOW_WORKITEM_FTS", "1");
         assert_eq!(reindex_all(&store).unwrap(), 4);
-        let sim4 = similar(&store, &d.id).unwrap();
+        let sim4 = similar(&store, &d.id, 5).unwrap();
         assert_eq!(
             sim4.len(),
             2,

@@ -104,10 +104,17 @@ async function main() {
       'scope 非法拒绝',
     );
 
-    // 3) triage.list：聚合 gaps 概要。
+    // 3) triage.list：聚合 gaps 概要 + P1-3 顶层扩展（对象孤儿/unknown 对账）。
     const triage = await c.call('triage.list', {});
     assert(Array.isArray(triage.items) && triage.items.length === 2, 'triage 聚合两个 workitem');
     assert(triage.items.every((x) => typeof x.orphanCount === 'number' && typeof x.uncoveredCount === 'number'), 'triage 条目含 orphan/uncovered 计数');
+    // 对象库无引用（GC 扫描报告制：只计数+清单，不清理）。
+    assert(triage.objectOrphans && typeof triage.objectOrphans.count === 'number'
+      && triage.objectOrphans.pruneGated === true, `objectOrphans 聚合（实际 ${JSON.stringify(triage.objectOrphans)}）`);
+    // unknown reconciliation 聚合（run_intents + 工具执行对账面）。
+    assert(triage.unknownReconciliation && typeof triage.unknownReconciliation.runIntents === 'number'
+      && typeof triage.unknownReconciliation.toolOutcomesUnknown === 'number',
+      `unknownReconciliation 聚合（实际 ${JSON.stringify(triage.unknownReconciliation)}）`);
 
     console.log('指标投影协议 E2E 通过。');
   } finally {

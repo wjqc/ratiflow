@@ -94,13 +94,23 @@ async function main() {
       const b = await c.call('workitem.create', { projectId: pj, title: '支付网关重试优化', description: '网关重试' });
       const cc = await c.call('workitem.create', { projectId: pj, title: '知识库导入工具', description: '导入' });
 
-      // 1) 中文子串命中：a 与 b 共享「支付网关」；无关项不入集；排除自身。
+      // 1) 中文子串命中：a 与 b 共享「支付网关」；无关项不入集；排除自身；
+      //    P1-3：响应携带算法版本与 topK 上限元数据；请求级 topK 服务端 clamp。
       const sim = await c.call('workitem.similar', { workItemId: a.id });
       const ids = sim.items.map((x) => x.workitemId);
       assert(ids.includes(b.id) && !ids.includes(a.id) && !ids.includes(cc.id), `similar 中文子串命中（实际 ${JSON.stringify(ids)}）`);
       assert(typeof sim.items[0].rank === 'number', 'bm25 rank 落值');
+      assert(sim.algorithmVersion === 'bm25-trigram-v1', `算法版本透出（实际 ${sim.algorithmVersion}）`);
+      assert(sim.topK === 5 && sim.requestedTopK === null, `缺省 topK=5（实际 ${sim.topK}/${sim.requestedTopK}）`);
+      const simTop1 = await c.call('workitem.similar', { workItemId: a.id, topK: 1 });
+      assert(simTop1.items.length === 1 && simTop1.topK === 1, '请求级 topK=1 生效');
+      const simTop99 = await c.call('workitem.similar', { workItemId: a.id, topK: 99 });
+      assert(simTop99.topK === 20, `越界 topK clamp 到 20（实际 ${simTop99.topK}）`);
+      const simTop0 = await c.call('workitem.similar', { workItemId: a.id, topK: 0 });
+      assert(simTop0.topK === 1, 'topK<=0 收敛到 1');
 
-      // 2) searchRebuild：全量回填；同 key transport 重放返回首次响应。
+      // 2) searchRebuild（P1-3 影子切换协议：影子构建可中断，主表事务原子替换）：
+      //    全量回填；同 key transport 重放返回首次响应。
       const rb = await c.call('workitem.searchRebuild', { idempotencyKey: 'rb-1' });
       assert(rb.indexed === 3, `全量回填 3 条（实际 ${rb.indexed}）`);
       const rbReplay = await c.call('workitem.searchRebuild', { idempotencyKey: 'rb-1' });
