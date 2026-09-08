@@ -98,17 +98,13 @@ async function main() {
     });
     assert(auto.status === 'active', '自动化创建 active');
     const fired = await c.call('automation.runNow', { automationId: auto.id, scheduledFor: '2026-09-06T12:00:00.000Z' });
-    assert(fired.status === 'blocked_no_grant', `无 grant → blocked_no_grant（实际 ${fired.status}）`);
+    assert(fired.status === 'shadowed', `WP-12 默认 shadow：无 grant tick 也只产建议（实际 ${fired.status}）`);
     // 同 scheduled_for 重放 → receipt 去重（不产生第二条）。
     const fired2 = await c.call('automation.runNow', { automationId: auto.id, scheduledFor: '2026-09-06T12:00:00.000Z' });
     assert(fired2.status === 'deduped', `重复触发被 receipt 去重（实际 ${fired2.status}）`);
     const hist = (await c.call('automation.history', { automationId: auto.id })).items;
     assert(hist.filter((h) => h.scheduledFor === '2026-09-06T12:00:00.000Z').length === 1, '历史恰一条（M6 退出标准：不重复执行）');
-    // 通知面。
-    const notes = (await c.call('notification.list', {})).items;
-    assert(notes.some((n) => n.kind === 'automation_blocked'), 'automation_blocked 通知落 outbox');
-
-    // --- 3. 有效 grant → intent_created ---
+    // 通知面：automation_blocked 断言移至 WP-12 场景（shadow_fallback 通知）。
     // 缺陷审计：.catch 兼容路径会把 expiresAt 被拒（契约破坏）静默降级为通过——
     // 契约钉死：createGrant 必须接受 expiresAt，失败即失败。
     const grant = await c.call('autonomy.createGrant', {
@@ -127,7 +123,7 @@ async function main() {
       autonomyGrantId: grantId,
     });
     const f3 = await c.call('automation.runNow', { automationId: auto2.id, scheduledFor: '2026-09-06T13:00:00.000Z' });
-    assert(f3.status === 'intent_created', `有效 grant → intent_created（实际 ${f3.status}）`);
+      assert(f3.status === 'shadowed', `WP-12 默认 shadow：有效 grant 也只产建议（实际 ${f3.status}）`);
 
     // --- 4. Goal v2 谓词（EV-021）：flag 默认关 → 不允许 ---
     const check = await c.call('goal.autoReleaseCheck', { workItemId: wi.id, grantId });
@@ -175,12 +171,12 @@ async function main() {
     // --- 7. WP-8a：suggestion/observation 基础设施（RPC 面；写侧随 WP-8 fast-track /
     //     WP-12 automation tick 领域路径落地，其全链 e2e 由 WP-8 的 gate-skip-e2e 承接）---
     {
-      // 空观察面：items/stats 形状。
-      const empty = await c.call('automation.observations', {});
+      // 空观察面（fast_track 源此刻必空——automation 源已由 WP-12 场景之前的 shadow tick 产数）。
+      const empty = await c.call('automation.observations', { source: 'fast_track' });
       assert(Array.isArray(empty.items) && empty.items.length === 0, '空观察面返回空 items');
       assert(empty.stats && empty.stats.total === 0 && empty.stats.decided === 0, 'stats 零值形状');
       const bySource = await c.call('automation.observations', { source: 'automation' });
-      assert(Array.isArray(bySource.items), '按 source 过滤可用');
+      assert(Array.isArray(bySource.items) && bySource.items.length >= 2, 'automation 源含既有 shadow tick 建议');
       await expectErrorContains(
         () => c.call('automation.observations', { source: 'magic' }),
         'shadow_suggestion_invalid',
@@ -219,6 +215,75 @@ async function main() {
           cOff.kill();
         }
       }
+    }
+
+    // --- 8. WP-12：shadow policy——shadow tick 只产建议不执行；人工切 live 过
+    //     观察门槛（29/30 边界）；误报率超阈值自动回 shadow + 通知 ---
+    {
+      const grant3 = await c.call('autonomy.createGrant', {
+        workItemId: wi.id,
+        allowedTools: ['read_file', 'search_knowledge'],
+        allowedRisks: ['low'],
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      });
+      const autoW12 = await c.call('automation.create', {
+        key: 'auto-wp12',
+        workItemId: wi.id,
+        intent: { kind: 'goal', workItemId: wi.id, goal: '巡检' },
+        intervalSecs: 60,
+        autonomyGrantId: grant3.grantId,
+      });
+      assert(autoW12.shadow_mode === true, '新建自动化默认 shadow_mode=1');
+      // 33 个 shadow tick（不同 scheduledFor）：只产建议不执行。
+      const tick = (i) => c.call('automation.runNow', { automationId: autoW12.id, scheduledFor: `2026-09-08T12:${String(i).padStart(2, '0')}:00.000Z` });
+      for (let i = 0; i < 33; i++) {
+        const r = await tick(i);
+        if (r.status !== 'shadowed') throw new Error(`tick ${i} 状态 ${r.status}，期望 shadowed`);
+      }
+      assert(true, '33 次 shadow tick 全部 shadowed（无副作用）');
+      const obs = await c.call('automation.observations', { source: 'automation', automationId: autoW12.id });
+      assert(obs.items.length === 33, `33 条 shadow 建议在册（实际 ${obs.items.length}）`);
+      // 决定前：切 live 被门槛拒（decided=0<30）。
+      await expectErrorContains(
+        () => c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision }),
+        'automation_shadow_gate',
+        '未达观察门槛不可切 live',
+      );
+      // 决定 29 条：27 accepted + 2 rejected（1 条 fp=1 复核）→ 29<30 仍拒。
+      const toDecide = obs.items.map((x) => x.id);
+      for (let i = 0; i < 29; i++) {
+        const decision = i < 27 ? 'accepted' : 'rejected';
+        await c.call('automation.decideSuggestion', { suggestionId: toDecide[i], decision, decidedBy: 'owner', note: '' });
+        if (i === 28) {
+          await c.call('automation.reviewSuggestion', { suggestionId: toDecide[i], falsePositive: true, reviewer: 'qa', note: '误报' });
+        }
+      }
+      await expectErrorContains(
+        () => c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision }),
+        'automation_shadow_gate',
+        '29 条决定 <min_sample 仍拒（边界 29/30）',
+      );
+      // 第 30 条：rejected + fp=1 → decided=30、fp=2（6.7%≤10%）→ 切 live 成功。
+      await c.call('automation.decideSuggestion', { suggestionId: toDecide[29], decision: 'rejected', decidedBy: 'owner', note: '' });
+      await c.call('automation.reviewSuggestion', { suggestionId: toDecide[29], falsePositive: true, reviewer: 'qa', note: '误报' });
+      const live = await c.call('automation.setShadowMode', { automationId: autoW12.id, shadowMode: false, expectedRevision: autoW12.revision });
+      assert(live.shadowMode === false, '30 条决定且误报率≤阈值 → 切 live 成功');
+      // live tick：恢复真实执行（intent_created）。
+      const liveTick = await tick(40);
+      assert(liveTick.status === 'intent_created', `live tick 恢复执行（实际 ${liveTick.status}）`);
+      // 误报率抬升：剩余 3 条全 rejected + fp=1 → 5/33>10% → 下次 tick 自动回 shadow。
+      for (let i = 30; i < 33; i++) {
+        await c.call('automation.decideSuggestion', { suggestionId: toDecide[i], decision: 'rejected', decidedBy: 'owner', note: '' });
+        await c.call('automation.reviewSuggestion', { suggestionId: toDecide[i], falsePositive: true, reviewer: 'qa', note: '误报' });
+      }
+      const fb = await tick(41);
+      assert(fb.status === 'shadow_fallback', `误报率超阈值 → 自动回 shadow（实际 ${fb.status}）`);
+      const afterFb = await tick(42);
+      assert(afterFb.status === 'shadowed', '回退后 tick 恢复 shadow 语义');
+      // （通知断言移至 WP-12 场景）
+      const notes = (await c.call('notification.list', {})).items;
+      assert(notes.some((n) => n.kind === 'automation_blocked' && JSON.stringify(n.payload ?? {}).includes('shadow_fallback')), '回退落 automation_blocked 通知');
+      console.log('场景三（WP-12 shadow policy）通过');
     }
 
     console.log('自动化调度/Goal/私有技能仓库 协议 E2E 通过。');

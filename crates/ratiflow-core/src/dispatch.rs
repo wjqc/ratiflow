@@ -797,6 +797,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             | "automation.resume"
             | "automation.runNow"
             | "automation.history"
+            | "automation.setShadowMode"
             | "automation.decideSuggestion"
             | "automation.reviewSuggestion"
             | "automation.observations"
@@ -4842,6 +4843,56 @@ fn automation_rpc(store: &Store, method: &str, params: &Value) -> RpcResult {
             Ok(
                 json!({"automationId": automation_id, "scheduledFor": scheduled_for, "status": status, "note": note}),
             )
+        }
+        // --- WP-12：shadow 策略开关（人工切 live 须过观察门槛：decided≥min_sample
+        //     且误报率≤阈值；否则 automation_shadow_gate）---
+        "automation.setShadowMode" => {
+            if !automation_flag {
+                return Err(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "feature_disabled: RATIFLOW_AUTOMATIONS 未开启",
+                ));
+            }
+            let automation_id = str_param("automationId")?;
+            let shadow_mode = params
+                .get("shadowMode")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| invalid("missing param: shadowMode".into()))?;
+            let expected_revision = params
+                .get("expectedRevision")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| invalid("missing param: expectedRevision".into()))?;
+            if !shadow_mode {
+                // 人工切 live：观察门槛（WP-12 配置化，本地假设）。
+                let (decided, _fp, rate) = sg_workflow::automation::shadow_false_positive_stats(
+                    store,
+                    &automation_id,
+                    sg_workflow::automation::shadow_window_days(),
+                )
+                .map_err(|e| shadow_err(&e))?;
+                let min = sg_workflow::automation::shadow_min_sample();
+                let threshold = sg_workflow::automation::shadow_fp_threshold();
+                if decided < min || rate > threshold {
+                    return Err(RpcError::new(
+                        ErrorCode::Conflict,
+                        format!(
+                            "automation_shadow_gate: 观察门槛未达（decided {decided}<{min} 或误报率 {rate:.2}>{threshold:.2}），不可切 live"
+                        ),
+                    ));
+                }
+            }
+            let a = sg_workflow::automation::set_shadow_mode(
+                store,
+                &automation_id,
+                shadow_mode,
+                expected_revision,
+            )
+            .map_err(store_err)?;
+            Ok(json!({
+                "automationId": a.id,
+                "shadowMode": a.shadow_mode,
+                "revision": a.revision,
+            }))
         }
         "automation.history" => {
             let automation_id = str_param("automationId")?;

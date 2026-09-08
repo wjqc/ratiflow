@@ -153,6 +153,7 @@ export type RpcMethodName =
   | 'metrics.overview'
   | 'triage.list'
   | 'workitem.searchRebuild'
+  | 'automation.setShadowMode'
   | 'workitem.similar'
   | 'stage.attempts'
   | 'stage.package'
@@ -442,6 +443,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'metrics.overview',
   'triage.list',
   'workitem.searchRebuild',
+  'automation.setShadowMode',
   'workitem.similar',
   'stage.attempts',
   'stage.package',
@@ -1459,6 +1461,12 @@ export interface MetricsOverviewParams {
 export type TriageListParams = Record<string, never>;
 
 export type WorkitemSearchRebuildParams = Record<string, never>;
+
+export interface AutomationSetShadowModeParams {
+  automationId: string;
+  shadowMode: boolean;
+  expectedRevision: unknown;
+}
 
 export interface WorkitemSimilarParams {
   workItemId: string;

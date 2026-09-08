@@ -4,7 +4,7 @@
 //! + 暂停/恢复。只产 intent：副作用检查（grant/预算/审批）在消费侧。
 
 use serde::Serialize;
-use sg_store::{ids, timefmt, Error, Store};
+use sg_store::{ids, outbox, timefmt, Error, Store};
 use time::Duration as TimeDuration;
 
 #[derive(Debug, Clone, Serialize)]
@@ -20,6 +20,8 @@ pub struct AutomationRecord {
     pub overlap_policy: String,
     pub autonomy_grant_id: Option<String>,
     pub status: String,
+    /// WP-12：shadow 策略（1=只产建议不执行；默认 1，0043 列）。
+    pub shadow_mode: bool,
     pub revision: i64,
 }
 
@@ -27,7 +29,7 @@ fn row(conn: &rusqlite::Connection, id: &str) -> Result<AutomationRecord, Error>
     conn.query_row(
         "SELECT id, key, COALESCE(project_id,''), COALESCE(workitem_id,''), intent_json,
                 interval_secs, next_fire_at, misfire_policy, overlap_policy,
-                COALESCE(autonomy_grant_id,''), status, revision
+                COALESCE(autonomy_grant_id,''), status, COALESCE(shadow_mode,1), revision
          FROM automations WHERE id=?1",
         [id],
         |r| {
@@ -43,7 +45,8 @@ fn row(conn: &rusqlite::Connection, id: &str) -> Result<AutomationRecord, Error>
                 overlap_policy: r.get(8)?,
                 autonomy_grant_id: empty_none(r.get::<_, String>(9)?),
                 status: r.get(10)?,
-                revision: r.get(11)?,
+                shadow_mode: r.get::<_, i64>(11)? != 0,
+                revision: r.get(12)?,
             })
         },
     )
@@ -253,7 +256,7 @@ pub fn record_intent(
         )?;
         Ok(())
     })?;
-    if matches!(status, "blocked_no_grant" | "failed") {
+    if matches!(status, "blocked_no_grant" | "failed" | "shadow_fallback") {
         // 通知 outbox（桌面通知首期消费）。
         store.with_conn(|conn| {
             conn.execute(
@@ -319,6 +322,112 @@ pub fn reconcile_orphans(store: &Store) -> Result<usize, Error> {
         )?;
     }
     Ok(orphans.len())
+}
+
+/// WP-12：shadow 策略开关（CAS expectedRevision；系统回退走 force 变体）。
+pub fn set_shadow_mode(
+    store: &Store,
+    automation_id: &str,
+    shadow_mode: bool,
+    expected_revision: i64,
+) -> Result<AutomationRecord, Error> {
+    let now = timefmt::now();
+    let changed = store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE automations SET shadow_mode=?1, revision=revision+1, updated_at=?2
+             WHERE id=?3 AND revision=?4",
+            rusqlite::params![shadow_mode as i64, now, automation_id, expected_revision],
+        )?;
+        Ok(conn.changes())
+    })?;
+    if changed == 0 {
+        return Err(Error::Message(format!(
+            "automation_conflict: revision 不匹配（期望 {expected_revision}）"
+        )));
+    }
+    store.with_conn(|conn| row(conn, automation_id))
+}
+
+/// WP-12：误报率触发（WP-8a 口径）下系统强制回 shadow（无 CAS——治理自动动作）。
+pub fn force_shadow_mode(store: &Store, automation_id: &str) -> Result<(), Error> {
+    store.with_conn(|conn| {
+        conn.execute(
+            "UPDATE automations SET shadow_mode=1, revision=revision+1, updated_at=?1 WHERE id=?2",
+            rusqlite::params![timefmt::now(), automation_id],
+        )?;
+        Ok(())
+    })?;
+    outbox::emit(
+        store,
+        "automation",
+        automation_id,
+        "automation.shadow_fallback",
+        serde_json::json!({"automationId": automation_id, "reason": "false_positive_rate"}),
+    )?;
+    Ok(())
+}
+
+/// WP-12 门槛配置（本地假设，env 可覆盖）：最小样本/窗口天数/误报率阈值。
+pub fn shadow_min_sample() -> i64 {
+    std::env::var("RATIFLOW_SHADOW_MIN_SAMPLE")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(30)
+}
+
+pub fn shadow_window_days() -> i64 {
+    std::env::var("RATIFLOW_SHADOW_WINDOW_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(14)
+}
+
+pub fn shadow_fp_threshold() -> f64 {
+    std::env::var("RATIFLOW_SHADOW_FP_THRESHOLD_PCT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|pct| pct / 100.0)
+        .unwrap_or(0.10)
+}
+
+/// 影子误报率（WP-8a 口径，按 automation 作用域、decided_at 入窗）：
+/// 分子 = decision∈{rejected,expired} 且存在 false_positive=1 复核；
+/// 分母 = 窗内已决定建议数。返回 (decided, fp, rate)。
+pub fn shadow_false_positive_stats(
+    store: &Store,
+    automation_id: &str,
+    window_days: i64,
+) -> Result<(i64, i64, f64), Error> {
+    let start = (timefmt::parse(&timefmt::now()).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        - time::Duration::days(window_days))
+    .format(&time::format_description::well_known::Rfc3339)
+    .unwrap_or_default();
+    store.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN d.decision IN ('rejected','expired')
+                       AND EXISTS(SELECT 1 FROM shadow_reviews r
+                                  WHERE r.suggestion_id = d.suggestion_id AND r.false_positive = 1)
+                      THEN 1 ELSE 0 END), 0)
+             FROM shadow_decisions d
+             JOIN shadow_suggestions s ON s.id = d.suggestion_id
+             WHERE s.source='automation' AND s.automation_id=?1 AND d.decided_at >= ?2",
+            rusqlite::params![automation_id, start],
+            |r| {
+                let decided: i64 = r.get(0)?;
+                let fp: i64 = r.get(1)?;
+                let rate = if decided > 0 {
+                    fp as f64 / decided as f64
+                } else {
+                    0.0
+                };
+                Ok((decided, fp, rate))
+            },
+        )
+        .map_err(Error::from)
+    })
 }
 
 #[cfg(test)]

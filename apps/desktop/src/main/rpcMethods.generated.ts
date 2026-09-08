@@ -150,6 +150,7 @@ export const RPC_METHODS: readonly string[] = [
   'metrics.overview',
   'triage.list',
   'workitem.searchRebuild',
+  'automation.setShadowMode',
   'workitem.similar',
   'stage.attempts',
   'stage.package',

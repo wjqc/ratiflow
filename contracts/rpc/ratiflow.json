@@ -2514,6 +2514,27 @@
       "result": "value"
     },
     {
+      "name": "automation.setShadowMode",
+      "params": [
+        {
+          "name": "automationId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "shadowMode",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "expectedRevision",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "workitem.similar",
       "params": [
         {
