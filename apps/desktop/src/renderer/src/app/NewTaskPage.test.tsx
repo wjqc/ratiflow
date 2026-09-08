@@ -44,7 +44,6 @@ describe('新建任务', () => {
         onCreated={onCreated}
         onWorkspaceChanged={() => undefined}
         onOpenRemote={() => undefined}
-        onManageTemplates={() => undefined}
         onBack={() => undefined}
       />,
     );
@@ -63,5 +62,34 @@ describe('新建任务', () => {
         idempotencyKey: 'auto-prd-wi_new',
       }),
     );
+  });
+
+  it('上下文行并排：工作区与关卡模板同排；不再有 label/PRD 提示与管理按钮', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'workflowTemplate.list') {
+        return Promise.resolve({
+          items: [{ key: 'six-gate-default', name: '默认六关', versions: [{ status: 'active' }] }],
+        });
+      }
+      return Promise.resolve({});
+    });
+    render(
+      <NewTaskPage
+        projectId="pj_1"
+        projects={[{ id: 'pj_1', name: 'Ratiflow' }]}
+        onCreated={onCreated}
+        onWorkspaceChanged={() => undefined}
+        onOpenRemote={() => undefined}
+        onBack={() => undefined}
+      />,
+    );
+    await waitFor(() => expect(screen.getByLabelText('关卡模板')).toBeInTheDocument());
+    // 同排断言：工作区标签与模板选择器在同一个上下文行容器内。
+    const row = screen.getByText('工作区').closest('.sg-nt-context-row');
+    expect(row).not.toBeNull();
+    expect(row!.querySelector('[aria-label="关卡模板"]')).not.toBeNull();
+    // 删除项：PRD 提示文字 / 管理按钮 不复存在。
+    expect(screen.queryByText(/PRD 将结合此工作区的代码与知识库起草/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '管理关卡模板' })).not.toBeInTheDocument();
   });
 });

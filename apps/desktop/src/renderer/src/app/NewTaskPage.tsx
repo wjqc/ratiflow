@@ -19,7 +19,6 @@ interface Props {
   onCreated: (workItemId: string, projectId: string) => void;
   onWorkspaceChanged: (project: Project) => void;
   onOpenRemote: () => void;
-  onManageTemplates: () => void;
   onBack: () => void;
 }
 
@@ -54,7 +53,6 @@ export default function NewTaskPage({
   onCreated,
   onWorkspaceChanged,
   onOpenRemote,
-  onManageTemplates,
 }: Props) {
   const [workspaceId, setWorkspaceId] = useState(projectId);
   const [mode, setMode] = useState<Mode>('text');
@@ -285,38 +283,26 @@ export default function NewTaskPage({
               }}
               onRemote={onOpenRemote}
             />
-            <span className="sg-muted">PRD 将结合此工作区的代码与知识库起草</span>
+            {templates.length > 0 && (mode === 'text' || mode === 'image') ? (
+              <>
+                <span style={{ marginLeft: 12 }}>关卡模板</span>
+                <select
+                  className="sg-select"
+                  style={{ width: 'auto' }}
+                  value={templateKey}
+                  onChange={(e) => setTemplateKey(e.target.value)}
+                  aria-label="关卡模板"
+                  title="决定任务的关卡数量、顺序与每关交付物要求（创建后冻结该版本）"
+                >
+                  {templates.map((t) => (
+                    <option key={t.key} value={t.key}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : null}
           </div>
-
-          {templates.length > 0 && (mode === 'text' || mode === 'image') ? (
-            <div className="sg-nt-context-row">
-              <span>关卡模板</span>
-              <select
-                className="sg-select"
-                style={{ width: 'auto' }}
-                value={templateKey}
-                onChange={(e) => setTemplateKey(e.target.value)}
-                aria-label="关卡模板"
-                title="决定任务的关卡数量、顺序与每关交付物要求（创建后冻结该版本）"
-              >
-                {templates.map((t) => (
-                  <option key={t.key} value={t.key}>
-                    {t.name}
-                  </option>
-                ))}
-              </select>
-              {templateKey !== 'six-gate-default' ? (
-                <span className="sg-muted">使用自定义关卡模板，创建时冻结当前激活版本</span>
-              ) : null}
-              <button
-                className="sg-btn sg-btn--sm"
-                onClick={onManageTemplates}
-                title="在设置中管理关卡模板：复制草稿、编辑关卡、激活新版本"
-              >
-                管理关卡模板
-              </button>
-            </div>
-          ) : null}
 
           <div className="sg-composer-main sg-nt-composer">
             <textarea

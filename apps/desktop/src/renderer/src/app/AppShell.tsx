@@ -380,7 +380,6 @@ export default function AppShell() {
                 onCreated={(workItemId, createdProjectId) => openTask(createdProjectId, workItemId)}
                 onWorkspaceChanged={activateWorkspace}
                 onOpenRemote={() => navigate({ page: 'settings', section: 'integrations' })}
-                onManageTemplates={() => navigate({ page: 'settings', section: 'workflow-templates' })}
                 onBack={() => navigate({ page: 'home' })}
               />
             )}
