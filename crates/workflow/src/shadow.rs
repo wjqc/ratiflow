@@ -592,7 +592,7 @@ mod tests {
     fn expire_stale_only_undecided_and_drifted() {
         let store = setup();
         // s1：输入摘要一致的未决建议 → 不过期。
-        let s1 = record(&store, &input("e1")).unwrap();
+        record(&store, &input("e1")).unwrap();
         // s2：已决定（accepted）→ 永不过期。
         let mut s2 = input("e2");
         s2.suggestion_digest = "e2";

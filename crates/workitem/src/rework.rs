@@ -1301,7 +1301,7 @@ mod tests {
 
         // 崩溃注入①：Step A 提交后、Step B 前（手工构造 executing+step_a_committed）。
         let op = op_by_id(&store, &op_id).unwrap().unwrap();
-        let attempt = step_a(&store, &op).unwrap();
+        step_a(&store, &op).unwrap();
         store
             .with_conn(|c| {
                 c.execute(
