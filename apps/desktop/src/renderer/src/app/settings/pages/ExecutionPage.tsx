@@ -134,15 +134,15 @@ export function ExecutionPage() {
               不安全模式不提供容器级隔离；已二次确认，改动即时生效。
             </div>
           ) : null}
-          <SettingsRow title="内存（MB）" htmlFor="ex-mem" narrow>
+          <SettingsRow title="内存（MB）" htmlFor="ex-mem">
             <input id="ex-mem" className="sg-input" type="number" min={128} max={8192}
               value={draft.memoryMB ?? 256} onChange={(e) => set('memoryMB', Number(e.target.value))} />
           </SettingsRow>
-          <SettingsRow title="CPU" htmlFor="ex-cpu" narrow>
+          <SettingsRow title="CPU" htmlFor="ex-cpu">
             <input id="ex-cpu" className="sg-input" type="number" min={1} max={8} step={0.5}
               value={draft.cpus ?? 1} onChange={(e) => set('cpus', Number(e.target.value))} />
           </SettingsRow>
-          <SettingsRow title="超时（秒）" htmlFor="ex-timeout" narrow>
+          <SettingsRow title="超时（秒）" htmlFor="ex-timeout">
             <input id="ex-timeout" className="sg-input" type="number" min={10} max={3600}
               value={draft.timeoutSec ?? 120} onChange={(e) => set('timeoutSec', Number(e.target.value))} />
           </SettingsRow>

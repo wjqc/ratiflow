@@ -2,14 +2,12 @@
 // 同一 sg-setting-list 内多行自动加分隔线。列表页（表格）不使用本组件。
 import type { ReactNode } from 'react';
 
-export function SettingsRow({ title, htmlFor, description, children, narrow }: {
+export function SettingsRow({ title, htmlFor, description, children }: {
   title: string;
   /** 传入时标题以 <label htmlFor> 与控件关联（表单输入）；否则仅展示文本（开关用 aria-label 关联）。 */
   htmlFor?: string;
   description?: ReactNode;
   children: ReactNode;
-  /** 窄控件（数字输入等） */
-  narrow?: boolean;
 }) {
   return (
     <div className="sg-set-item">
@@ -19,7 +17,7 @@ export function SettingsRow({ title, htmlFor, description, children, narrow }: {
           : <span className="sg-set-item-title">{title}</span>}
         {description != null ? <small className="sg-set-item-desc">{description}</small> : null}
       </div>
-      <div className={`sg-set-item-control${narrow ? ' sg-set-item-control--narrow' : ''}`}>{children}</div>
+      <div className="sg-set-item-control">{children}</div>
     </div>
   );
 }

@@ -289,7 +289,7 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
           <div style={{ padding: '12px 14px', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
             <label className="sg-field" style={{ width: 130, marginBottom: 0 }}>
               <span>类型</span>
-              <select className="sg-input" value={kind} onChange={(e) => setKind(e.target.value)}>
+              <select className="sg-select" value={kind} onChange={(e) => setKind(e.target.value)}>
                 <option value="repo_path">仓库目录</option>
                 <option value="document">文档</option>
                 <option value="openapi">OpenAPI</option>

@@ -537,7 +537,7 @@ export function SkillsPage() {
               <small className="sg-set-item-desc">全局 = 注入所有 Run；绑定 Agent = 仅该 Agent 的 Run 注入</small>
             </div>
             <div className="sg-set-item-control">
-              <select id="skill-agent" className="sg-select" style={{ width: 'auto' }}
+              <select id="skill-agent" className="sg-select"
                 value={form.agentProfileId ?? ''}
                 onChange={(e) => setForm({ ...form, agentProfileId: e.target.value === '' ? null : e.target.value })}>
                 <option value="">全局生效</option>
@@ -591,7 +591,7 @@ export function SkillsPage() {
                 <div className="sg-set-item-control">
                   <select
                     className="sg-select"
-                    style={{ marginRight: 10, width: 'auto' }}
+                    style={{ marginRight: 10 }}
                     aria-label={`技能 ${s.name} 生效范围`}
                     value={s.agentProfileId ?? ''}
                     disabled={busyId === s.id}
@@ -854,7 +854,7 @@ export function SkillsPage() {
                       <small className="sg-set-item-desc">远程 Git 仓库 = 从网站/仓库在线拉取；本机市场目录 = 读取本机已安装插件</small>
                     </div>
                     <div className="sg-set-item-control">
-                      <select id="mkt-kind" className="sg-select" style={{ width: 'auto' }} value={srcForm.kind}
+                      <select id="mkt-kind" className="sg-select" value={srcForm.kind}
                         onChange={(e) => setSrcForm({ ...srcForm, kind: e.target.value })}>
                         <option value="remote_git">远程 Git 仓库</option>
                         <option value="zcode_local">本机市场目录</option>

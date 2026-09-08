@@ -278,7 +278,7 @@ function SshPanel() {
           <SettingsRow title="用户 *" htmlFor="ssh-user">
             <input id="ssh-user" className="sg-input" value={form.user} onChange={(e) => setForm({ ...form, user: e.target.value })} placeholder="deploy" />
           </SettingsRow>
-          <SettingsRow title="端口" htmlFor="ssh-port" narrow>
+          <SettingsRow title="端口" htmlFor="ssh-port">
             <input id="ssh-port" className="sg-input" type="number" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} />
           </SettingsRow>
           <SettingsRow title="远程目录" htmlFor="ssh-dir">

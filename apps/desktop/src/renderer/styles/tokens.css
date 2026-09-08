@@ -2184,10 +2184,11 @@ button.sg-step { cursor: pointer; }
 .sg-agent-template-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .sg-agent-template-row button { border: 1px solid var(--sg-border-default); border-radius: 8px; background: var(--sg-bg-canvas); padding: 6px 9px; color: var(--sg-text-secondary); font: inherit; font-size: 11.5px; cursor: pointer; }
 .sg-agent-template-row button:hover { color: var(--sg-action-primary); border-color: var(--sg-action-primary); }
-.sg-agent-form-grid { display: grid; grid-template-columns: 1fr 200px; gap: 12px; }
+.sg-agent-form-grid { display: grid; grid-template-columns: 1fr 180px; gap: 12px; }
 .sg-agent-form-grid label { display: grid; gap: 6px; color: var(--sg-text-secondary); font-size: 12px; }
 .sg-agent-form-grid label.is-wide { grid-column: 1 / -1; }
-.sg-agent-form-grid input, .sg-agent-form-grid select, .sg-agent-form-grid textarea, .sg-agent-project select, .sg-agent-gate-row select { width: 100%; border: 1px solid var(--sg-border-default); border-radius: 8px; background: var(--sg-bg-canvas); color: var(--sg-text-primary); padding: 8px 10px; font: inherit; font-size: 13px; }
+.sg-agent-form-grid input, .sg-agent-form-grid select, .sg-agent-form-grid textarea { width: 100%; border: 1px solid var(--sg-border-default); border-radius: 8px; background: var(--sg-bg-canvas); color: var(--sg-text-primary); padding: 5px 10px; font: inherit; font-size: 13px; }
+.sg-agent-project select, .sg-agent-gate-row select { width: 180px; border: 1px solid var(--sg-border-default); border-radius: 8px; background: var(--sg-bg-canvas); color: var(--sg-text-primary); padding: 5px 10px; font: inherit; font-size: 13px; }
 .sg-agent-form-grid textarea { min-height: 82px; resize: vertical; line-height: 1.6; }
 .sg-agent-form-grid small { color: var(--sg-text-secondary); }
 .sg-agent-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
@@ -2199,7 +2200,7 @@ button.sg-step { cursor: pointer; }
 .sg-agent-card .sg-chip + .sg-chip { margin-left: 5px; }
 .sg-agent-project { display: grid; grid-template-columns: auto 180px; align-items: center; gap: 8px; color: var(--sg-text-secondary); font-size: 12px; }
 .sg-agent-gate-list { border: 1px solid var(--sg-border-default); border-radius: 10px; overflow: hidden; }
-.sg-agent-gate-row { display: grid; grid-template-columns: 28px minmax(180px, 1fr) minmax(180px, 260px) 66px 30px; align-items: center; gap: 10px; min-height: 64px; padding: 8px 11px; }
+.sg-agent-gate-row { display: grid; grid-template-columns: 28px minmax(180px, 1fr) minmax(180px, 240px) 62px 30px; align-items: center; gap: 10px; min-height: 60px; padding: 8px 11px; }
 .sg-agent-gate-row + .sg-agent-gate-row { border-top: 1px solid var(--sg-border-default); }
 .sg-agent-gate-number { width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--sg-bg-subtle); color: var(--sg-text-secondary); font-size: 11px; }
 .sg-agent-gate-row h3 { margin: 0; font-size: 13px; }
@@ -2805,10 +2806,10 @@ button.sg-step { cursor: pointer; }
 .sg-settings-body .sg-agent-form-grid textarea,
 .sg-settings-body .sg-agent-project select,
 .sg-settings-body .sg-agent-gate-row select {
-  min-height: 40px;
-  padding: 8px 11px;
+  min-height: 32px;
+  padding: 5px 10px;
   border: 1px solid var(--sg-border-strong);
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--sg-bg-canvas);
   color: var(--sg-text-primary);
   font: inherit;
@@ -2842,8 +2843,8 @@ button.sg-step { cursor: pointer; }
 }
 
 .sg-settings-body .sg-btn {
-  min-height: 36px;
-  padding: 7px 14px;
+  min-height: 32px;
+  padding: 5px 14px;
   border-radius: 8px;
   transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
@@ -2926,13 +2927,10 @@ button.sg-step { cursor: pointer; }
   min-width: 0;
 }
 
+/* 行式控件统一尺寸：固定宽度，select 与 input 同宽，不随内容伸缩；超长选项文字自动截断。 */
 .sg-set-item-control .sg-select,
 .sg-set-item-control .sg-input {
-  width: min(100%, 260px);
-}
-
-.sg-set-item-control--narrow .sg-input {
-  width: 128px;
+  width: 180px;
 }
 
 .sg-set-item-banner {
@@ -3135,7 +3133,8 @@ button.sg-step { cursor: pointer; }
   .sg-set-heading { flex-wrap: wrap; }
   .sg-set-item { gap: 10px; }
   .sg-set-item-control { justify-content: flex-start; }
-  .sg-set-item-control .sg-select { width: 100%; }
+  .sg-set-item-control .sg-select,
+  .sg-set-item-control .sg-input { width: 100%; }
   .sg-token-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sg-token-metric:nth-child(odd) { border-left: 0; }
   .sg-token-metric:nth-child(n + 3) { border-top: 1px solid var(--sg-border-default); }
@@ -3498,8 +3497,7 @@ button.sg-step { cursor: pointer; }
   padding: 11px 18px;
 }
 .sg-mcp-create-form .sg-set-item-control { justify-content: flex-start; }
-.sg-mcp-create-form .sg-set-item-control .sg-input,
-.sg-mcp-create-form .sg-set-item-control .sg-select { width: min(100%, 240px); }
+.sg-mcp-create-form .sg-set-item:nth-child(n + 5) .sg-set-item-control .sg-input { width: 100%; }
 .sg-mcp-create-form .sg-set-item:nth-child(n + 5) .sg-set-item-control .sg-input { width: 100%; }
 .sg-mcp-json-editor { display: grid; gap: 8px; padding: 0 2px 18px; }
 .sg-mcp-json-editor label { font-size: 12px; font-weight: 600; }
