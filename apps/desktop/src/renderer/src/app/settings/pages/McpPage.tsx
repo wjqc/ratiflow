@@ -88,6 +88,8 @@ export function McpPage() {
   const [jsonDraft, setJsonDraft] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [pendingRemove, requestRemove] = useTwoStepConfirm();
+  // RDWS-006 Windows 产品负例：入口隐藏（平台事实来自 preload，非 UA 猜测）。
+  const mcpUnsupported = window.ratiflow.platform?.() === 'win32';
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -296,7 +298,7 @@ export function McpPage() {
     );
   };
 
-  if (showAdd) {
+  if (showAdd && !mcpUnsupported) {
     return (
       <div className="sg-set-page sg-reference-page sg-mcp-create-page">
         <button className="sg-reference-breadcrumb" type="button" onClick={() => setShowAdd(false)}>
@@ -361,24 +363,37 @@ export function McpPage() {
     <div className="sg-set-page sg-reference-page sg-mcp-page">
       <header className="sg-reference-page-head"><h1>MCP 服务器</h1></header>
 
-      <div className="sg-reference-toolbar sg-mcp-toolbar">
-        <div className="sg-reference-toolbar-start">
-          <label className="sg-reference-scope">
-            <select aria-label="MCP 作用域" value="global" disabled><option value="global">全局</option></select>
-          </label>
-          <span className="sg-reference-divider" aria-hidden />
-          <span className="sg-reference-count">MCP {filtered.length}</span>
-        </div>
-        <div className="sg-reference-toolbar-end">
-          <label className="sg-reference-search">
-            <IconSearch size={14} />
-            <input type="search" placeholder="搜索 MCP 服务器…" aria-label="搜索 MCP 服务器" value={query} onChange={(event) => setQuery(event.target.value)} />
-          </label>
-          <button className="sg-reference-icon-btn" type="button" aria-label="更多 MCP 操作"><IconMore size={16} /></button>
-          <button className="sg-reference-icon-btn" type="button" aria-label="刷新 MCP 服务器" onClick={() => void load()} disabled={loading}><IconRefresh size={15} /></button>
-          <button className="sg-mcp-new" type="button" onClick={openCreate}><IconPlus size={14} />新建</button>
-        </div>
-      </div>
+      {mcpUnsupported ? (
+        <>
+          <div className="sg-banner sg-banner--warn" role="alert" data-testid="mcp-unsupported-banner">
+            当前平台（Windows）不支持 MCP 沙箱：入口已关闭，注册 RPC 也会被核心拒绝（fail-closed）。
+          </div>
+          <div className="sg-reference-empty">
+            <IconServer size={24} />
+            <strong>此平台不可用</strong>
+            <span>MCP 服务器管理需要 macOS（Seatbelt）或 Linux（Landlock）沙箱支持。</span>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="sg-reference-toolbar sg-mcp-toolbar">
+            <div className="sg-reference-toolbar-start">
+              <label className="sg-reference-scope">
+                <select aria-label="MCP 作用域" value="global" disabled><option value="global">全局</option></select>
+              </label>
+              <span className="sg-reference-divider" aria-hidden />
+              <span className="sg-reference-count">MCP {filtered.length}</span>
+            </div>
+            <div className="sg-reference-toolbar-end">
+              <label className="sg-reference-search">
+                <IconSearch size={14} />
+                <input type="search" placeholder="搜索 MCP 服务器…" aria-label="搜索 MCP 服务器" value={query} onChange={(event) => setQuery(event.target.value)} />
+              </label>
+              <button className="sg-reference-icon-btn" type="button" aria-label="更多 MCP 操作"><IconMore size={16} /></button>
+              <button className="sg-reference-icon-btn" type="button" aria-label="刷新 MCP 服务器" onClick={() => void load()} disabled={loading}><IconRefresh size={15} /></button>
+              <button className="sg-mcp-new" type="button" onClick={openCreate}><IconPlus size={14} />新建</button>
+            </div>
+          </div>
 
       {error ? <div className="sg-banner sg-banner--error" role="alert">操作失败：{error}</div> : null}
 
@@ -398,6 +413,8 @@ export function McpPage() {
             <div className="sg-mcp-list">{g.servers.map(renderRow)}</div>
           </section>
         ))
+      )}
+        </>
       )}
     </div>
   );

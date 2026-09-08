@@ -28,6 +28,11 @@ const api = {
   hello(): Promise<{ ok: boolean; error?: string } | null> {
     return ipcRenderer.invoke('sg:hello');
   },
+  // RDWS-006 Windows 产品负例：renderer 需知宿主平台以隐藏不受支持的 MCP 入口
+  //（RPC 侧另有 fail-closed 探针；UI 门只是产品面，不承担治理）。
+  platform(): NodeJS.Platform {
+    return process.platform;
+  },
   selectFile(): Promise<SelectedFile | null> {
     return ipcRenderer.invoke('sg:selectFile');
   },

@@ -30,6 +30,7 @@ ts-validate:
     - npm ci
     - npm run codegen:protocol
     - npm run typecheck
+    - node tests/rdws/validate.mjs
 
 rust-test:
   stage: test
@@ -70,24 +71,73 @@ build:
       - target/release/ratiflow-core
       - apps/desktop/dist/
 
-protocol-e2e:
+# ---------- RDWS E2E 平台拆分（审计整改 §9.2）----------
+
+# 全部平台无关 RDWS script，统一 watchdog（with-timeout 300s）。
+protocol-rdws-linux:
   stage: e2e
   image: node:26
   needs: [build]
   script:
-    - node tests/e2e-protocol/e2e.mjs
-    - node tests/e2e-protocol/agent-e2e.mjs
-    - node tests/e2e-protocol/settings-e2e.mjs
-    - node tests/e2e-protocol/trace-e2e.mjs
-    - node tests/e2e-protocol/gate-release-race-e2e.mjs
-    - node tests/e2e-protocol/rollback-e2e.mjs
-    - node tests/e2e-protocol/agent-routing-e2e.mjs
-    - node tests/e2e-protocol/memory-e2e.mjs
-    - node tests/e2e-protocol/rpc-receipt-e2e.mjs
-    - node tests/e2e-protocol/risk-ledger-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 agent-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 settings-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 trace-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 gate-release-race-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 rollback-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 agent-routing-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 memory-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 workflow-template-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 gate-acceptance-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 release-notes-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 gate-skip-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 rework-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 metrics-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 workitem-search-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 rpc-receipt-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 knowledge-verification-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 risk-ledger-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 mcp-import-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 plan-dag-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 plan-execution-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 partial-replan-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 team-context-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 trace-command-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 automation-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 dirty-main-probe-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 e1-repro.mjs
+
+# 只跑 Linux fail-loud 负例：Landlock ABI v1 无网络隔离位，MCP 沙箱 unsupported
+# 声明必须 fail-closed（成功即失败——防「unsupported」被静默突破）。
+mcp-linux-unsupported:
+  stage: e2e
+  image: node:26
+  needs: [build]
+  script:
     - node tests/e2e-protocol/mcp-platform-e2e.mjs
 
-electron-e2e:
+# macOS 成功链（RDWS-006）：Seatbelt 禁网/FS/超时/进程组清理。
+mcp-macos-success:
+  stage: e2e
+  tags: [macos]
+  needs: []
+  script:
+    - cargo build --release -p ratiflow-core
+    - cargo test -p ratiflow-core --lib tool_exec
+    - node tests/e2e-protocol/with-timeout.mjs 300 mcp-e2e.mjs
+
+# Windows 产品负例（RDWS-006）：MCP 注册 RPC fail-closed + 产品入口隐藏
+#（入口隐藏的组件级断言在 web-test 的 McpPage 测试；此处为平台 job 实机负例）。
+windows-product-negative:
+  stage: e2e
+  tags: [windows]
+  needs: []
+  script:
+    - cargo build --release -p ratiflow-core
+    - node tests/platform/windows-product-negative.mjs
+
+# Electron RDWS 用户路径：真实 preload/Core（不使用纯 mock 代替关键治理断言）。
+electron-rdws:
   stage: e2e
   image: node:26
   needs: [build]
@@ -101,10 +151,24 @@ electron-e2e:
     - cd apps/desktop && xvfb-run npx playwright test
   tags: [docker]
 
+# 旧二进制迁移演练（§9.2/§10.3）：no-op 兼容 + 0049-era 拒启 + 快照恢复。
+# 重型（worktree 构建旧 core），默认手动触发；发布 tag 流水线必跑。
+migration-old-binary-drill:
+  stage: e2e
+  image: rust:1.95
+  needs: []
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - when: manual
+  script:
+    - cargo build --release -p ratiflow-core
+    - bash tests/platform/old-binary-drill.sh
+
 package:
   stage: package
   image: node:26
-  needs: [protocol-e2e]
+  needs: [protocol-rdws-linux]
   rules:
     - if: $CI_COMMIT_TAG
   script:

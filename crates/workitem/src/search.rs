@@ -208,4 +208,38 @@ mod tests {
         );
         std::env::remove_var("RATIFLOW_WORKITEM_FTS");
     }
+
+    /// §9.3 故障注入（FTS 影子构建中断）：阶段①中途崩溃只留半成品影子表——
+    /// 主索引不受影响（检索持续可用、观察者看不到空/半索引）；下轮重建覆盖
+    /// 影子并原子切换补齐全员。
+    #[test]
+    fn shadow_build_interruption_leaves_main_index_intact() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("RATIFLOW_WORKITEM_FTS", "1");
+        let store = setup();
+        let a = crate::create(&store, "pj", "支付网关超时修复", "描述A", None, &[]).unwrap();
+        let b = crate::create(&store, "pj", "支付网关重试优化", "描述B", None, &[]).unwrap();
+        // 模拟「影子构建中断」：影子表只写入了一半（仅 a）。
+        store
+            .with_conn(|c| {
+                c.execute("DELETE FROM workitem_search_shadow", [])?;
+                c.execute(
+                    "INSERT INTO workitem_search_shadow(workitem_id, title, description)
+                     SELECT id, title, description FROM workitems WHERE id=?1",
+                    [&a.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        // 主索引未被半成品影子污染：similar(b) 仍命中 a（查询只走主表）。
+        let sim = similar(&store, &b.id, 5).unwrap();
+        assert_eq!(sim.len(), 1, "半成品影子不影响主索引检索：{sim:?}");
+        assert_eq!(sim[0]["workitemId"], a.id.as_str());
+        // 恢复：下轮重建覆盖影子 + 原子切换，主索引补齐全员（含中断窗口新增 c）。
+        let c = crate::create(&store, "pj", "支付网关限流兜底", "描述C", None, &[]).unwrap();
+        assert_eq!(reindex_all(&store).unwrap(), 3);
+        let sim2 = similar(&store, &c.id, 5).unwrap();
+        assert_eq!(sim2.len(), 2, "重建后共享子串全员可检回：{sim2:?}");
+        std::env::remove_var("RATIFLOW_WORKITEM_FTS");
+    }
 }

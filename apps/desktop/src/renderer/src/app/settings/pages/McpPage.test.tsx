@@ -140,4 +140,20 @@ describe('MCP 服务器页', () => {
       name: 'codegraph', command: 'codegraph', args: ['serve', '--mcp'],
     }));
   });
+
+  // RDWS-006 Windows 产品负例：入口隐藏（平台事实来自 preload）。
+  it('win32 平台隐藏新建入口并展示不受支持横幅', async () => {
+    mockList([ACTIVE]);
+    (window as unknown as { ratiflow: unknown }).ratiflow = {
+      rpc: (m: string, p: Record<string, unknown>) => rpcMock(m, p),
+      hello: () => Promise.resolve({ ok: true }),
+      platform: () => 'win32' as NodeJS.Platform,
+    };
+    render(<McpPage />);
+    await waitFor(() =>
+      expect(screen.getByTestId('mcp-unsupported-banner')).toHaveTextContent('不支持 MCP 沙箱'),
+    );
+    expect(screen.queryByRole('button', { name: '新建' })).not.toBeInTheDocument();
+    expect(screen.getByText('此平台不可用')).toBeInTheDocument();
+  });
 });

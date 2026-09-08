@@ -1,0 +1,303 @@
+{
+  "version": 1,
+  "description": "RDWS-001~020 编号化测试证据矩阵（审计整改 §9.1）。每条断言绑定 unit target（cargo 测试函数）、contract case（contracts/rpc 方法）、protocol script（tests/e2e-protocol）、Electron spec、platform job 与 UAT 记录。校验：tests/rdws/validate.mjs（空证据/重复 ID/未进 CI 脚本即失败）。",
+  "evidenceFields": {
+    "unit": "格式 \"<crate> <test_fn>\"——crate 为 crates/ 下目录名；校验器 grep 源码确认测试存在",
+    "contract": "contracts/rpc/ratiflow.json 中的方法名（契约 case 由 tests/contract/run.mjs 执行）",
+    "protocol": "tests/e2e-protocol/*.mjs（必须在 CI job 或 make e2e 中注册）",
+    "electron": "apps/desktop 下组件/Playwright spec 文件路径",
+    "platform": ".gitlab-ci.yml job 名（或 make ci 平台清单条目）",
+    "uat": "状态 recorded（record 路径必须存在）或 pending（附原因）"
+  },
+  "assertions": [
+    {
+      "id": "RDWS-001",
+      "title": "统一 mutation receipt：idempotencyKey 强制、canonical 指纹、CAS 租约、completed envelope 重放、确定性错误可重放",
+      "unit": [
+        "ratiflow-core missing_key_rejected_without_execution",
+        "ratiflow-core replay_same_fingerprint_executes_once",
+        "ratiflow-core fingerprint_mismatch_rejected_before_execution",
+        "ratiflow-core deterministic_error_completed_and_replayable",
+        "ratiflow-core transient_error_releases_lease_for_reclaim",
+        "ratiflow-core expired_lease_takeover_self_heals",
+        "ratiflow-core concurrent_claim_grants_single_owner",
+        "ratiflow-core tx_variant_commits_domain_and_receipt_atomically"
+      ],
+      "contract": ["workflowTemplate.create", "gate.requestSkip", "rework.resume"],
+      "protocol": ["rpc-receipt-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "R2 波次后补双进程 receipt conflict UAT 记录" }
+    },
+    {
+      "id": "RDWS-002",
+      "title": "外部 Provider 幂等键声明/转发硬规则：声明支持但未转发 → 恒 manual，operation_key 服务端派生",
+      "unit": [
+        "policy declared_but_not_forwarded_requires_manual_approval",
+        "ratiflow-core declared_but_not_forwarded_forces_manual_approval",
+        "ratiflow-core operation_key_is_stable_per_proposal"
+      ],
+      "contract": ["toolPolicy.update"],
+      "protocol": ["agent-e2e.mjs", "risk-ledger-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "真实外部 Provider（GitLab 等）转发/对账 UAT 未做" }
+    },
+    {
+      "id": "RDWS-003",
+      "title": "Grant 预算多维 reserve/settle/reconcile：原子预留、幂等重放、unknown → reconciliation 不自动重试",
+      "unit": [
+        "policy multi_dimension_atomic_reserve_and_limit_zero_consumption",
+        "policy reserve_idempotent_replay_and_conflict",
+        "policy settle_cas_actual_over_or_unknown_to_reconciliation"
+      ],
+      "contract": ["autonomy.createGrant", "autonomy.revokeGrant"],
+      "protocol": ["risk-ledger-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "真实 Provider usage/价格与 retry 集成证据待补" }
+    },
+    {
+      "id": "RDWS-004",
+      "title": "ToolProvider parity：canonical ToolId、Builtin/MCP 单一执行面、legacy 映射无歧义",
+      "unit": [
+        "agent canonical_vectors",
+        "agent legacy_split_unambiguous",
+        "agent malformed_falls_to_builtin_lookup"
+      ],
+      "contract": ["mcp.serverAdd", "mcp.serverApprove", "tool.list"],
+      "protocol": ["mcp-e2e.mjs", "agent-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux", "mcp-macos-success"],
+      "uat": { "status": "pending", "record": null, "note": "MCP macOS 成功链独立 UAT 记录待补" }
+    },
+    {
+      "id": "RDWS-005",
+      "title": "side-effect outcome 五段式：intent/flush/响应相位、断管与超时 → unknown 禁自动重试、可查证对账",
+      "unit": [
+        "ratiflow-core write_tool_pipe_break_after_flush_is_unknown",
+        "ratiflow-core write_tool_timeout_is_unknown_outcome",
+        "ratiflow-core server_restart_two_invocations",
+        "integrations intent_phase_break_before_flush_is_retryable_transport",
+        "integrations call_tool_timeout_maps_to_unknown"
+      ],
+      "contract": ["mcp.serverRefresh", "mcp.serverToggle"],
+      "protocol": ["mcp-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux", "mcp-macos-success"],
+      "uat": { "status": "pending", "record": null, "note": "真实 MCP crash/restart 对账记录待补" }
+    },
+    {
+      "id": "RDWS-006",
+      "title": "平台边界：Linux unsupported fail-loud、macOS Seatbelt 成功链、Windows 入口隐藏 + RPC fail-closed",
+      "unit": [
+        "ratiflow-core invoke_read_tool_truncates_and_audits",
+        "ratiflow-core write_tool_pipe_break_after_flush_is_unknown"
+      ],
+      "contract": ["mcp.serverAdd", "mcp.serverList"],
+      "protocol": ["mcp-platform-e2e.mjs", "windows-product-negative.mjs"],
+      "electron": ["apps/desktop/src/renderer/src/app/settings/pages/McpPage.test.tsx"],
+      "platform": ["mcp-linux-unsupported", "mcp-macos-success", "windows-product-negative"],
+      "uat": { "status": "pending", "record": null, "note": "三平台 job 绿后录入运行记录" }
+    },
+    {
+      "id": "RDWS-007",
+      "title": "durable RunIntent：claim/lease/consume 单执行、孤儿 reconcile、live 链 AgentRun 回填",
+      "unit": [
+        "workflow p5_enqueue_run_intent_idempotent",
+        "workflow status_cas_and_reschedule",
+        "workflow reconcile_marks_orphan_fired_failed"
+      ],
+      "contract": ["automation.runNow", "automation.history"],
+      "protocol": ["automation-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "R3 canary 观察期后补 durable 链 UAT" }
+    },
+    {
+      "id": "RDWS-008",
+      "title": "MCP import 内容冻结：五元组 digest 三处校验、Merkle 覆盖非入口文件、call 前漂移 fail-closed",
+      "unit": [
+        "settings manifest_validation_negative_matrix",
+        "settings worker_claim_cas_and_lease_convergence",
+        "settings merkle_covers_non_entrypoint_files",
+        "ratiflow-core rejects_base_head_drift",
+        "ratiflow-core rejects_file_hash_drift"
+      ],
+      "contract": ["mcp.importAdd", "mcp.importDecide"],
+      "protocol": ["mcp-import-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "R2 仅内部测试仓 import 的 UAT 记录" }
+    },
+    {
+      "id": "RDWS-009",
+      "title": "影响面 5k cap/frontier/全列 digest：completeness 三态、超限 incomplete、digest 敏感",
+      "unit": [
+        "provenance completeness_states_and_digest_sensitivity",
+        "provenance missing_node_is_unknown_not_complete",
+        "provenance cap_triggers_incomplete_with_frontier"
+      ],
+      "contract": ["impact.forProposal"],
+      "protocol": ["trace-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "大图性能与真实库边界验证待补" }
+    },
+    {
+      "id": "RDWS-010",
+      "title": "tool_proposal 双 digest 绑定：impact/全图 facts 漂移使待审失效；审批三要素展示（影响面服务端权威、模型自报标注）",
+      "unit": [
+        "ratiflow-core tool_proposal_binding_drift_rejection"
+      ],
+      "contract": ["approval.list", "approval.decide"],
+      "protocol": ["agent-e2e.mjs"],
+      "electron": ["apps/desktop/src/renderer/src/app/ApprovalsPage.test.tsx"],
+      "platform": ["protocol-rdws-linux", "electron-rdws"],
+      "uat": { "status": "pending", "record": null, "note": "Electron 真实 preload/Core 漂移路径 UAT 待补" }
+    },
+    {
+      "id": "RDWS-011",
+      "title": "结构化验收：未知 verifier 创建即拒、digest v3 冻结、manual_confirm 人工链（replay 幂等/rejected 不放行）、kill switch 回退",
+      "unit": [
+        "workflow schema_negative_matrix",
+        "workflow all_verifiers_parse_and_canonical_is_deterministic",
+        "workflow kill_switch_blocks_structured_creation_only"
+      ],
+      "contract": ["gate.requestManualConfirmation", "gate.manualConfirmations", "workflowTemplate.create"],
+      "protocol": ["gate-acceptance-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "R3 后补 attempt/digest 漂移 UI 路径 UAT" }
+    },
+    {
+      "id": "RDWS-012",
+      "title": "shadow 建议三表：scope_key/input_state_digest/expires_at、作用域唯一、过期只清未决、review 口径",
+      "unit": [
+        "workflow write_decide_review_full_chain_with_replay_and_conflict",
+        "workflow expire_stale_only_undecided_and_drifted",
+        "workflow false_positive_rate_follows_definition"
+      ],
+      "contract": ["gate.evaluateFastTrack", "automation.decideSuggestion"],
+      "protocol": ["gate-skip-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "R2 shadow 观察窗记录" }
+    },
+    {
+      "id": "RDWS-013",
+      "title": "跳关操作：gate_skip_requests progress 游标、Step A/B 两步执行、崩溃恢复单 attempt、恢复入口幂等",
+      "unit": [
+        "workitem approve_completes_two_step_and_resume_idempotent",
+        "workitem crash_after_step_a_resumes_single_attempt",
+        "workitem approve_drift_expires_request",
+        "workitem forbidden_gate_rejected"
+      ],
+      "contract": ["gate.requestSkip", "gate.decideSkip", "gate.resumeSkip", "gate.skipRequests"],
+      "protocol": ["gate-skip-e2e.mjs"],
+      "electron": ["apps/desktop/src/renderer/src/app/RecoveryPanel.test.tsx"],
+      "platform": ["protocol-rdws-linux", "electron-rdws"],
+      "uat": { "status": "pending", "record": null, "note": "R3 canary 恢复链 UAT" }
+    },
+    {
+      "id": "RDWS-014",
+      "title": "fast-track 服务端权威 facts：六因素服务端派生、漂移拒/过期、独立 apply/revoke waiver 事实",
+      "unit": [
+        "workitem server_facts_all_true_suggest_and_apply",
+        "workitem missing_or_drifted_facts_reject_and_expire",
+        "workitem drift_matrix_rejects",
+        "workitem policy_undeclared_gate_rejected"
+      ],
+      "contract": ["gate.evaluateFastTrack", "gate.applyWaiver", "gate.revokeWaiver"],
+      "protocol": ["gate-skip-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "R3 后补 waiver 生命周期 UAT" }
+    },
+    {
+      "id": "RDWS-015",
+      "title": "跨关返工：progress/双 digest/resume RPC、Step A/B 崩溃注入三场景、区间失效与基线重建、CAS 漂移",
+      "unit": [
+        "workitem recovery_after_step_a_crash_and_partial_step_b",
+        "workitem full_chain_invalidates_interval_facts_and_read_side",
+        "workitem cas_drift_between_request_and_decide_fails_operation",
+        "workitem cas_changes_with_stage_and_attempt_state"
+      ],
+      "contract": ["rework.preview", "rework.request", "rework.decide", "rework.resume", "rework.list"],
+      "protocol": ["rework-e2e.mjs"],
+      "electron": ["apps/desktop/src/renderer/src/app/RecoveryPanel.test.tsx"],
+      "platform": ["protocol-rdws-linux", "electron-rdws"],
+      "uat": { "status": "pending", "record": null, "note": "R3 canary blocked/resume 成功率观察" }
+    },
+    {
+      "id": "RDWS-016",
+      "title": "metrics 唯一口径：审批 subjectType×risk 分层、回环双指标（平均次数 × 任务占比）、unknown 不写 0",
+      "unit": [
+        "workflow overview_rates_windows_and_insufficient",
+        "workflow triage_list_aggregates_gaps"
+      ],
+      "contract": ["metrics.overview", "triage.list"],
+      "protocol": ["metrics-e2e.mjs"],
+      "electron": ["apps/desktop/src/renderer/src/app/GovernancePage.test.tsx"],
+      "platform": ["protocol-rdws-linux", "electron-rdws"],
+      "uat": { "status": "pending", "record": null, "note": "R2 起指标面板日常巡检记录" }
+    },
+    {
+      "id": "RDWS-017",
+      "title": "Triage/FTS：topK 服务端 clamp、算法版本透出、影子重建原子切换（中断主索引不受影响）、Triage 聚合纯读",
+      "unit": [
+        "workitem chinese_substring_similar_excludes_self_and_rebuild_backfills",
+        "workitem shadow_build_interruption_leaves_main_index_intact"
+      ],
+      "contract": ["workitem.similar", "workitem.searchRebuild", "triage.list"],
+      "protocol": ["workitem-search-e2e.mjs"],
+      "electron": ["apps/desktop/src/renderer/src/app/GovernancePage.test.tsx"],
+      "platform": ["protocol-rdws-linux", "electron-rdws"],
+      "uat": { "status": "pending", "record": null, "note": "大库重建耗时 UAT 待补" }
+    },
+    {
+      "id": "RDWS-018",
+      "title": "automation shadow policy v2：digest 冻结、两窗迟滞、review coverage 门槛、CAS 回退不覆盖用户配置、通知幂等、cooldown",
+      "unit": [
+        "workflow p5_stats_reviewed_denominator_and_coverage",
+        "workflow p5_two_window_hysteresis_cas_and_digest_idempotency",
+        "workflow p5_cas_drift_does_not_override_user_config"
+      ],
+      "contract": ["automation.setShadowMode", "automation.reviewSuggestion"],
+      "protocol": ["automation-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux"],
+      "uat": { "status": "pending", "record": null, "note": "R2 shadow → live 门槛观察记录" }
+    },
+    {
+      "id": "RDWS-019",
+      "title": "knowledge 验证事实：新 fail/unknown 覆盖旧 pass、(verified_at,id) 确定性、四 revision mode 锚定、跨项目隔离、op 幂等",
+      "unit": [
+        "knowledge verify_content_change_and_outcome_override",
+        "knowledge op_id_and_domain_idempotency",
+        "knowledge cross_project_same_stable_id_isolated",
+        "knowledge same_timestamp_ordered_by_id",
+        "knowledge four_revision_modes_resolve_and_anchor"
+      ],
+      "contract": ["knowledge.verifySource", "knowledge.freshnessOverview"],
+      "protocol": ["knowledge-verification-e2e.mjs"],
+      "electron": ["apps/desktop/src/renderer/src/app/GovernancePage.test.tsx"],
+      "platform": ["protocol-rdws-linux", "electron-rdws"],
+      "uat": { "status": "pending", "record": null, "note": "R3 v2 writer canary 覆盖记录" }
+    },
+    {
+      "id": "RDWS-020",
+      "title": "B9 发布说明模板实例 + manifest v2 writer 门控 + 边界演练：旧包拒启/快照恢复、dirty-main 探针恒 0",
+      "unit": [
+        "knowledge v2_writer_flag_matrix",
+        "knowledge reader_parses_both_versions_independent_of_writer_flag",
+        "workitem release_notes_kind_is_template_configurable_anywhere"
+      ],
+      "contract": ["knowledge.manifestCreate", "knowledge.manifestUpdate"],
+      "protocol": ["release-notes-e2e.mjs", "knowledge-verification-e2e.mjs", "dirty-main-probe-e2e.mjs"],
+      "electron": [],
+      "platform": ["protocol-rdws-linux", "migration-old-binary-drill"],
+      "uat": { "status": "pending", "record": null, "note": "migration-old-binary-drill job 绿后录入时间戳/版本/哈希记录；全局平台 UAT 签字在 R4 前" }
+    }
+  ]
+}

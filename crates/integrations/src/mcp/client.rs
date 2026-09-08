@@ -483,6 +483,74 @@ mod tests {
         assert!(matches!(outcome, McpToolCallOutcome::Timeout));
     }
 
+    /// §9.3 故障注入（intent 相位断连）：stdin intent 落库后、flush 前断管——
+    /// 副作用不可能已发生，必须是可重试 Transport 错误（区别于 flush 后的
+    /// unknown/禁自动重试语义）；on_flushed 相位不可达，且 intent 自身中止时
+    /// stdin 零写入（请求从未离开本进程）。
+    struct SendBreakTransport {
+        requests: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl McpTransport for SendBreakTransport {
+        fn send_line(&mut self, line: &str) -> Result<(), String> {
+            self.requests.lock().unwrap().push(line.to_string());
+            Err("broken pipe".into())
+        }
+        fn recv_line(&mut self, _timeout: Duration) -> Result<String, String> {
+            Err("connection closed".into())
+        }
+        fn shutdown(&mut self) {}
+    }
+
+    #[test]
+    fn intent_phase_break_before_flush_is_retryable_transport() {
+        // ① 对端断管：intent 已持久化、send_line 失败 → Transport（可重试），非 unknown。
+        let mut client = McpClient::new(SendBreakTransport {
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let flushed = std::cell::Cell::new(false);
+        let err = client
+            .call_tool_phased(
+                "send_thing",
+                json!({}),
+                Duration::from_secs(5),
+                &|_m| Ok(()),
+                &|_m| {
+                    flushed.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, McpError::Transport(_)),
+            "intent 后断连 = Transport 可重试（非 unknown）：{err}"
+        );
+        assert!(!flushed.get(), "flush 相位未到达（相位序权威）");
+        let reqs = client.transport.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1, "恰好一次 tools/call 尝试");
+        assert!(reqs[0].contains("tools/call"));
+
+        // ② intent 相位本地中止（持久化后、写 stdin 前崩溃模拟）：回调 Err →
+        //    Transport 且 stdin 零写入。
+        let mut client2 = McpClient::new(SendBreakTransport {
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let err2 = client2
+            .call_tool_phased(
+                "send_thing",
+                json!({}),
+                Duration::from_secs(5),
+                &|_m| Err("crash after intent persist".into()),
+                &|_m| Ok(()),
+            )
+            .unwrap_err();
+        assert!(matches!(err2, McpError::Transport(_)), "{err2}");
+        assert!(
+            client2.transport.requests.lock().unwrap().is_empty(),
+            "intent 中止 → stdin 未写入任何请求"
+        );
+    }
+
     #[test]
     fn call_tool_error_and_content() {
         let transport = ScriptedTransport::new(vec![
