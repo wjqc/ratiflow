@@ -78,16 +78,22 @@ async function main() {
       await c.call('gate.decideRelease', { approvalId: rr.approval_id, decision: 'approved', decidedBy: 'owner', reason: 'E2E' });
     }
 
-    // 1) overview：形状与 gate_release 分层计数。
+    // 1) overview：形状与 gate_release 分层计数（P1-2：subject_type × risk 二维）。
     const ov = await c.call('metrics.overview', { scope: 'global' });
     assert(ov.scope === 'global' && ov.windowDays === 30, 'scope/window 形状');
-    const gr = ov.approvalLayers.gate_release;
-    assert(gr.approved === 2 && gr.rejected === 0, `gate_release approved=2（实际 ${JSON.stringify(gr)}）`);
+    assert(JSON.stringify(ov.approvalLayers.dimensions) === JSON.stringify(['subjectType', 'risk']),
+      `approvalLayers 维度声明（实际 ${JSON.stringify(ov.approvalLayers.dimensions)}）`);
+    const layers = ov.approvalLayers.layers;
+    const gr = layers.find((l) => l.subjectType === 'gate_release');
+    assert(gr && gr.approved === 2 && gr.rejected === 0, `gate_release approved=2（实际 ${JSON.stringify(gr)}）`);
     assert(gr.passRate === 1, `通过率 1.0（实际 ${gr.passRate}）`);
     assert(gr.insufficientData === true, 'n<10 → insufficient_data');
     assert(typeof gr.latencyMedianSecs === 'number', '延迟 median 落值');
     assert(gr.rubberStampSuspect === false, '人工评审不构成橡皮图章');
+    // 回环双口径：无 rework → 次数/占比均 0（非 null：分母在窗），insufficient。
     assert(ov.loopRate.insufficientData === true && ov.loopRate.completedReworks === 0, '回环率 insufficient（workitem<5）');
+    assert(ov.loopRate.averageReworkCount === 0 && ov.loopRate.reworkWorkitemRate === 0, '双口径字段在位');
+    assert(!('rate' in ov.loopRate), '旧混用口径 rate 字段已废');
     assert(ov.aiSuggestionAdoption.insufficientData === true, '采纳率 insufficient（<30）');
     assert(Array.isArray(ov.orphanRate.perWorkitem) && ov.orphanRate.perWorkitem.length === 2, '孤儿率按 workitem 透出');
 

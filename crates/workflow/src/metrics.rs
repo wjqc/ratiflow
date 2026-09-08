@@ -54,10 +54,13 @@ fn seconds_between(start: &str, end: &str) -> Option<f64> {
 
 /// 审批分层（decided 行按 decided_at 入窗计率与延迟；pending 全量单列；
 /// expired 按 created_at 入窗单列；changes_requested 独立单列）。
+/// P1-2（审计 §8 / RDWS-016）：审批分层唯一口径——**subject_type × risk** 二维
+/// （risk 列：low|medium|high），pending/expired/changes_requested 分列；
+/// 同层统计通过率/延迟/橡皮图章嫌疑（不足样本如实 insufficient，不写 0 率）。
 fn approval_layers(store: &Store, window: &str) -> Result<Value, Error> {
-    let rows: Vec<(String, String, String, String)> = store.with_conn(|conn| {
+    let rows: Vec<(String, String, String, String, String)> = store.with_conn(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT subject_type, status, created_at, COALESCE(decided_at, '')
+            "SELECT subject_type, status, created_at, COALESCE(decided_at, ''), risk
              FROM approvals
              WHERE (status IN ('approved','rejected','changes_requested') AND decided_at >= ?1)
                 OR status = 'pending'
@@ -69,6 +72,7 @@ fn approval_layers(store: &Store, window: &str) -> Result<Value, Error> {
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
@@ -82,9 +86,10 @@ fn approval_layers(store: &Store, window: &str) -> Result<Value, Error> {
         changes_requested: i64,
         latencies: Vec<f64>,
     }
-    let mut layers: std::collections::BTreeMap<String, Layer> = std::collections::BTreeMap::new();
-    for (subject, status, created_at, decided_at) in &rows {
-        let l = layers.entry(subject.clone()).or_default();
+    let mut layers: std::collections::BTreeMap<(String, String), Layer> =
+        std::collections::BTreeMap::new();
+    for (subject, status, created_at, decided_at, risk) in &rows {
+        let l = layers.entry((subject.clone(), risk.clone())).or_default();
         match status.as_str() {
             "approved" => {
                 l.approved += 1;
@@ -104,8 +109,8 @@ fn approval_layers(store: &Store, window: &str) -> Result<Value, Error> {
             _ => {}
         }
     }
-    let mut out = serde_json::Map::new();
-    for (subject, l) in layers {
+    let mut out = Vec::new();
+    for ((subject, risk), l) in layers {
         let n = l.approved + l.rejected;
         let r = rate(l.approved, l.rejected);
         let pass_rate_v = r.map(|x| json!(x)).unwrap_or(Value::Null);
@@ -120,24 +125,23 @@ fn approval_layers(store: &Store, window: &str) -> Result<Value, Error> {
             && matches!(r, Some(rr) if rr >= 0.95)
             && n >= 20;
         let min = if subject == "tool_proposal" { 20 } else { 10 };
-        out.insert(
-            subject,
-            json!({
-                "approved": l.approved,
-                "rejected": l.rejected,
-                "pending": l.pending,
-                "expired": l.expired,
-                "changesRequested": l.changes_requested,
-                "passRate": pass_rate_v,
-                "sample": n,
-                "insufficientData": n < min,
-                "latencyMedianSecs": median_v,
-                "latencyP95Secs": p95_v,
-                "rubberStampSuspect": stamp,
-            }),
-        );
+        out.push(json!({
+            "subjectType": subject,
+            "risk": risk,
+            "approved": l.approved,
+            "rejected": l.rejected,
+            "pending": l.pending,
+            "expired": l.expired,
+            "changesRequested": l.changes_requested,
+            "passRate": pass_rate_v,
+            "sample": n,
+            "insufficientData": n < min,
+            "latencyMedianSecs": median_v,
+            "latencyP95Secs": p95_v,
+            "rubberStampSuspect": stamp,
+        }));
     }
-    Ok(json!(out))
+    Ok(json!({ "dimensions": ["subjectType", "risk"], "layers": out }))
 }
 
 /// 六指标总览（scope 目前仅 global）。
@@ -181,12 +185,16 @@ pub fn overview(store: &Store, scope: &str) -> Result<Value, Error> {
         (tn, to, per)
     };
 
-    // 2) 回环率（completed_at 入窗；cancelled/blocked 不计）。
-    let completed_rework: i64 = store.with_conn(|conn| {
+    // 2) 回环双口径（P1-2 / RDWS-016：次数与任务占比分离——
+    // averageReworkCount = completed reworks / released workitems（平均返工次数）；
+    // reworkWorkitemRate = distinct reworked workitems / released workitems
+    //（发生返工的任务占比）；completed_at 入窗；cancelled/blocked 不计）。
+    let (completed_rework, reworked_workitems): (i64, i64) = store.with_conn(|conn| {
         conn.query_row(
-            "SELECT COUNT(*) FROM rework_operations WHERE state='completed' AND completed_at >= ?1",
+            "SELECT COUNT(*), COUNT(DISTINCT workitem_id)
+             FROM rework_operations WHERE state='completed' AND completed_at >= ?1",
             [&window],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(Error::from)
     })?;
@@ -227,8 +235,13 @@ pub fn overview(store: &Store, scope: &str) -> Result<Value, Error> {
     } else {
         Value::Null
     };
-    let loop_rate_v = if released_workitems > 0 {
+    let avg_rework_v = if released_workitems > 0 {
         json!(completed_rework as f64 / released_workitems as f64)
+    } else {
+        Value::Null
+    };
+    let rework_wi_rate_v = if released_workitems > 0 {
+        json!(reworked_workitems as f64 / released_workitems as f64)
     } else {
         Value::Null
     };
@@ -253,8 +266,10 @@ pub fn overview(store: &Store, scope: &str) -> Result<Value, Error> {
         },
         "loopRate": {
             "completedReworks": completed_rework,
+            "reworkedWorkitems": reworked_workitems,
             "workitemsWithReleases": released_workitems,
-            "rate": loop_rate_v,
+            "averageReworkCount": avg_rework_v,
+            "reworkWorkitemRate": rework_wi_rate_v,
             "sample": released_workitems,
             "insufficientData": released_workitems < 5,
             "reasonDistribution": reason_dist.into_iter().map(|(k, v)| json!({"reasonCode": k, "count": v})).collect::<Vec<_>>(),
@@ -356,6 +371,38 @@ mod tests {
         });
     }
 
+    /// 指定 risk 档的审批（P1-2 分层维度用例）。
+    fn approval_risk(
+        store: &Store,
+        id: &str,
+        subject: &str,
+        risk: &str,
+        status: &str,
+        decided: &str,
+        wi: &str,
+    ) {
+        let _ = store.with_conn(|c| {
+            c.execute(
+                "INSERT INTO approvals(id, subject_type, subject_id, workitem_id, action_digest, risk, status,
+                                        requested_by, expires_at, reason, created_at, decided_at, decided_by)
+                 VALUES (?1,?2,?3,?4,'d',?5,?6,'local','','',?7,?7,'owner')",
+                rusqlite::params![id, subject, format!("s_{id}"), wi, risk, status, decided],
+            )
+            .unwrap();
+            Ok(())
+        });
+    }
+
+    /// 从 approvalLayers.layers 里取 (subjectType, risk) 层。
+    fn layer<'a>(ov: &'a Value, subject: &str, risk: &str) -> &'a Value {
+        ov["approvalLayers"]["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["subjectType"] == json!(subject) && l["risk"] == json!(risk))
+            .unwrap_or(&Value::Null)
+    }
+
     /// 回环分母链：attempt + gate_result + output_package + approved release_request。
     fn released_workitem(store: &Store, wi: &str, decided: &str) {
         let _ = store.with_conn(|c| {
@@ -437,6 +484,16 @@ mod tests {
             &days_ago(40),
             Some("wi1"),
         );
+        // P1-2：subject_type × risk 分层——high 档独立成层。
+        approval_risk(
+            &store,
+            "grh1",
+            "gate_release",
+            "high",
+            "approved",
+            &days_ago(1),
+            "wi3",
+        );
         // tool_proposal：20 秒级延迟全批 → 橡皮图章嫌疑。
         for i in 0..20 {
             approval(
@@ -449,9 +506,11 @@ mod tests {
                 Some("wi2"),
             );
         }
-        // 回环：wi0 窗内放行；1 completed（regression）+1 cancelled（不计）。
+        // 回环：wi0 窗内放行；同 workitem 两次 completed（P1-2 用例：
+        // averageReworkCount 与 reworkWorkitemRate 口径分离）+1 cancelled（不计）。
         released_workitem(&store, "wi0", &days_ago(2));
         completed_rework(&store, "rwk1", "wi0", "regression", &days_ago(1));
+        completed_rework(&store, "rwk3", "wi0", "design_defect", &days_ago(1));
         let _ = store.with_conn(|c| {
             c.execute(
                 "INSERT INTO rework_operations(id, workitem_id, from_gate, target_gate, reason_code,
@@ -513,25 +572,50 @@ mod tests {
         });
 
         let ov = overview(&store, "global").unwrap();
-        // 审批分层：gate_release。
-        let gr = &ov["approvalLayers"]["gate_release"];
+        // 审批分层（P1-2：subject_type × risk 二维数组）。
+        assert_eq!(
+            ov["approvalLayers"]["dimensions"],
+            json!(["subjectType", "risk"])
+        );
+        let gr = layer(&ov, "gate_release", "low");
         assert_eq!(gr["approved"], json!(3));
         assert_eq!(gr["rejected"], json!(1));
         assert_eq!(gr["passRate"], json!(0.75));
         assert_eq!(gr["insufficientData"], json!(true));
+        // high 档独立成层（不与 low 合并）。
+        let grh = layer(&ov, "gate_release", "high");
+        assert_eq!(grh["approved"], json!(1));
+        assert_eq!(grh["rejected"], json!(0));
         // 橡皮图章：20 全批、median≈0s → suspect。
-        let tp = &ov["approvalLayers"]["tool_proposal"];
+        let tp = layer(&ov, "tool_proposal", "low");
         assert_eq!(tp["approved"], json!(20));
         assert_eq!(tp["rubberStampSuspect"], json!(true));
         assert_eq!(tp["insufficientData"], json!(false));
-        // 窗外审批不入窗：gate_release sample 恰为 4（grold 不计）。
-        // 回环：cancelled 不计、rate=1/1、insufficient（workitem<5）。
-        assert_eq!(ov["loopRate"]["completedReworks"], json!(1));
+        // 窗外审批不入窗：gate_release/low sample 恰为 4（grold 不计）。
+        // 回环双口径（P1-2）：同 workitem 两次 completed →
+        // averageReworkCount=2/1（次数口径），reworkWorkitemRate=1/1（占比口径）。
+        assert_eq!(ov["loopRate"]["completedReworks"], json!(2));
+        assert_eq!(ov["loopRate"]["reworkedWorkitems"], json!(1));
         assert_eq!(ov["loopRate"]["workitemsWithReleases"], json!(1));
+        assert_eq!(ov["loopRate"]["averageReworkCount"], json!(2.0));
+        assert_eq!(ov["loopRate"]["reworkWorkitemRate"], json!(1.0));
         assert_eq!(ov["loopRate"]["insufficientData"], json!(true));
+        let reasons: Vec<Value> = ov["loopRate"]["reasonDistribution"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["reasonCode"].clone())
+            .collect();
+        assert!(
+            reasons.contains(&json!("regression")) && reasons.contains(&json!("design_defect")),
+            "两次 completed 的 reason 均入分布：{reasons:?}"
+        );
         assert_eq!(
-            ov["loopRate"]["reasonDistribution"][0]["reasonCode"],
-            json!("regression")
+            ov["loopRate"]["reasonDistribution"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
         // 孤儿率：3 节点 1 孤儿。
         assert_eq!(ov["orphanRate"]["totalNodes"], json!(3));
