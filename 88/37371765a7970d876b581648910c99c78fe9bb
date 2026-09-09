@@ -1,0 +1,117 @@
+tests/e2e-protocol/gate-skip-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 8,15-20,89,92-96,136,143,148,169-174,176-182,190,211,213-220,226,228-235,253-263,265-271,273,275-290,292-296,300-329,332-340,342-353,355-357,363-365,367-379,381
+crates/workitem/src/snapshot.rs
+  s_10cee4de082fa1::t_113c022895d555 62,88,100-105,346-376
+tests/e2e-protocol/memory-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 278,292,301,312,326
+crates/store/migrations/0054_knowledge_verification_v2.sql
+  s_10cee4de082fa1::t_113c022895d555 1-54
+crates/workitem/src/lib.rs
+  s_10cee4de082fa1::t_113c022895d555 17
+tests/e2e-protocol/gate-acceptance-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 181,183-184,202
+crates/ratiflow-core/src/mutation_registry.rs
+  s_10cee4de082fa1::t_113c022895d555 1-408
+packages/protocol/generate.mjs
+  s_10cee4de082fa1::t_113c022895d555 84-138
+crates/workitem/src/deliverable.rs
+  s_10cee4de082fa1::t_113c022895d555 96-98
+tests/e2e-protocol/knowledge-verification-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 1-172
+crates/provenance/src/impact.rs
+  s_10cee4de082fa1::t_113c022895d555 129-161
+packages/protocol/src/generated.ts
+  s_10cee4de082fa1::t_113c022895d555 146-149,154,442-445,450,926,1412,1426-1458,1464-1465,1480,1489,1493-1498,1513-1515,1521,1530,1533,1535,1589,2187,2195
+tests/e2e-protocol/rework-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 135,139,143-146,150
+crates/store/migrations/0055_durable_run_intents.sql
+  s_10cee4de082fa1::t_113c022895d555 1-64
+crates/store/migrations/0050_rdws_mutation_receipts.sql
+  s_10cee4de082fa1::t_113c022895d555 1-22
+tests/e2e-protocol/workitem-search-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 57-58,66-75,103-104,106-107
+Makefile
+  s_10cee4de082fa1::t_113c022895d555 67
+crates/artifact/src/lib.rs
+  s_10cee4de082fa1::t_113c022895d555 297-298,362
+crates/store/src/store_test.rs
+  s_10cee4de082fa1::t_113c022895d555 1114-1608
+crates/ratiflow-core/src/automation_dispatch.rs
+  s_10cee4de082fa1::t_113c022895d555 53-55,175-183,186,189,198,205,248-263,270,305-428
+crates/store/src/migration.rs
+  s_10cee4de082fa1::t_113c022895d555 108-131
+tests/e2e-protocol/plan-execution-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 162
+crates/workitem/src/search.rs
+  s_10cee4de082fa1::t_113c022895d555 34,47-48,50
+tests/e2e-protocol/rpc-receipt-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 2,7-9,153-170,178-209
+  s_10cee4de082fa1::t_2891f968c51ddd 210
+tests/e2e-protocol/automation-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 15-18,72-78,82,199,205,211,220,232-233,258-264,266,268,270-276,278,280,282-288,290-317,319-327,329-337,339-340
+crates/store/src/objects.rs
+  s_10cee4de082fa1::t_113c022895d555 180-256
+tests/e2e-protocol/agent-routing-e2e.mjs
+  s_10cee4de082fa1::t_113c022895d555 151,161,168,211,229
+crates/ratiflow-core/src/dispatch.rs
+  s_10cee4de082fa1::t_113c022895d555 746-760,2347-2348,2350-2377,2393-2394,2402-2434,2436-2437,2440-2454,2456-2457,2460-2469,2471-2472,2475-2501,2504-2505,2513-2560,2564-2565,2584-2624,2679-2685,2700-2720,3144-3145,3153,3156-3158,3160,4875-4918,4921-4922,4924-4930,4937-4942,4951-4953,5116-5129,5138-5153
+crates/store/migrations/0052_gate_skip_operations_v2.sql
+  s_10cee4de082fa1::t_113c022895d555 1-107
+crates/ratiflow-core/src/main.rs
+  s_10cee4de082fa1::t_113c022895d555 22,184-211,352-365
+crates/workflow/src/automation.rs
+  s_10cee4de082fa1::t_113c022895d555 259-261,353-445,447-461,463-513,515-591,619-639,641-643,648,667-669,673-678,712-1018
+  s_10cee4de082fa1::t_9cf40f8df293c3 1019
+crates/workitem/src/rework.rs
+  s_10cee4de082fa1::t_113c022895d555 11,62-67,74-75,95-101,182-234,717-718,731-732,742-744,817-826,845-849,858-859,861-889,892,938,961-969,977-979,986-1033,1035-1098,1267,1274,1290-1397
+  s_10cee4de082fa1::t_8c7e734b32a829 1398
+crates/knowledge/src/manifest.rs
+  s_10cee4de082fa1::t_113c022895d555 365
+crates/store/migrations/0051_shadow_automation_policy_v2.sql
+  s_10cee4de082fa1::t_113c022895d555 1-80
+crates/workitem/src/skip.rs
+  s_10cee4de082fa1::t_113c022895d555 1-1110
+crates/workflow/src/shadow.rs
+  s_10cee4de082fa1::t_113c022895d555 26,32-37,72-74,79-80,93-94,105-107,112,114,122-133,137-153,156,158-161,172-175,181,187-188,206-246,469,473-474,482-485,495-498,519-525,537,543-544,555,557,559,561-563,570-572,591-628
+  s_10cee4de082fa1::t_9e78dde0308906 629-630
+crates/store/migrations/0053_rework_recovery_v2.sql
+  s_10cee4de082fa1::t_113c022895d555 1-57
+crates/workitem/src/fast_track.rs
+  s_10cee4de082fa1::t_113c022895d555 3-23,31-33,35-40,52-291,295-299,307-320,322,325-330,334,336-341,345-346,350-351,359-364,366-368,372-375,378,382,397-403,407-458,460-555,557-569,571-587,590-619,621-625,627-637,639-667,670,673-674,680-699,758-771,775-833,835,838-840,842,844-851,853,856-859,861-986,995
+crates/knowledge/src/freshness.rs
+  s_10cee4de082fa1::t_113c022895d555 1-2,4-15,82-83,85-89,92,94-95,104-107,112-116,118-122,126-192,194-205,208-246,250,254,266-270,275,278,281-282,288-334,337-341,345-350,352,358,360-369,371-373,381-383,387-394,398-399,402,405,408-411,431-453,460-467,470,473-490,497-498,521,523,528,533-534,540-545,579,587-588,590-600,604-645,647-681,684,686,691-727,729-800,802,804-840,844,849,853-854,873,875,878-895,897,900,907
+crates/workflow/src/metrics.rs
+  s_10cee4de082fa1::t_113c022895d555 501-502
+contracts/rpc/ratiflow.json
+  s_10cee4de082fa1::t_113c022895d555 712,2302-2307,2350-2361,2367-2417,2430-2436,2438-2514,2577-2582,2609-2614,2619-2642,2683-2690,2710-2715,2740,2742-2743,2759-2770,2961-2962,4994-4999,5026-5031
+crates/workflow/src/template.rs
+  s_10cee4de082fa1::t_113c022895d555 97-101,108,118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "8837371765a7970d876b581648910c99c78fe9bb",
+  "prompts": {},
+  "sessions": {
+    "s_10cee4de082fa1": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a9fabe05cadd09adcca2446",
+        "model": "deepseek_v4_flash_official__dev"
+      },
+      "human_author": "wenjian3 <wenjian3@asiainfo.com>",
+      "custom_attributes": {
+        "client_type": "ide",
+        "session_id": "6a9fabe05cadd09adcca2446",
+        "tool_name": "RunCommand",
+        "runtime_client": "trae-tob-git-ai",
+        "external_session_id": "6a9fabe05cadd09adcca2446",
+        "operation_id": "6a9fb57b5cadd09adcca25ba",
+        "tool_use_id": "6a9fb57b5cadd09adcca25ba",
+        "edit_kind": "bash",
+        "source_scene": "agent",
+        "display_model_name": "DeepSeek-V4-Flash 正式版"
+      }
+    }
+  }
+}
