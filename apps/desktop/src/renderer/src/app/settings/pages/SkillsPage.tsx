@@ -526,21 +526,16 @@ export function SkillsPage() {
     }
   };
 
-  // 市场技能行（本地源技能列表与远程插件技能列表共用）：右侧开关 = 安装状态。
+  // 市场技能行（本地源技能列表与远程插件技能列表共用）：名称 | 描述 | 安装开关。
   const renderMarketSkillRow = (src: MarketSourceBrowse, entry: MarketSkillEntry) => {
     const installedSkill = (items ?? []).find((s) => s.name === entry.name) ?? null;
     const busy = marketBusy === `${src.id}/${entry.dirName}`;
     const key = `${src.id}/${entry.plugin}@${entry.version}/${entry.dirName}`;
     return (
-      <div className="sg-set-item" role="listitem" key={key}>
-        <div className="sg-set-item-copy">
-          <span className="sg-set-item-title">{entry.name}</span>
-          <small className="sg-set-item-desc">
-            {entry.plugin ? `${entry.plugin}@${entry.version || 'HEAD'}` : `版本 ${entry.version || 'HEAD'}`}
-            {entry.description ? ` · ${entry.description}` : ''}
-          </small>
-        </div>
-        <div className="sg-set-item-control">
+      <div className="sg-mkt-skill" role="listitem" key={key}>
+        <span className="sg-mkt-skill-name">{entry.name}</span>
+        <small className="sg-mkt-skill-desc">{entry.description || '（无描述）'}</small>
+        <div className="sg-mkt-skill-control">
           <SettingsToggle
             label={`安装技能 ${entry.name}`}
             checked={!!installedSkill}
@@ -886,90 +881,72 @@ export function SkillsPage() {
               <div className="sg-skeleton-rows" aria-busy="true"><div className="sg-skeleton-row" /></div>
             ) : markets.length === 0 ? (
               <div className="sg-empty">
-                <span>还没有市场源。点右上角「管理源」添加一个（远程 Git 仓库或本机市场目录）。</span>
+                <span>还没有市场源。点右上角「管理源」添加一个（远程清单、远程 Git 仓库或本机市场目录）。</span>
               </div>
             ) : (
-              <div className="sg-setting-list" role="list" aria-label="市场源列表">
-                {markets.map((src) => (
-                  <div role="listitem" key={src.id}>
-                    <div className="sg-set-item">
-                      <div className="sg-set-item-copy">
-                        <span className="sg-set-item-title">{src.name}</span>
-                        <small className="sg-set-item-desc">
-                          {src.error
-                            ? `不可用：${src.error}`
-                            : !src.enabled
-                              ? `已停用 · ${src.rootPath}`
-                              : src.plugins.length > 0
-                                ? `${src.plugins.length} 个插件 · 按插件安装 · ${src.rootPath}`
-                                : `${src.skills.length} 个可安装技能 · ${src.rootPath}`}
-                        </small>
-                      </div>
-                    </div>
-                    {src.enabled && !src.error ? (
-                      src.plugins.length > 0 ? (
-                        <div className="sg-setting-list" role="list" aria-label={`${src.name} 插件目录`}>
-                          {src.plugins.map((p) => {
-                            const key = `${src.id}/${p.name}`;
-                            const st = pluginSkills[key];
-                            return (
-                              <div role="listitem" key={key}>
-                                <div className="sg-set-item">
-                                  <div className="sg-set-item-copy">
-                                    <button
-                                      type="button"
-                                      className="sg-set-item-title"
-                                      style={{ textAlign: 'left', background: 'none', border: 0, cursor: 'pointer', padding: 0 }}
-                                      onClick={() => { if (!st?.loading) void loadPluginSkills(src.id, p.name); }}
-                                    >
-                                      {p.name}{p.version ? ` (${p.version})` : ''}
-                                    </button>
-                                    <small className="sg-set-item-desc">
-                                      {p.category ? `[${p.category}] ` : ''}{p.description || '（无描述）'}
-                                    </small>
-                                  </div>
-                                  <div className="sg-set-item-control">
-                                    <button
-                                      type="button"
-                                      className="sg-btn sg-btn--sm"
-                                      disabled={st?.loading}
-                                      onClick={() => void loadPluginSkills(src.id, p.name)}
-                                    >
-                                      {st?.loading ? '拉取中…' : st ? '刷新' : '查看技能'}
-                                    </button>
-                                  </div>
-                                </div>
-                                {st?.error ? (
-                                  <div className="sg-set-item">
-                                    <small className="sg-set-item-desc">拉取失败：{st.error}</small>
-                                  </div>
-                                ) : null}
-                                {st && !st.loading && !st.error ? (
-                                  st.items.length === 0 ? (
-                                    <div className="sg-empty"><span>该插件内没有可安装的技能。</span></div>
-                                  ) : (
-                                    <div className="sg-setting-list" role="list" aria-label={`${p.name} 可安装技能`}>
-                                      {st.items.map((entry) => renderMarketSkillRow(src, entry))}
-                                    </div>
-                                  )
-                                ) : null}
+              markets.map((src) => (
+                <section className="sg-mkt-source" key={src.id}>
+                  <header className="sg-mkt-source-head">
+                    <h3 className="sg-mkt-source-name">{src.name}</h3>
+                    <small className="sg-mkt-source-desc">
+                      {src.error
+                        ? `不可用：${src.error}`
+                        : !src.enabled
+                          ? '已停用'
+                          : src.plugins.length > 0
+                            ? `${src.plugins.length} 个插件 · 按插件安装`
+                            : `${src.skills.length} 个可安装技能`}
+                      {' · '}{src.rootPath}
+                    </small>
+                  </header>
+                  {src.enabled && !src.error ? (
+                    src.plugins.length > 0 ? (
+                      (() => {
+                        // 扁平合并全部插件的技能列表：只呈现技能行，不展示插件分组。
+                        const states = src.plugins.map((p) => pluginSkills[`${src.id}/${p.name}`]);
+                        const entries = src.plugins
+                          .flatMap((_, i) => states[i]?.items ?? [])
+                          .sort((a, b) => a.name.localeCompare(b.name));
+                        const loading = states.some((st) => st?.loading);
+                        const failed = src.plugins.filter((_, i) => states[i]?.error).map((p) => p.name);
+                        const fetched = states.every((st) => st && !st.loading);
+                        return (
+                          <>
+                            {loading ? <div className="sg-mkt-note">正在拉取技能列表…</div> : null}
+                            {entries.length > 0 ? (
+                              <div className="sg-mkt-skills" role="list" aria-label={`${src.name} 可安装技能`}>
+                                {entries.map((entry) => renderMarketSkillRow(src, entry))}
                               </div>
-                            );
-                          })}
-                        </div>
-                      ) : src.skills.length === 0 ? (
-                        <div className="sg-empty">
-                          <span>该市场源暂无可安装技能（本地未安装相关插件，或仓库内无 SKILL.md）。</span>
-                        </div>
-                      ) : (
-                        <div className="sg-setting-list" role="list" aria-label={`${src.name} 可安装技能`}>
-                          {src.skills.map((entry) => renderMarketSkillRow(src, entry))}
-                        </div>
-                      )
-                    ) : null}
-                  </div>
-                ))}
-              </div>
+                            ) : null}
+                            {!loading && failed.length > 0 ? (
+                              <div className="sg-mkt-note">
+                                {failed.join('、')} 拉取失败
+                                <button
+                                  type="button"
+                                  className="sg-btn sg-btn--sm"
+                                  style={{ marginLeft: 12 }}
+                                  onClick={() => { for (const name of failed) void loadPluginSkills(src.id, name); }}
+                                >
+                                  重试
+                                </button>
+                              </div>
+                            ) : null}
+                            {fetched && failed.length === 0 && entries.length === 0 ? (
+                              <div className="sg-mkt-note">该市场源暂无可安装技能。</div>
+                            ) : null}
+                          </>
+                        );
+                      })()
+                    ) : src.skills.length === 0 ? (
+                      <div className="sg-mkt-note">该市场源暂无可安装技能（本地未安装相关插件，或仓库内无 SKILL.md）。</div>
+                    ) : (
+                      <div className="sg-mkt-skills" role="list" aria-label={`${src.name} 可安装技能`}>
+                        {src.skills.map((entry) => renderMarketSkillRow(src, entry))}
+                      </div>
+                    )
+                  ) : null}
+                </section>
+              ))
             )}
           </div>
 
