@@ -57,6 +57,7 @@ e2e: ## Protocol E2E（平台无关面 + 平台清单：按宿主平台选 MCP �
 	node tests/e2e-protocol/with-timeout.mjs 300 gate-release-race-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 rollback-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 agent-routing-e2e.mjs
+	node tests/e2e-protocol/with-timeout.mjs 300 run-defaults-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 memory-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 workflow-template-e2e.mjs
 	node tests/e2e-protocol/with-timeout.mjs 300 gate-acceptance-e2e.mjs

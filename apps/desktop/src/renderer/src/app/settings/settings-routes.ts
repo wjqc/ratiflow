@@ -7,7 +7,6 @@ import {
   IconCpu,
   IconDb,
   IconDoc,
-  IconDownload,
   IconFolder,
   IconGear,
   IconLayers,
@@ -19,7 +18,6 @@ import {
 
 export type SettingsRouteId =
   | 'app-general'
-  | 'updates'
   | 'projects'
   | 'workflow-templates'
   | 'knowledge-defaults'
@@ -28,6 +26,7 @@ export type SettingsRouteId =
   | 'tools'
   | 'mcp'
   | 'skills'
+  | 'automations'
   | 'execution'
   | 'agent-center'
   | 'integrations'
@@ -57,7 +56,6 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     label: '应用',
     items: [
       { id: 'app-general', code: 'S01', name: '常规', availability: 'real', icon: IconGear },
-      { id: 'updates', code: 'S03', name: '更新与关于', availability: 'real', icon: IconDownload },
     ],
   },
   {
@@ -76,6 +74,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
       { id: 'tools', code: 'S21', name: '工具与审批', availability: 'real', icon: IconCode },
       { id: 'mcp', code: 'S24', name: 'MCP 服务器', availability: 'real', icon: IconServer },
       { id: 'skills', code: 'S25', name: '技能', availability: 'real', icon: IconBook },
+      { id: 'automations', code: 'S26', name: '自动化', availability: 'real', icon: IconZap },
       { id: 'execution', code: 'S22', name: '执行与沙箱', availability: 'real', icon: IconZap },
       { id: 'agent-center', code: 'S23', name: 'Agent 中心', availability: 'real', icon: IconTarget },
     ],
@@ -127,10 +126,10 @@ export const SETTINGS_ADVANCED_ITEMS = settingsItems([
   'tools',
   'mcp',
   'skills',
+  'automations',
   'execution',
   'backup',
   'diagnostics',
-  'updates',
   'integrations',
 ]);
 

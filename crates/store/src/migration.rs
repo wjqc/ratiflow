@@ -133,7 +133,16 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         56,
         include_str!("../migrations/0056_workitem_search_shadow.sql"),
     ),
-    (58, include_str!("../migrations/0058_mcp_remote_transports.sql")),
+    (57, include_str!("../migrations/0057_drop_dead_tables.sql")),
+    (
+        58,
+        include_str!("../migrations/0058_mcp_remote_transports.sql"),
+    ),
+    (59, include_str!("../migrations/0059_run_defaults.sql")),
+    (
+        60,
+        include_str!("../migrations/0060_skill_market_public_sources.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

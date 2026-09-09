@@ -18,8 +18,3 @@ export function redactSecrets<T>(value: T): T {
   }
   return value;
 }
-
-/** 渲染 JSON 前的统一入口：脱敏 + 稳定缩进。 */
-export function redactedJson(value: unknown): string {
-  return JSON.stringify(redactSecrets(value), null, 2);
-}

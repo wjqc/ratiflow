@@ -7,7 +7,6 @@ import {
 import { ProjectsPage } from './ProjectsPage';
 import { BackupPage } from './BackupPage';
 import { DiagnosticsPage } from './DiagnosticsPage';
-import { UpdatesPage } from './UpdatesPage';
 import { PendingSettingsPage } from './PendingPages';
 import { GeneralPage } from './pages/GeneralPage';
 import { KnowledgeDefaultsPage } from './pages/KnowledgeDefaultsPage';
@@ -20,6 +19,7 @@ import { AgentCenterPage } from './pages/AgentCenterPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { IntegrationsPage } from './pages/IntegrationsPage';
 import { WorkflowTemplatesPage } from './pages/WorkflowTemplatesPage';
+import { AutomationsPage } from './pages/AutomationsPage';
 
 export default function SettingsShell({ section }: { section?: string }) {
   const route: SettingsRouteId = isSettingsRouteId(section) ? section : DEFAULT_SETTINGS_ROUTE;
@@ -32,8 +32,6 @@ export default function SettingsShell({ section }: { section?: string }) {
         return <BackupPage />;
       case 'diagnostics':
         return <DiagnosticsPage />;
-      case 'updates':
-        return <UpdatesPage />;
       case 'app-general':
         return <GeneralPage />;
       case 'workflow-templates':
@@ -50,6 +48,8 @@ export default function SettingsShell({ section }: { section?: string }) {
         return <McpPage />;
       case 'skills':
         return <SkillsPage />;
+      case 'automations':
+        return <AutomationsPage />;
       case 'agent-center':
         return <AgentCenterPage />;
       case 'execution':

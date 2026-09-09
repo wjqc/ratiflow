@@ -736,14 +736,16 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             Ok(json!({ "bindingId": id }))
         }
         "skill.activeList" => {
-            let items = settings::skills_ext::active_version_bodies(
-                store,
-                p.get("profileVersionId").and_then(|v| v.as_str()),
-            )
-            .map_err(serr)?;
-            let items: Vec<serde_json::Value> = items
+            let refs = settings::skills_ext::active_version_refs(store).map_err(serr)?;
+            let items: Vec<serde_json::Value> = refs
                 .into_iter()
-                .map(|(name, body)| json!({"name": name, "bodyBytes": body.len(), "body": body}))
+                .map(|r| {
+                    json!({
+                        "skillId": r.skill_id, "name": r.skill_name,
+                        "versionId": r.version_id, "versionNo": r.version_no,
+                        "bodyBytes": r.body_bytes,
+                    })
+                })
                 .collect();
             Ok(json!({ "items": items }))
         }
@@ -764,7 +766,34 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             })?;
             Ok(serde_json::to_value(out).unwrap_or_default())
         }
-        // --- 技能市场源（可配置；只读本地插件市场目录，不联网不执行）---
+        // 开发规范目录导入（通用机制）：外部 markdown 目录 → draft 技能库。
+        "skill.importDirectory" => {
+            let subdirs: Vec<String> = p
+                .get("subdirs")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let out = settings::skill_dir_import::import_directory(
+                store,
+                s(p, "path")?,
+                &subdirs,
+                p.get("createdBy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local"),
+            )
+            .map_err(|e| {
+                serr(settings::SettingsError::new(
+                    "INVALID_PARAMS",
+                    e.to_string(),
+                ))
+            })?;
+            Ok(serde_json::to_value(out).unwrap_or_default())
+        }
+        // --- 技能市场源（可配置；只读 SKILL.md 文本，任何文件都不执行）---
         "skill.marketList" => {
             let items = settings::skill_market::browse(store).map_err(serr)?;
             Ok(json!({ "items": items }))

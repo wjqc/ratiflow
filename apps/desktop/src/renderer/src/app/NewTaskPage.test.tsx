@@ -64,7 +64,7 @@ describe('新建任务', () => {
     );
   });
 
-  it('胶囊上下文行：工作区与关卡选择器同排内联；不再有 label/PRD 提示与管理按钮', async () => {
+  it('底部上下文栏展示工作区、本地状态、关卡模板与流程入口', async () => {
     rpcMock.mockImplementation((method: string) => {
       if (method === 'workflowTemplate.list') {
         return Promise.resolve({
@@ -84,13 +84,12 @@ describe('新建任务', () => {
       />,
     );
     await waitFor(() => expect(screen.getByLabelText('关卡模板')).toBeInTheDocument());
-    // 胶囊行：工作区胶囊与关卡胶囊都在 sg-nt-context-pills 容器内。
+    expect(screen.getByRole('heading', { name: '你想在 ratiflow 中完成什么？' })).toBeInTheDocument();
     const pills = document.querySelector('.sg-nt-context-pills');
     expect(pills).not.toBeNull();
     expect(pills!.querySelector('[aria-label="关卡模板"]')).not.toBeNull();
-    expect(screen.getByText('工作区')).toBeInTheDocument();
-    expect(screen.getByText('关卡')).toBeInTheDocument();
-    // 删除项：旧 label / PRD 提示文字 / 管理按钮 不复存在。
+    expect(screen.getByText('本地')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /查看流程/ })).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByText(/PRD 将结合此工作区的代码与知识库起草/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '管理关卡模板' })).not.toBeInTheDocument();
   });
@@ -128,13 +127,147 @@ describe('新建任务', () => {
         onBack={() => undefined}
       />,
     );
-    // 默认模板：本地六关常量。
-    await waitFor(() => expect(screen.getByText(/交付流程（6 关）/)).toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText('关卡模板'), { target: { value: 'tri-gate' } });
+    await waitFor(() => expect(screen.getByLabelText('关卡模板')).toBeInTheDocument());
+    expect(screen.queryByText(/交付流程（6 关）/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /查看流程/ }));
+    expect(screen.getByText(/交付流程（6 关）/)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('关卡模板'));
+    fireEvent.click(screen.getByRole('button', { name: '三关精简' }));
+    expect(screen.queryByRole('dialog', { name: '选择关卡模板' })).not.toBeInTheDocument();
     // 切到自定义模板 → 读激活版本定义，3 关 + 「按所选模板」标注。
     await waitFor(() => expect(screen.getByText(/交付流程（3 关 · 按所选模板）/)).toBeInTheDocument());
     expect(screen.getByText('需求关')).toBeInTheDocument();
     expect(screen.getByText('开发关')).toBeInTheDocument();
     expect(screen.getByText('验证关')).toBeInTheDocument();
+  });
+
+  it('"/" 选技能：浮层拾取后以胶囊呈现，提交携带冻结版本 id', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'skill.activeList') {
+        return Promise.resolve({
+          items: [
+            { skillId: 'skill_a', name: 'side-effect-safety', versionId: 'skv_a', versionNo: 2 },
+            { skillId: 'skill_b', name: 'database-sql', versionId: 'skv_b', versionNo: 1 },
+          ],
+        });
+      }
+      if (method === 'workitem.create') return Promise.resolve({ id: 'wi_new' });
+      if (method === 'stage.startActivity') return Promise.resolve({ runId: 'run_prd' });
+      return Promise.resolve({});
+    });
+    render(
+      <NewTaskPage
+        projectId="pj_1"
+        projects={[{ id: 'pj_1', name: 'Ratiflow' }]}
+        onCreated={onCreated}
+        onWorkspaceChanged={() => undefined}
+        onOpenRemote={() => undefined}
+        onBack={() => undefined}
+      />,
+    );
+    const input = screen.getByLabelText('需求描述');
+    // 空格后输入 "/" 触发技能浮层。
+    fireEvent.change(input, { target: { value: '支付网关重构 /' } });
+    const listbox = await screen.findByRole('listbox', { name: '快捷选择' });
+    expect(listbox).toBeInTheDocument();
+    // 过滤：输入 si 只剩 side-effect-safety。
+    fireEvent.change(input, { target: { value: '支付网关重构 /si' } });
+    await waitFor(() =>
+      expect(screen.queryByRole('option', { name: /database-sql/ })).not.toBeInTheDocument(),
+    );
+    // Enter 拾取高亮项：触发文本摘除、胶囊呈现。
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument());
+    expect(screen.getByText(/side-effect-safety/)).toBeInTheDocument();
+    expect(input).toHaveValue('支付网关重构 ');
+    // 提交：workitem.create 携带冻结版本 id。
+    fireEvent.click(screen.getByRole('button', { name: '创建并进入需求关' }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('wi_new', 'pj_1'));
+    expect(rpcMock).toHaveBeenCalledWith(
+      'workitem.create',
+      expect.objectContaining({ skillVersionIds: ['skv_a'] }),
+    );
+    // 胶囊可移除。
+    fireEvent.click(screen.getByRole('button', { name: '移除技能 side-effect-safety' }));
+    expect(screen.queryByText(/side-effect-safety/)).not.toBeInTheDocument();
+  });
+
+  it('"@" 指 Agent：拾取后胶囊呈现，提交携带任务级默认 profile 版本', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'agentProfile.list') {
+        return Promise.resolve({
+          items: [
+            {
+              id: 'apr_1',
+              name: '规范执行者',
+              enabled: true,
+              versions: [
+                { id: 'apv_1', versionNo: 1 },
+                { id: 'apv_2', versionNo: 2 },
+              ],
+            },
+            { id: 'apr_2', name: '已停用', enabled: false, versions: [{ id: 'apv_9', versionNo: 1 }] },
+          ],
+        });
+      }
+      if (method === 'workitem.create') return Promise.resolve({ id: 'wi_new' });
+      if (method === 'stage.startActivity') return Promise.resolve({ runId: 'run_prd' });
+      return Promise.resolve({});
+    });
+    render(
+      <NewTaskPage
+        projectId="pj_1"
+        projects={[{ id: 'pj_1', name: 'Ratiflow' }]}
+        onCreated={onCreated}
+        onWorkspaceChanged={() => undefined}
+        onOpenRemote={() => undefined}
+        onBack={() => undefined}
+      />,
+    );
+    const input = screen.getByLabelText('需求描述');
+    fireEvent.change(input, { target: { value: '重构任务 @' } });
+    await screen.findByRole('listbox', { name: '快捷选择' });
+    // 已停用 profile 不进选择面；最新版本 v2 被冻结。
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.getByText(/规范执行者/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '创建并进入需求关' }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('wi_new', 'pj_1'));
+    expect(rpcMock).toHaveBeenCalledWith(
+      'workitem.create',
+      expect.objectContaining({ agentProfileVersionId: 'apv_2' }),
+    );
+  });
+
+  it('Escape 关闭浮层不拾取；正文中的普通 "/" 不误触发', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'skill.activeList') {
+        return Promise.resolve({
+          items: [{ skillId: 'skill_a', name: 'side-effect-safety', versionId: 'skv_a', versionNo: 1 }],
+        });
+      }
+      if (method === 'workitem.create') return Promise.resolve({ id: 'wi_new' });
+      if (method === 'stage.startActivity') return Promise.resolve({ runId: 'run_prd' });
+      return Promise.resolve({});
+    });
+    render(
+      <NewTaskPage
+        projectId="pj_1"
+        projects={[{ id: 'pj_1', name: 'Ratiflow' }]}
+        onCreated={onCreated}
+        onWorkspaceChanged={() => undefined}
+        onOpenRemote={() => undefined}
+        onBack={() => undefined}
+      />,
+    );
+    const input = screen.getByLabelText('需求描述');
+    // 词中 "/"（前一个字符非空白）不触发。
+    fireEvent.change(input, { target: { value: '读/写分离' } });
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    // 行首 "/" 触发后 Escape 关闭、无胶囊。
+    fireEvent.change(input, { target: { value: '/' } });
+    await screen.findByRole('listbox', { name: '快捷选择' });
+    fireEvent.keyDown(input, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument());
+    expect(screen.queryByText(/side-effect-safety/)).not.toBeInTheDocument();
   });
 });

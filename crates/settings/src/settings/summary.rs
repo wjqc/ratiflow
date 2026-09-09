@@ -110,20 +110,28 @@ pub fn aggregate(store: &Store) -> SettingsResult<Value> {
         })
         .map_err(store_err)?;
 
-    let recent: Vec<Value> = store.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT key, revision, updated_at, updated_by FROM app_settings ORDER BY updated_at DESC LIMIT 5",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(json!({"key": r.get::<_, String>(0)?, "revision": r.get::<_, i64>(1)?,
-                "updatedAt": r.get::<_, String>(2)?, "updatedBy": r.get::<_, String>(3)?}))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
-    }).map_err(store_err)?;
+    // 最近变更：settings.json 单文件条目（app_settings 表已不再写入）。
+    let pref_doc = sg_store::prefstore::load(store).map_err(store_err)?;
+    let mut recent_entries: Vec<(String, &sg_store::prefstore::PrefEntry)> = pref_doc
+        .iter()
+        .map(|(id, entry)| {
+            let (_, _, key) = sg_store::prefstore::split_composite(id);
+            (key, entry)
+        })
+        .collect();
+    recent_entries.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at));
+    let recent: Vec<Value> = recent_entries
+        .into_iter()
+        .take(5)
+        .map(|(key, entry)| {
+            json!({
+                "key": key,
+                "revision": entry.revision,
+                "updatedAt": entry.updated_at,
+                "updatedBy": entry.updated_by,
+            })
+        })
+        .collect();
 
     let overall = if blockers.iter().any(|b| b["severity"] == json!("blocking")) {
         "action_required"

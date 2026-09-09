@@ -205,6 +205,11 @@ pub fn drift_check(
     Ok(valid_sha(new_pin))
 }
 
+/// 目录导入（skill_dir_import）复用的收集入口：根目录内全部 *.md（安全边界同上）。
+pub fn walk_md_collect(root: &std::path::Path) -> Result<Vec<std::path::PathBuf>, Error> {
+    walk_md(root, root, 0)
+}
+
 /// 遍历 clone 内 *.md（≤512KiB 读取由调用方裁剪）。安全边界（EvoFlow 评审 P0 修复）：
 /// - symlink 一律跳过（`entry.file_type()` 不跟随链接）：目录链接防止逃出 clone 根，
 ///   文件链接防止把宿主任意文件（如 ~/.ssh、数据库）以 .md 名义导入为技能内容；

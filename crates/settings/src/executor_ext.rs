@@ -1,23 +1,17 @@
 //! 执行沙箱设置（S22）：模式/CPU/内存/禁网持久化 + 运行自检。
+//! 存储：`data_dir/settings.json` 单文件（sg_store::prefstore），键 `executor.settings`；
+//! revision 仍内嵌在 value JSON（RPC 契约不变），条目 revision 同步镜像。
 use serde_json::{json, Value};
 
-use crate::{store_err, SettingsError, SettingsResult};
+use crate::{codes, store_err, SettingsError, SettingsResult};
+use sg_store::prefstore::{self, PrefEntry};
 use sg_store::Store;
 
 const KEY: &str = "executor.settings";
 
 pub fn get(store: &Store) -> SettingsResult<Value> {
-    let row: Option<String> = store
-        .with_conn(|conn| {
-            let result: rusqlite::Result<String> = conn.query_row(
-            "SELECT value_json FROM app_settings WHERE scope='global' AND project_id='' AND key=?1",
-            [KEY],
-            |r| r.get(0),
-        );
-            Ok(result.ok())
-        })
-        .map_err(store_err)?;
-    Ok(serde_json::from_str::<Value>(&row.unwrap_or_else(|| "{}".into())).unwrap_or_default())
+    let entry = prefstore::get(store, "global", "", KEY).map_err(store_err)?;
+    Ok(entry.map(|e| e.value).unwrap_or_else(|| json!({})))
 }
 
 pub fn revision(store: &Store) -> i64 {
@@ -65,24 +59,42 @@ pub fn update(store: &Store, settings: &Value, expected_revision: i64) -> Settin
         }
     }
     let now = sg_store::timefmt::now();
-    let merged = json!({
-        "mode": settings.get("mode").or_else(|| current.get("mode")).cloned().unwrap_or(json!("safe_restricted")),
-        "memoryMB": settings.get("memoryMB").or(current.get("memoryMB")),
-        "cpus": settings.get("cpus").or(current.get("cpus")),
-        "timeoutSec": settings.get("timeoutSec").or(current.get("timeoutSec")),
-        "networkOff": settings.get("networkOff").or(current.get("networkOff")),
-        "revision": current_rev + 1,
-        "updatedAt": now,
-    });
-    store.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO app_settings(key, scope, project_id, value_json, revision, updated_at, updated_by)
-             VALUES (?1,'global','',?2,?3,?4,'local')
-             ON CONFLICT(scope, project_id, key) DO UPDATE SET value_json=excluded.value_json, revision=excluded.revision, updated_at=excluded.updated_at",
-            rusqlite::params![KEY, merged.to_string(), current_rev + 1, now],
-        )?;
-        Ok(())
-    }).map_err(store_err)?;
+    let id = prefstore::composite("global", "", KEY);
+    let merged = prefstore::write(store, |doc| -> Result<Value, SettingsError> {
+        let current = doc
+            .get(&id)
+            .map(|e| e.value.clone())
+            .unwrap_or_else(|| json!({}));
+        let current_rev = current
+            .get("revision")
+            .and_then(|r| r.as_i64())
+            .unwrap_or(0);
+        if current_rev != expected_revision {
+            return Err(SettingsError::new(
+                codes::REVISION_CONFLICT,
+                format!("执行设置期望 revision {expected_revision} 实际 {current_rev}"),
+            ));
+        }
+        let merged = json!({
+            "mode": settings.get("mode").or_else(|| current.get("mode")).cloned().unwrap_or(json!("safe_restricted")),
+            "memoryMB": settings.get("memoryMB").or(current.get("memoryMB")),
+            "cpus": settings.get("cpus").or(current.get("cpus")),
+            "timeoutSec": settings.get("timeoutSec").or(current.get("timeoutSec")),
+            "networkOff": settings.get("networkOff").or(current.get("networkOff")),
+            "revision": current_rev + 1,
+            "updatedAt": now,
+        });
+        doc.insert(
+            id.clone(),
+            PrefEntry {
+                value: merged.clone(),
+                revision: current_rev + 1,
+                updated_at: sg_store::timefmt::now(),
+                updated_by: "local".into(),
+            },
+        );
+        Ok(merged)
+    })?;
     Ok(merged)
 }
 

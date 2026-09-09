@@ -16,6 +16,7 @@ pub mod operations;
 pub mod policy_ext;
 pub mod profiles;
 pub mod settings;
+pub mod skill_dir_import;
 pub mod skill_market;
 pub mod skill_registry;
 pub mod skills_ext;
@@ -74,6 +75,13 @@ pub type SettingsResult<T> = Result<T, SettingsError>;
 
 pub fn store_err(e: Error) -> SettingsError {
     SettingsError::new("INTERNAL", e.to_string())
+}
+
+/// prefstore::write 的泛型闭包要求 E: From<Error>，领域错误码得以穿透不降级。
+impl From<Error> for SettingsError {
+    fn from(e: Error) -> Self {
+        store_err(e)
+    }
 }
 
 /// correlationId 贯穿：请求层生成并写入审计/错误。

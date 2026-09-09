@@ -1,9 +1,10 @@
-//! 技能市场源（可配置），两种类型：
+//! 技能市场源（可配置），三种类型：
 //! - `zcode_local`：本机插件市场目录（known_marketplaces.json + installed_plugins.json + cache/）；
-//! - `remote_git`：远程 https 市场仓库（marketplace.json 清单或纯技能仓库）。
+//! - `remote_git`：远程 https 市场仓库（marketplace.json 清单或纯技能仓库）；
+//! - `remote_url`：远程 https 清单地址（直接给 marketplace.json URL，插件按 zip+sha256 下载）。
 //!
 //! 浏览/导入只读 SKILL.md 文本，绝不执行市场内任何文件（M6 退出标准，同 skill_registry）；
-//! 远程导入按 catalog pin SHA/ref 拉取插件仓库，仅提取 SKILL.md；
+//! 远程导入按 catalog pin SHA/ref 拉取插件仓库（或 zip+sha256 校验解包），仅提取 SKILL.md；
 //! 导入正文经 objects put 秘密扫描（fail-closed），落 enabled 技能 + draft 版本，审计留痕。
 
 use serde::Serialize;
@@ -12,7 +13,10 @@ use crate::{store_err, SettingsError, SettingsResult};
 use sg_store::{ids, timefmt, Store};
 
 const BODY_MAX_BYTES: usize = 512 << 10;
-const DEFAULT_ROOT: &str = "~/.zcode/cli/plugins";
+const MANIFEST_MAX_BYTES: usize = 2 << 20;
+const PLUGIN_ZIP_MAX_BYTES: usize = 32 << 20;
+const ZIP_ENTRIES_MAX: usize = 20_000;
+const ZIP_TOTAL_MAX_BYTES: u64 = 128 << 20;
 
 // ---------------- 源 CRUD ----------------
 
@@ -105,17 +109,16 @@ fn validate_remote_git(url: &str) -> SettingsResult<()> {
     if local_git_allowed() {
         return Ok(());
     }
-    // 可达性预检：ls-remote 快速失败，避免保存一个拉不动的仓库地址。
-    match std::process::Command::new("git")
-        .args(["ls-remote", "--heads", url])
-        .output()
-    {
+    // 可达性预检：ls-remote 快速失败，避免保存一个拉不动的仓库地址（硬超时 15s）。
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["ls-remote", "--heads", url]);
+    match run_with_timeout(&mut cmd, 15) {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(invalid(&format!(
             "市场仓库不可达：{}",
             String::from_utf8_lossy(&o.stderr).trim()
         ))),
-        Err(e) => Err(invalid(&format!("git 不可用：{e}"))),
+        Err(e) => Err(invalid(&e)),
     }
 }
 
@@ -124,8 +127,55 @@ fn validate_by_kind(kind: &str, root_path: &str) -> SettingsResult<()> {
     match kind {
         "zcode_local" => validate_plugins_root(root_path),
         "remote_git" => validate_remote_git(root_path),
-        _ => Err(invalid("非法市场源类型（zcode_local / remote_git）")),
+        "remote_url" => validate_remote_manifest(root_path),
+        _ => Err(invalid(
+            "非法市场源类型（zcode_local / remote_git / remote_url）",
+        )),
     }
+}
+
+/// remote_url 保存预检：https 且地址确实返回可解析的市场清单（防存一个 404 页面）。
+fn validate_remote_manifest(url: &str) -> SettingsResult<()> {
+    if !url.starts_with("https://") {
+        return Err(invalid("远程清单地址仅支持 https:// URL"));
+    }
+    fetch_catalog(url)
+        .map(|_| ())
+        .map_err(|e| invalid(&format!("市场清单不可用：{e}")))
+}
+
+/// 同步 HTTP GET（ureq），响应体硬上限 max_bytes，超限即失败（防超大响应拖垮内存）。
+fn http_get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .build();
+    let resp = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("HTTP 请求失败：{e}"))?;
+    let mut buf = Vec::new();
+    resp.into_reader()
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("响应读取失败：{e}"))?;
+    if buf.len() > max_bytes {
+        return Err(format!("响应超过 {} 字节上限", max_bytes));
+    }
+    Ok(buf)
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    sg_store::ids::hex(&sha2::Sha256::digest(data))
+}
+
+/// 远程清单拉取 + 解析（remote_url 源的 browse/plugin_skills/import 共用）。
+fn fetch_catalog(url: &str) -> Result<(String, Vec<(MarketPluginEntry, CatalogSource)>), String> {
+    let data = http_get(url, MANIFEST_MAX_BYTES)?;
+    let text = String::from_utf8_lossy(&data).into_owned();
+    parse_catalog_json(&text).ok_or_else(|| "不是有效的市场清单（缺少 plugins 数组）".to_string())
 }
 
 fn git_out(dir: &std::path::Path, args: &[&str]) -> Option<String> {
@@ -154,8 +204,48 @@ impl Drop for ClonedRepo {
     }
 }
 
+/// 带硬超时的子进程运行：到限 kill（防被墙网络把 clone/ls-remote 挂住数分钟）。
+fn run_with_timeout(cmd: &mut std::process::Command, secs: u64) -> Result<std::process::Output, String> {
+    use std::time::{Duration, Instant};
+    cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "20")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("git 不可用：{e}"))?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait().map_err(|e| format!("git 状态读取失败：{e}"))? {
+            Some(status) => {
+                return Ok(std::process::Output {
+                    status,
+                    stdout: child.stdout.take().map(|mut s| {
+                        let mut buf = Vec::new();
+                        use std::io::Read;
+                        let _ = s.read_to_end(&mut buf);
+                        buf
+                    }).unwrap_or_default(),
+                    stderr: child.stderr.take().map(|mut s| {
+                        let mut buf = Vec::new();
+                        use std::io::Read;
+                        let _ = s.read_to_end(&mut buf);
+                        buf
+                    }).unwrap_or_default(),
+                });
+            }
+            None if start.elapsed() >= Duration::from_secs(secs) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("网络操作超时（{secs}s）：远端不可达或过慢"));
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
 /// https-only 克隆（测试可放宽本地路径）。pin 规则：
 /// sha 优先（全量克隆 + checkout 校验，可重现）→ 否则 ref（浅克隆分支/标签）→ 否则 HEAD 浅克隆。
+/// 整体硬超时 30s（远端被墙时不拖死浏览链路）。
 fn git_clone_pin(url: &str, ref_: Option<&str>, sha: Option<&str>) -> Result<ClonedRepo, String> {
     let dir = std::env::temp_dir().join(format!(
         "sg-mkt-clone-{}-{}",
@@ -171,7 +261,7 @@ fn git_clone_pin(url: &str, ref_: Option<&str>, sha: Option<&str>) -> Result<Clo
         cmd.args(["--branch", r]);
     }
     cmd.arg(url).arg(dir.to_string_lossy().as_ref());
-    let out = cmd.output().map_err(|e| format!("git 不可用：{e}"))?;
+    let out = run_with_timeout(&mut cmd, 30)?;
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(format!(
@@ -182,17 +272,14 @@ fn git_clone_pin(url: &str, ref_: Option<&str>, sha: Option<&str>) -> Result<Clo
     let mut head =
         git_out(&dir, &["rev-parse", "HEAD"]).ok_or_else(|| "无法解析 HEAD".to_string())?;
     if let Some(sha) = sha {
-        let co = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(["checkout", "--quiet", sha])
-            .output()
-            .map_err(|e| format!("git 不可用：{e}"))?;
-        if !co.status.success() {
+        let mut co = std::process::Command::new("git");
+        co.arg("-C").arg(&dir).args(["checkout", "--quiet", sha]);
+        let out = run_with_timeout(&mut co, 30)?;
+        if !out.status.success() {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(format!(
                 "pin SHA 不可达：{}",
-                String::from_utf8_lossy(&co.stderr).trim()
+                String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
         head = sha.to_string();
@@ -203,11 +290,103 @@ fn git_clone_pin(url: &str, ref_: Option<&str>, sha: Option<&str>) -> Result<Clo
     })
 }
 
+/// 解包结果；Drop 时清理临时目录（同 ClonedRepo，正文须在 guard 存活期内读取）。
+struct ExtractedPlugin {
+    /// 解包根（sha 校验通过后的完整 zip 内容）。
+    dir: std::path::PathBuf,
+    /// 插件实际目录（清单 source.path 指向的解包内子目录）。
+    base: std::path::PathBuf,
+    /// 实测 sha256（hex，小写）——审计与版本兜底用。
+    sha256: String,
+}
+
+impl Drop for ExtractedPlugin {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// zip 安全解包：拒绝越界条目（zip-slip），symlink 一律跳过（与 scan_plugin_skills 同策略），
+/// 条目数/解压总量双上限；全部落临时目录，由调用方 Drop 清理。
+fn extract_zip_safe(data: &[u8], dest: &std::path::Path) -> Result<(), String> {
+    let mut arch = zip::ZipArchive::new(std::io::Cursor::new(data))
+        .map_err(|e| format!("插件包不是有效 zip：{e}"))?;
+    if arch.len() > ZIP_ENTRIES_MAX {
+        return Err(format!("插件包条目数超过 {} 上限", ZIP_ENTRIES_MAX));
+    }
+    let mut total: u64 = 0;
+    for i in 0..arch.len() {
+        let mut entry = arch.by_index(i).map_err(|e| format!("zip 条目损坏：{e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        if entry.is_symlink() {
+            continue;
+        }
+        // enclosed_name 拒绝绝对路径与 ../ 穿越（zip-slip）。
+        let rel = entry
+            .enclosed_name()
+            .ok_or_else(|| "插件包含越界路径条目（zip-slip）".to_string())?;
+        total += entry.size();
+        if total > ZIP_TOTAL_MAX_BYTES {
+            return Err("插件包解压后超过总量上限".to_string());
+        }
+        let out_path = dest.join(rel);
+        let parent = out_path
+            .parent()
+            .ok_or_else(|| "zip 条目路径异常".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("解包建目录失败：{e}"))?;
+        let mut out_file =
+            std::fs::File::create(&out_path).map_err(|e| format!("解包写文件失败：{e}"))?;
+        std::io::copy(&mut entry, &mut out_file).map_err(|e| format!("解包失败：{e}"))?;
+    }
+    Ok(())
+}
+
+/// 下载插件 zip（https-only）→ sha256 校验（清单 pin，fail-closed）→ 安全解包。
+fn fetch_plugin_zip(zip: &PluginZipSource) -> Result<ExtractedPlugin, String> {
+    if !zip.url.starts_with("https://") {
+        return Err("插件包仅支持 https:// 下载地址".to_string());
+    }
+    let data = http_get(&zip.url, PLUGIN_ZIP_MAX_BYTES)?;
+    let actual = sha256_hex(&data);
+    if !actual.eq_ignore_ascii_case(&zip.sha256) {
+        return Err(format!(
+            "插件包 sha256 校验失败（期望 {}，实际 {actual}）",
+            zip.sha256
+        ));
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "sg-mkt-zip-{}-{}",
+        std::process::id(),
+        ids::new_id("t")
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("临时目录创建失败：{e}"))?;
+    if let Err(e) = extract_zip_safe(&data, &dir) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    let base = if zip.path.is_empty() {
+        dir.clone()
+    } else {
+        dir.join(&zip.path)
+    };
+    if !base.is_dir() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!("插件包内未找到 {} 目录", zip.path));
+    }
+    Ok(ExtractedPlugin {
+        dir,
+        base,
+        sha256: actual.to_ascii_lowercase(),
+    })
+}
+
 /// 市场清单条目里可拉取的插件 git 来源。支持四种形态：
 /// - 字符串 "./plugins/x"：插件在市场仓库内（url 为空 = 用市场仓库本身，pin 市场 HEAD）；
 /// - {"source":"git-subdir"|"git","url","path","ref","sha"}：外链 git 仓库；
 /// - {"source":"github","repo"}：GitHub 仓库；
-/// - {"source":"url","url"(,"path","ref","sha")}：直接给 https git 地址（.zip 打包形态不支持，跳过）。
+/// - {"source":"url","url"(,"path","ref","sha")}：直接给 https git 地址（.zip 打包形态走 PluginZipSource）。
 struct PluginGitSource {
     url: String,
     path: String,
@@ -240,7 +419,7 @@ fn plugin_git_source(entry: &serde_json::Value) -> Option<PluginGitSource> {
                 return None;
             }
             if url.starts_with("https://") && url.ends_with(".zip") {
-                return None; // zip 打包形态 v1 不支持（无解包面）。
+                return None; // zip 打包形态由 plugin_zip_source 处理（catalog_source 已先行识别）。
             }
             (
                 url,
@@ -271,59 +450,121 @@ fn plugin_git_source(entry: &serde_json::Value) -> Option<PluginGitSource> {
     })
 }
 
+/// 清单插件的可拉取来源：git 仓库（clone + pin）或 zip 包（下载 + sha256 校验 + 解包）。
+enum CatalogSource {
+    Git(PluginGitSource),
+    Zip(PluginZipSource),
+}
+
+/// zip 打包插件来源（ZCode 官方 CDN 市场形态）：
+/// {"source":{"source":"url","type":"zip","url","sha256","path"}}。
+/// sha256 缺失/非法 → None（无校验和的 zip 不拉取，fail-closed）。
+struct PluginZipSource {
+    url: String,
+    sha256: String,
+    path: String,
+}
+
+fn plugin_zip_source(entry: &serde_json::Value) -> Option<PluginZipSource> {
+    let src = entry.get("source")?;
+    let kind = src.get("source").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != "url" {
+        return None;
+    }
+    let is_zip = src.get("type").and_then(|v| v.as_str()) == Some("zip")
+        || src
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|u| u.ends_with(".zip"))
+            .unwrap_or(false);
+    if !is_zip {
+        return None;
+    }
+    let url = src.get("url").and_then(|v| v.as_str())?;
+    if !url.starts_with("https://") {
+        return None;
+    }
+    let sha256 = src
+        .get("sha256")
+        .and_then(|v| v.as_str())
+        .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))?;
+    Some(PluginZipSource {
+        url: url.to_string(),
+        sha256: sha256.to_string(),
+        path: src
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_matches('/')
+            .to_string(),
+    })
+}
+
+/// 清单条目 → 可拉取来源（zip 优先识别，其余走 git 形态；两者皆非 → 跳过该插件）。
+fn catalog_source(entry: &serde_json::Value) -> Option<CatalogSource> {
+    if let Some(zs) = plugin_zip_source(entry) {
+        return Some(CatalogSource::Zip(zs));
+    }
+    plugin_git_source(entry).map(CatalogSource::Git)
+}
+
+/// 解析市场清单 JSON 文本，返回（市场名, 可拉取插件条目）。
+/// 无 plugins 数组 → None。远程清单（remote_url）与仓库内清单文件（read_catalog）共用。
+fn parse_catalog_json(data: &str) -> Option<(String, Vec<(MarketPluginEntry, CatalogSource)>)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+        return None;
+    };
+    let arr = v.get("plugins")?.as_array()?;
+    let mut out = Vec::new();
+    for p in arr {
+        let Some(name) = p.get("name").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let Some(cs) = catalog_source(p) else {
+            continue;
+        };
+        out.push((
+            MarketPluginEntry {
+                name: name.to_string(),
+                description: p
+                    .get("description")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect(),
+                version: p
+                    .get("version")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                category: p
+                    .get("category")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            },
+            cs,
+        ));
+    }
+    let mkt_name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((mkt_name, out))
+}
+
 /// 读取市场仓库清单（.claude-plugin/marketplace.json 或 marketplace.json），
 /// 返回（市场名, 可拉取插件条目）。无清单文件 → None（按纯技能仓库处理）。
 fn read_catalog(
     repo_dir: &std::path::Path,
-) -> Option<(String, Vec<(MarketPluginEntry, PluginGitSource)>)> {
+) -> Option<(String, Vec<(MarketPluginEntry, CatalogSource)>)> {
     for rel in [".claude-plugin/marketplace.json", "marketplace.json"] {
         let Ok(data) = std::fs::read_to_string(repo_dir.join(rel)) else {
             continue;
         };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
-            continue;
-        };
-        let Some(arr) = v.get("plugins").and_then(|p| p.as_array()) else {
-            continue;
-        };
-        let mut out = Vec::new();
-        for p in arr {
-            let Some(name) = p.get("name").and_then(|x| x.as_str()) else {
-                continue;
-            };
-            let Some(gs) = plugin_git_source(p) else {
-                continue;
-            };
-            out.push((
-                MarketPluginEntry {
-                    name: name.to_string(),
-                    description: p
-                        .get("description")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .chars()
-                        .take(200)
-                        .collect(),
-                    version: p
-                        .get("version")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    category: p
-                        .get("category")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                },
-                gs,
-            ));
-        }
-        let mkt_name = v
-            .get("name")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        return Some((mkt_name, out));
+        return parse_catalog_json(&data);
     }
     None
 }
@@ -435,8 +676,14 @@ fn source_get(store: &Store, id: &str) -> SettingsResult<MarketSource> {
         .map_err(store_err)
 }
 
-/// 首次访问惰性播种默认两个源（对应 ZCode 市场源面板的两个官方市场，均可编辑/删除）。
-/// 播种绕过目录校验：机器上没有该目录时 browse 会按源报告错误，不影响列表。
+/// 内置默认源的公网地址：ZCode 官方市场 = CDN 远程清单（插件 zip+sha256），
+/// Claude 官方市场 = GitHub 市场仓库（remote_git）。均可编辑/删除。
+const DEFAULT_ZCODE_MANIFEST: &str =
+    "https://cdn-zcode.z.ai/zcode/official-plugin/marketplace.json";
+const DEFAULT_CLAUDE_REPO: &str = "https://github.com/anthropics/claude-plugins-official";
+
+/// 首次访问惰性播种默认两个源（对应 ZCode 市场源面板的两个官方市场）。
+/// 播种绕过可达性校验：离线时 browse 会按源报告错误，不影响列表展示。
 fn ensure_seeded(store: &Store) -> SettingsResult<()> {
     let n: i64 = store
         .with_conn(|conn| {
@@ -450,12 +697,22 @@ fn ensure_seeded(store: &Store) -> SettingsResult<()> {
     if n > 0 {
         return Ok(());
     }
-    for (name, mkt) in [
-        ("zcode-plugins-official", "zcode-plugins-official"),
-        ("Claude Code 插件", "claude-plugins-official"),
-    ] {
-        insert_row(store, "zcode_local", name, DEFAULT_ROOT, mkt, true)?;
-    }
+    insert_row(
+        store,
+        "remote_url",
+        "zcode-plugins-official",
+        DEFAULT_ZCODE_MANIFEST,
+        "zcode-plugins-official",
+        true,
+    )?;
+    insert_row(
+        store,
+        "remote_git",
+        "Claude Code 插件",
+        DEFAULT_CLAUDE_REPO,
+        "claude-plugins-official",
+        true,
+    )?;
     Ok(())
 }
 
@@ -779,9 +1036,37 @@ fn scan_cache_fallback(root: &std::path::Path, marketplace_id: &str) -> Vec<Mark
 }
 
 /// 浏览全部源（含禁用：skills 为空）。单源故障记录在 error，不中断整页。
+/// 远程源涉及网络（清单拉取/clone），各源并行浏览，整页耗时 = 最慢源而非累加。
 pub fn browse(store: &Store) -> SettingsResult<Vec<MarketBrowse>> {
     let sources = source_list(store)?;
-    Ok(sources.iter().map(browse_source).collect())
+    let outs: Vec<MarketBrowse> = std::thread::scope(|s| {
+        let handles: Vec<_> = sources
+            .iter()
+            .map(|src| s.spawn(move || browse_source(src)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join().unwrap_or_else(|_| MarketBrowse {
+                    id: String::new(),
+                    name: String::new(),
+                    kind: String::new(),
+                    root_path: String::new(),
+                    marketplace_id: String::new(),
+                    enabled: false,
+                    revision: 0,
+                    resolved_root: String::new(),
+                    marketplace_name: String::new(),
+                    description: String::new(),
+                    plugin_count: 0,
+                    skills: Vec::new(),
+                    plugins: Vec::new(),
+                    error: "浏览线程异常退出".into(),
+                })
+            })
+            .collect()
+    });
+    Ok(outs)
 }
 
 fn browse_source(src: &MarketSource) -> MarketBrowse {
@@ -806,8 +1091,29 @@ fn browse_source(src: &MarketSource) -> MarketBrowse {
     }
     match src.kind.as_str() {
         "remote_git" => browse_remote(src, out),
+        "remote_url" => browse_remote_url(src, out),
         _ => browse_local(src, out),
     }
+}
+
+/// 远程清单源浏览：拉取 marketplace.json，列插件（技能按需按插件拉取）。
+fn browse_remote_url(src: &MarketSource, mut out: MarketBrowse) -> MarketBrowse {
+    let url = src.root_path.trim();
+    if !url.starts_with("https://") {
+        out.error = "远程清单源仅支持 https:// 地址".into();
+        return out;
+    }
+    out.resolved_root = url.to_string();
+    out.description = format!("远程市场清单：{url}");
+    match fetch_catalog(url) {
+        Ok((name, catalog)) => {
+            out.marketplace_name = if name.is_empty() { url_tail(url) } else { name };
+            out.plugins = catalog.into_iter().map(|(e, _)| e).collect();
+            out.plugin_count = out.plugins.len() as i64;
+        }
+        Err(e) => out.error = format!("市场清单拉取失败：{e}"),
+    }
+    out
 }
 
 fn browse_local(src: &MarketSource, mut out: MarketBrowse) -> MarketBrowse {
@@ -995,82 +1301,177 @@ fn resolve_local_skill(
     ))
 }
 
-/// 远程源解析：克隆市场仓库 → 命中清单插件 → 按 pin 规则克隆插件仓库 → 命中技能 → 读正文。
-/// 无清单的纯技能仓库：直接在市场仓库内命中。临时克隆在返回前读取正文，Drop 自动清理。
-/// 返回（条目, 正文, 市场标签, 插件仓库 URL, 检出 SHA）。
+/// 加载远程清单（remote_url = HTTP 拉取清单地址；remote_git = 克隆市场仓库后读清单文件）。
+/// 返回（市场标签, 清单条目, 市场 clone guard）。清单缺失 → catalog=None（仅 remote_git
+/// 的纯技能仓库形态）。guard 必须在正文读取期间保持存活。
+#[allow(clippy::type_complexity)]
+fn load_remote_catalog(
+    src: &MarketSource,
+) -> SettingsResult<(
+    String,
+    Option<Vec<(MarketPluginEntry, CatalogSource)>>,
+    Option<ClonedRepo>,
+)> {
+    let url = src.root_path.trim();
+    if src.kind == "remote_url" {
+        if !url.starts_with("https://") {
+            return Err(invalid("远程清单源仅支持 https:// 地址"));
+        }
+        let (name, catalog) =
+            fetch_catalog(url).map_err(|e| invalid(&format!("市场清单拉取失败：{e}")))?;
+        let label = if name.is_empty() { url_tail(url) } else { name };
+        return Ok((label, Some(catalog), None));
+    }
+    if !is_allowed_git_remote(url) {
+        return Err(invalid("远程市场源仅支持 https:// 仓库"));
+    }
+    let market =
+        git_clone_pin(url, None, None).map_err(|e| invalid(&format!("市场仓库拉取失败：{e}")))?;
+    let label = url_tail(url);
+    let (label, catalog) = match read_catalog(&market.dir) {
+        Some((n, c)) => (if n.is_empty() { label } else { n }, Some(c)),
+        None => (label, None),
+    };
+    Ok((label, catalog, Some(market)))
+}
+
+/// 已物化的插件内容（临时目录 guard + 可扫描目录 + 溯源信息）。
+struct MaterializedPlugin {
+    /// git 形态的插件/市场仓库 guard（Drop 清理）。
+    _git: Option<ClonedRepo>,
+    /// zip 形态的解包 guard（Drop 清理）。
+    _zip: Option<ExtractedPlugin>,
+    /// 插件内容目录（skills/*/SKILL.md 的父根）。
+    base: std::path::PathBuf,
+    /// 越界复核根（read_body_in 的 root）。
+    root: std::path::PathBuf,
+    /// 溯源标识：git = 检出 SHA；zip = sha256。
+    sha: String,
+    /// git = 仓库 URL；zip = 包下载地址。
+    repo_url: String,
+    pinned_ref: String,
+    /// 技能版本标签：清单 version，缺省时 git 取 sha 前 8 位、zip 取 sha256 前 8 位。
+    version: String,
+}
+
+/// 将清单插件落到本地可扫描目录：Git → clone（仓库内相对路径源复用市场仓库克隆）；
+/// Zip → 下载 + sha256 校验 + 安全解包。guard 附在返回值内存活至调用方读完正文。
+fn materialize_plugin(
+    market: Option<&ClonedRepo>,
+    market_url: &str,
+    cs: CatalogSource,
+    plugin_version: &str,
+) -> SettingsResult<MaterializedPlugin> {
+    match cs {
+        CatalogSource::Git(gs) => {
+            // 外链源 → 按 pin 规则克隆插件仓库；仓库内相对路径源（url 为空）→ 市场仓库本身。
+            let cloned = if gs.url.is_empty() {
+                None
+            } else {
+                Some(
+                    git_clone_pin(&gs.url, gs.ref_.as_deref(), gs.sha.as_deref())
+                        .map_err(|e| invalid(&format!("插件仓库拉取失败：{e}")))?,
+                )
+            };
+            let market_dir =
+                market.ok_or_else(|| invalid("清单插件为仓库内相对路径，仅远程 Git 市场源支持"))?;
+            let repo_root = cloned
+                .as_ref()
+                .map(|c| c.dir.clone())
+                .unwrap_or_else(|| market_dir.dir.clone());
+            let sha = cloned
+                .as_ref()
+                .map(|c| c.head_sha.clone())
+                .unwrap_or_else(|| market_dir.head_sha.clone());
+            let base = if gs.path.is_empty() {
+                repo_root.clone()
+            } else {
+                repo_root.join(&gs.path)
+            };
+            let version = if plugin_version.is_empty() {
+                sha.chars().take(8).collect()
+            } else {
+                plugin_version.to_string()
+            };
+            Ok(MaterializedPlugin {
+                base,
+                root: repo_root,
+                sha,
+                repo_url: if gs.url.is_empty() {
+                    market_url.to_string()
+                } else {
+                    gs.url.clone()
+                },
+                pinned_ref: gs.ref_.unwrap_or_default(),
+                version,
+                _git: cloned,
+                _zip: None,
+            })
+        }
+        CatalogSource::Zip(zs) => {
+            let ext =
+                fetch_plugin_zip(&zs).map_err(|e| invalid(&format!("插件包拉取失败：{e}")))?;
+            let version = if plugin_version.is_empty() {
+                ext.sha256.chars().take(8).collect()
+            } else {
+                plugin_version.to_string()
+            };
+            Ok(MaterializedPlugin {
+                base: ext.base.clone(),
+                root: ext.dir.clone(),
+                sha: ext.sha256.clone(),
+                repo_url: zs.url.clone(),
+                pinned_ref: String::new(),
+                version,
+                _git: None,
+                _zip: Some(ext),
+            })
+        }
+    }
+}
+
+/// 远程源解析：加载清单 → 命中清单插件 → 物化插件内容（clone 或 zip 解包）→ 命中技能 → 读正文。
+/// 无清单的纯技能仓库（仅 remote_git）：直接在市场仓库内命中。
+/// 返回（条目, 正文, 市场标签, 插件仓库/包 URL, 检出 SHA 或 sha256）。
 fn resolve_remote_skill(
     src: &MarketSource,
     plugin: &str,
     skill_dir: &str,
 ) -> SettingsResult<(MarketSkillEntry, String, String, String, String)> {
     let url = src.root_path.trim();
-    if !is_allowed_git_remote(url) {
-        return Err(invalid("远程市场源仅支持 https:// 仓库"));
-    }
-    let market =
-        git_clone_pin(url, None, None).map_err(|e| invalid(&format!("市场仓库拉取失败：{e}")))?;
-    let (label, catalog) = match read_catalog(&market.dir) {
-        Some((n, c)) => (if n.is_empty() { url_tail(url) } else { n }, Some(c)),
-        None => (url_tail(url), None),
-    };
-    if let Some(catalog) = catalog {
-        let (pe, gs) = catalog
-            .into_iter()
-            .find(|(e, _)| e.name == plugin)
-            .ok_or_else(|| invalid("市场清单中未找到该插件"))?;
-        // 外链源 → 按 pin 规则克隆插件仓库；仓库内相对路径源（url 为空）→ 市场仓库本身。
-        let cloned = if gs.url.is_empty() {
-            None
-        } else {
-            Some(
-                git_clone_pin(&gs.url, gs.ref_.as_deref(), gs.sha.as_deref())
-                    .map_err(|e| invalid(&format!("插件仓库拉取失败：{e}")))?,
-            )
-        };
-        let repo_root = cloned
-            .as_ref()
-            .map(|c| c.dir.clone())
-            .unwrap_or_else(|| market.dir.clone());
-        let sha = cloned
-            .as_ref()
-            .map(|c| c.head_sha.clone())
-            .unwrap_or_else(|| market.head_sha.clone());
-        let base = if gs.path.is_empty() {
-            repo_root.clone()
-        } else {
-            repo_root.join(&gs.path)
-        };
-        let entry = scan_plugin_skills(plugin, &pe.version, &base)
-            .into_iter()
-            .find(|e| e.dir_name == skill_dir)
-            .ok_or_else(|| invalid("插件内未找到该技能（可能已被上游移除，请刷新）"))?;
-        let md = base.join("skills").join(skill_dir).join("SKILL.md");
-        let body = read_body_in(&md, &repo_root)?;
-        let mut entry = entry;
-        if entry.version.is_empty() {
-            entry.version = sha.chars().take(8).collect();
+    let (label, catalog, market) = load_remote_catalog(src)?;
+    let catalog = match catalog {
+        Some(c) => c,
+        None => {
+            // 纯技能仓库：市场仓库本身就是技能内容。
+            let market = market.ok_or_else(|| invalid("市场仓库不可用"))?;
+            let version = market.head_sha.chars().take(8).collect::<String>();
+            let mut found = Vec::new();
+            walk_skill_entries(&market.dir, &market.dir, &version, &mut found)
+                .map_err(|e| invalid(&format!("仓库扫描失败：{e}")))?;
+            let (entry, md) = found
+                .into_iter()
+                .find(|(e, _)| e.dir_name == skill_dir)
+                .ok_or_else(|| invalid("仓库内未找到该技能（可能已被上游移除，请刷新）"))?;
+            let body = read_body_in(&md, &market.dir)?;
+            return Ok((entry, body, label, url.to_string(), market.head_sha.clone()));
         }
-        let repo_url_out = if gs.url.is_empty() {
-            url.to_string()
-        } else {
-            gs.url.clone()
-        };
-        return Ok((entry, body, label, repo_url_out, sha));
-    }
-    // 纯技能仓库：市场仓库本身就是技能内容。
-    let version = market.head_sha.chars().take(8).collect::<String>();
-    let mut found = Vec::new();
-    walk_skill_entries(&market.dir, &market.dir, &version, &mut found)
-        .map_err(|e| invalid(&format!("仓库扫描失败：{e}")))?;
-    let (entry, md) = found
+    };
+    let (pe, cs) = catalog
         .into_iter()
-        .find(|(e, _)| e.dir_name == skill_dir)
-        .ok_or_else(|| invalid("仓库内未找到该技能（可能已被上游移除，请刷新）"))?;
-    let body = read_body_in(&md, &market.dir)?;
-    Ok((entry, body, label, url.to_string(), market.head_sha.clone()))
+        .find(|(e, _)| e.name == plugin)
+        .ok_or_else(|| invalid("市场清单中未找到该插件"))?;
+    let mat = materialize_plugin(market.as_ref(), url, cs, &pe.version)?;
+    let entry = scan_plugin_skills(plugin, &mat.version, &mat.base)
+        .into_iter()
+        .find(|e| e.dir_name == skill_dir)
+        .ok_or_else(|| invalid("插件内未找到该技能（可能已被上游移除，请刷新）"))?;
+    let md = mat.base.join("skills").join(skill_dir).join("SKILL.md");
+    let body = read_body_in(&md, &mat.root)?;
+    Ok((entry, body, label, mat.repo_url, mat.sha))
 }
 
-/// 按需拉取远程清单插件内的技能列表（浏览用，不落库）。
+/// 按需拉取远程清单插件内的技能列表（浏览用，不落库）。remote_git / remote_url 通用。
 pub fn plugin_skills(
     store: &Store,
     source_id: &str,
@@ -1080,47 +1481,22 @@ pub fn plugin_skills(
     if !src.enabled {
         return Err(invalid("市场源已停用"));
     }
-    if src.kind != "remote_git" {
-        return Err(invalid("仅远程 Git 市场源支持按插件拉取技能清单"));
+    if src.kind != "remote_git" && src.kind != "remote_url" {
+        return Err(invalid("仅远程市场源支持按插件拉取技能清单"));
     }
     let url = src.root_path.trim();
-    if !is_allowed_git_remote(url) {
-        return Err(invalid("远程市场源仅支持 https:// 仓库"));
-    }
-    let market =
-        git_clone_pin(url, None, None).map_err(|e| invalid(&format!("市场仓库拉取失败：{e}")))?;
-    let (_, catalog) =
-        read_catalog(&market.dir).ok_or_else(|| invalid("市场仓库无 marketplace.json 清单"))?;
-    let (pe, gs) = catalog
+    let (_, catalog, market) = load_remote_catalog(&src)?;
+    let catalog = catalog.ok_or_else(|| invalid("市场仓库无 marketplace.json 清单"))?;
+    let (pe, cs) = catalog
         .into_iter()
         .find(|(e, _)| e.name == plugin)
         .ok_or_else(|| invalid("市场清单中未找到该插件"))?;
-    let cloned = if gs.url.is_empty() {
-        None
-    } else {
-        Some(
-            git_clone_pin(&gs.url, gs.ref_.as_deref(), gs.sha.as_deref())
-                .map_err(|e| invalid(&format!("插件仓库拉取失败：{e}")))?,
-        )
-    };
-    let repo_root = cloned
-        .as_ref()
-        .map(|c| c.dir.clone())
-        .unwrap_or_else(|| market.dir.clone());
-    let sha = cloned
-        .as_ref()
-        .map(|c| c.head_sha.clone())
-        .unwrap_or_else(|| market.head_sha.clone());
-    let base = if gs.path.is_empty() {
-        repo_root.clone()
-    } else {
-        repo_root.join(&gs.path)
-    };
-    let items = scan_plugin_skills(plugin, &pe.version, &base);
+    let mat = materialize_plugin(market.as_ref(), url, cs, &pe.version)?;
+    let items = scan_plugin_skills(plugin, &mat.version, &mat.base);
     Ok(MarketPluginSkills {
         items,
-        resolved_sha: sha,
-        pinned_ref: gs.ref_.unwrap_or_default(),
+        resolved_sha: mat.sha,
+        pinned_ref: mat.pinned_ref,
     })
 }
 
@@ -1139,7 +1515,7 @@ pub fn import_from_source(
         return Err(invalid("市场源已停用"));
     }
     let (entry, body, marketplace, repo_url, resolved_sha, path_str) = match src.kind.as_str() {
-        "remote_git" => {
+        "remote_git" | "remote_url" => {
             let (e, body, label, repo_url, sha) = resolve_remote_skill(&src, plugin, skill_dir)?;
             (e, body, label, repo_url, sha, String::new())
         }
@@ -1282,12 +1658,21 @@ mod tests {
     fn seeds_defaults_and_browses_sources() {
         let store = setup();
         let root = fixture_root();
-        // 首次列出 → 播种两个默认源。
+        // 首次列出 → 播种两个默认源（公网地址：CDN 清单 + GitHub 仓库）。
         let seeded = source_list(&store).unwrap();
         assert_eq!(seeded.len(), 2);
         assert_eq!(seeded[0].marketplace_id, "zcode-plugins-official");
+        assert_eq!(seeded[0].kind, "remote_url");
+        assert_eq!(
+            seeded[0].root_path,
+            "https://cdn-zcode.z.ai/zcode/official-plugin/marketplace.json"
+        );
         assert_eq!(seeded[1].name, "Claude Code 插件");
-        assert_eq!(seeded[1].root_path, "~/.zcode/cli/plugins");
+        assert_eq!(seeded[1].kind, "remote_git");
+        assert_eq!(
+            seeded[1].root_path,
+            "https://github.com/anthropics/claude-plugins-official"
+        );
 
         // 用户添加指向 fixture 的源。
         let src = source_save(
@@ -1709,5 +2094,119 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("非法市场源类型"), "{err}");
+    }
+
+    /// 内存 zip 构造（测试用）：entries = (条目名, 正文)。
+    fn make_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        for (name, body) in entries {
+            w.start_file(*name, SimpleFileOptions::default()).unwrap();
+            w.write_all(body.as_bytes()).unwrap();
+        }
+        w.finish().unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn zip_source_parsing_requires_https_and_sha256() {
+        let mk = |src: &str| {
+            let v = serde_json::json!({
+                "name": "mkt", "plugins": [
+                    {"name": "p1", "version": "1.0.0", "source": serde_json::from_str::<serde_json::Value>(src).unwrap()}
+                ]
+            });
+            parse_catalog_json(&v.to_string())
+        };
+        // ZCode 官方 CDN 形态：zip + sha256 + path。
+        let full = mk(r#"{"source":"url","type":"zip","url":"https://cdn.example.com/p.zip","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","path":"pkg"}"#)
+            .expect("zip 形态应被识别");
+        assert_eq!(full.1.len(), 1);
+        assert!(matches!(full.1[0].1, CatalogSource::Zip(_)));
+        // 缺 sha256 → 插件被跳过（fail-closed）。
+        let no_sha = mk(
+            r#"{"source":"url","type":"zip","url":"https://cdn.example.com/p.zip","path":"pkg"}"#,
+        )
+        .expect("清单本身有效");
+        assert!(no_sha.1.is_empty(), "无校验和的 zip 不得入列");
+        // http 明文 → 跳过。
+        let http = mk(r#"{"source":"url","type":"zip","url":"http://cdn.example.com/p.zip","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#)
+            .expect("清单本身有效");
+        assert!(http.1.is_empty());
+        // git 形态不受影响。
+        let git = mk(r#"{"source":"github","repo":"anthropics/claude-plugins-official"}"#)
+            .expect("github 形态应被识别");
+        assert_eq!(git.1.len(), 1);
+        assert!(matches!(git.1[0].1, CatalogSource::Git(_)));
+    }
+
+    #[test]
+    fn manifest_without_plugins_array_is_rejected() {
+        assert!(parse_catalog_json(r#"{"name":"x"}"#).is_none());
+        assert!(parse_catalog_json("not json").is_none());
+    }
+
+    #[test]
+    fn extract_zip_rejects_slip_and_scans_skills() {
+        // 正常包：pkg/skills/alpha/SKILL.md。
+        let good = make_zip(&[(
+            "pkg/skills/alpha/SKILL.md",
+            "---\ndescription: Alpha\n---\n正文",
+        )]);
+        let dir = std::env::temp_dir().join(format!("sg-mkt-ext-{}", ids::new_id("t")));
+        std::fs::create_dir_all(&dir).unwrap();
+        extract_zip_safe(&good, &dir).expect("正常包应解包成功");
+        let base = dir.join("pkg");
+        let skills = scan_plugin_skills("p1", "1.0.0", &base);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].dir_name, "alpha");
+        assert_eq!(skills[0].description, "Alpha");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // zip-slip 包：越界条目必须被整体拒绝（enclosed_name → None），不得部分落盘。
+        let evil = make_zip(&[("../evil.txt", "越界"), ("pkg/skills/a/SKILL.md", "x")]);
+        let dir2 = std::env::temp_dir().join(format!("sg-mkt-ext-{}", ids::new_id("t")));
+        std::fs::create_dir_all(&dir2).unwrap();
+        let res = extract_zip_safe(&evil, &dir2);
+        assert!(res.is_err(), "zip-slip 包必须被拒绝");
+        assert!(!dir2.join("pkg").exists(), "拒绝后不得留有部分解包产物");
+        std::fs::remove_dir_all(&dir2).unwrap();
+    }
+
+    #[test]
+    fn remote_url_kind_validation_rejects_non_https() {
+        let store = setup();
+        let err = source_save(
+            &store,
+            None,
+            "remote_url",
+            "清单源",
+            "http://cdn.example.com/marketplace.json",
+            "",
+            Some(true),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("https"), "{err}");
+    }
+
+    /// 实网端到端（默认忽略，手动运行：cargo test -p sg-settings live_zcode_cdn -- --ignored）。
+    #[test]
+    #[ignore = "实网依赖，CI 不跑"]
+    fn live_zcode_cdn_manifest_and_plugin_zip() {
+        let (name, catalog) =
+            fetch_catalog("https://cdn-zcode.z.ai/zcode/official-plugin/marketplace.json")
+                .expect("CDN 清单应可拉取");
+        assert_eq!(name, "zcode-plugins-official");
+        assert!(!catalog.is_empty(), "清单应有插件");
+        let (pe, cs) = catalog
+            .into_iter()
+            .find(|(e, _)| e.name == "cloudbase-skills")
+            .expect("应有 cloudbase-skills 插件");
+        let mat = materialize_plugin(None, "", cs, &pe.version).expect("zip 应下载解包成功");
+        let items = scan_plugin_skills("cloudbase-skills", &mat.version, &mat.base);
+        assert!(!items.is_empty(), "cloudbase-skills 应含技能");
     }
 }

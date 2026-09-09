@@ -441,9 +441,45 @@
           "name": "templateId",
           "type": "string",
           "required": false
+        },
+        {
+          "name": "agentProfileVersionId",
+          "type": "string",
+          "required": false,
+          "description": "任务级默认 Agent（\"@ 指派\"）：创建时校验并冻结版本，后续 run 选路默认用它"
+        },
+        {
+          "name": "skillVersionIds",
+          "type": "string[]",
+          "required": false,
+          "description": "任务级默认技能面（\"/\" 选择）：创建时校验并冻结版本，替换全局 enabled 注入面"
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "workitem.updateRunDefaults",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "agentProfileVersionId",
+          "type": "string",
+          "required": false,
+          "description": "任务级默认 Agent；显式 null 清空回退项目/全局绑定；缺省不动"
+        },
+        {
+          "name": "skillVersionIds",
+          "type": "string[]",
+          "required": false,
+          "description": "任务级默认技能面；显式 null 清空回退全局 enabled 面；缺省不动"
+        }
+      ],
+      "result": "value",
+      "description": "任务级默认运行面更新（\"@ 指派 Agent\" / 技能面的事后调整）：校验后整存 + 审计 + changed 事件"
     },
     {
       "name": "workitem.progress",
@@ -722,6 +758,18 @@
           "type": "string",
           "required": true,
           "description": "幂等键（重放返回同一 runId）"
+        },
+        {
+          "name": "skillVersionIds",
+          "type": "string[]",
+          "required": false,
+          "description": "run 显式技能面（\"/\" 快捷命令）：替换全局 enabled 注入面，冻结进 agent_run_skills 证据；缺省回落任务默认面"
+        },
+        {
+          "name": "agentProfileVersionId",
+          "type": "string",
+          "required": false,
+          "description": "run 显式 Agent（关卡级，最高选路优先级）；缺省用任务级默认（\"@ 指派\"）或既有绑定"
         }
       ],
       "result": "value",
@@ -5157,6 +5205,23 @@
         }
       ],
       "result": "value"
+    },
+    {
+      "name": "skill.importDirectory",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "subdirs",
+          "type": "string[]",
+          "required": false
+        }
+      ],
+      "result": "value",
+      "description": "开发规范目录导入（通用）：外部 markdown 目录整体导入为技能库——每个 .md 一个技能（名称=相对路径转连字符），全部 draft 版本；只读不执行、秘密扫描 fail-closed、同内容重导幂等（imported/updated/skipped/failed 四态清单）"
     },
     {
       "name": "skill.marketList",

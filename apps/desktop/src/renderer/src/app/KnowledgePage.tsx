@@ -58,6 +58,7 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
   const [hits, setHits] = useState<
     Array<{ source_name?: string; title?: string; path?: string; snippet: string; score?: number }>
   >([]);
+  const [contextPreview, setContextPreview] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -219,8 +220,15 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
 
   const runSearch = () => {
     if (!query.trim()) return;
-    void rpc<{ items: typeof hits }>('knowledge.search', { projectId, query: query.trim() })
+    void rpc<{ items: typeof hits }>('knowledge.searchV2', { projectId, query: query.trim(), includeTests: false, limit: 20 })
       .then((result) => setHits(result.items))
+      .catch((reason) => setError(rpcErrorMessage(reason)));
+  };
+
+  const previewContext = () => {
+    if (!query.trim()) return;
+    void rpc('context.preview', { projectId, query: query.trim(), maxBytes: 64 * 1024 })
+      .then(setContextPreview)
       .catch((reason) => setError(rpcErrorMessage(reason)));
   };
 
@@ -499,6 +507,9 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
                       <button className="sg-btn" disabled={!query.trim()} onClick={runSearch}>
                         搜索
                       </button>
+                      <button className="sg-btn" disabled={!query.trim()} onClick={previewContext}>
+                        预览注入上下文
+                      </button>
                     </div>
                     {hits.length > 0 ? (
                       <ul style={{ margin: 0, paddingLeft: 18 }}>
@@ -517,6 +528,11 @@ export default function KnowledgePage({ projectId, projectName }: Props) {
                           </li>
                         ))}
                       </ul>
+                    ) : null}
+                    {contextPreview ? (
+                      <pre style={{ margin: 0, padding: 10, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                        {JSON.stringify(contextPreview, null, 2)}
+                      </pre>
                     ) : null}
                   </div>
                 </div>

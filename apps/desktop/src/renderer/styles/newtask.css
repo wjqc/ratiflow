@@ -1,44 +1,167 @@
-/* 新建任务页（NewTaskPage）：胶囊上下文行 + 居中布局。
+/* 新建任务页（NewTaskPage）：大留白引导区 + 底部输入器。
    独立文件——tokens.css / workbench.css 为共享样式，本页局部约定不混入。 */
 
-.sg-nt-wrap--centered { max-width: 760px; padding-top: 7vh; }
+.sg-nt-scroll { overflow-y: auto; }
+.sg-nt-wrap--centered {
+  position: relative;
+  max-width: 800px;
+  min-height: 100%;
+  padding: 0 32px 38px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
 
-.sg-nt-hero { text-align: center; margin-bottom: 28px; }
-.sg-nt-hero .sg-hero-title { margin: 0 0 8px; }
-.sg-nt-hero .sg-hero-sub { margin: 0; }
+.sg-nt-hero {
+  flex: 1 1 auto;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding-bottom: 8vh;
+}
+.sg-nt-hero-logo { margin-bottom: 22px; filter: grayscale(1); opacity: 0.42; }
+.sg-nt-hero .sg-hero-title { margin: 0; font-size: 25px; font-weight: 450; letter-spacing: -0.02em; }
 
 /* 输入框外壳：参照 ZCode 首页——单卡片容器，顶部一行紧凑胶囊，中部输入区，底部工具行 */
 .sg-nt-composer-shell {
-  border: 1px solid var(--sg-border-default);
-  border-radius: 14px;
-  background: var(--sg-bg-card, #fff);
-  padding: 10px 12px 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  flex-shrink: 0;
+  border: none;
+  border-radius: 18px;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
 }
-.sg-nt-composer-shell:focus-within { border-color: var(--sg-action-primary); }
+.sg-nt-composer-shell:focus-within { box-shadow: none; }
 
 /* 顶部胶囊行 */
 .sg-nt-context-pills {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--sg-border-default);
-  margin-bottom: 4px;
+  justify-content: space-between;
+  gap: 12px;
+  height: 40px;
+  margin: 0 12px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 16px 16px 0 0;
+  background: var(--sg-bg-subtle);
+  color: var(--sg-text-secondary);
+}
+.sg-nt-context-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.sg-nt-template-picker { position: relative; }
+.sg-nt-template-trigger {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 28px; padding: 0 7px; border: none; border-radius: 999px;
+  background: transparent; color: var(--sg-text-primary); font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.sg-nt-template-trigger:hover,
+.sg-nt-template-trigger[aria-expanded="true"] { background: color-mix(in srgb, var(--sg-text-primary) 6%, transparent); }
+.sg-nt-template-menu {
+  position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 80;
+  width: 240px; max-height: min(360px, 50vh); overflow-y: auto;
+  padding: 5px; border: 1px solid var(--sg-border-default); border-radius: 14px;
+  background: var(--sg-bg-canvas); box-shadow: 0 4px 16px rgba(32, 33, 36, 0.1);
+}
+.sg-nt-template-menu-label { padding: 6px 8px; font-size: 12px; color: var(--sg-text-secondary); }
+.sg-nt-template-menu button {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; border: none; border-radius: 8px; padding: 7px 8px;
+  background: transparent; color: var(--sg-text-primary); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.sg-nt-template-menu button:hover { background: var(--sg-bg-subtle); }
+.sg-nt-context-pills .sg-workspace-trigger {
+  min-width: 0;
+  max-width: 200px;
+  height: 28px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+}
+.sg-nt-context-pills .sg-workspace-trigger > svg:last-child { display: none; }
+.sg-nt-context-pills .sg-workspace-trigger:hover,
+.sg-nt-context-pills .sg-workspace-trigger[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--sg-text-primary) 6%, transparent);
+}
+.sg-nt-context-pills .sg-workspace-popover {
+  top: auto;
+  bottom: calc(100% + 8px);
+  width: 260px;
+  max-height: min(420px, 55vh);
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 14px;
+  box-shadow: 0 4px 16px rgba(32, 33, 36, 0.1);
+}
+.sg-nt-context-pills .sg-workspace-search { height: 32px; padding: 0 8px; border: none; }
+.sg-nt-context-pills .sg-workspace-list { padding: 0; }
+.sg-nt-context-pills .sg-workspace-option { padding: 6px 8px; gap: 5px; }
+.sg-nt-context-pills .sg-workspace-option[aria-selected="true"] {
+  color: var(--sg-text-primary);
+  background: transparent;
+}
+.sg-nt-context-pills .sg-workspace-option:hover { background: var(--sg-bg-subtle); }
+.sg-nt-context-pills .sg-workspace-option svg { color: var(--sg-text-secondary); }
+.sg-nt-context-pills .sg-workspace-actions { margin: 4px 0 0; padding: 3px 0 0; }
+.sg-nt-context-pills .sg-workspace-actions button { padding: 6px 8px; }
+.sg-nt-context-divider { width: 1px; height: 18px; background: var(--sg-border-default); flex-shrink: 0; }
+.sg-nt-local-context { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; white-space: nowrap; }
+.sg-nt-local-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--sg-status-passed); }
+.sg-nt-flow-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: transparent;
+  color: var(--sg-text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 0 5px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sg-nt-flow-toggle:hover { color: var(--sg-text-primary); }
+.sg-nt-flow-toggle svg { transition: transform 160ms ease; }
+.sg-nt-flow-toggle svg.is-open { transform: rotate(180deg); }
+.sg-nt-composer {
+  position: relative;
+  z-index: 1;
+  margin-top: -2px;
+  min-height: 132px;
+  border-radius: 18px;
+  padding: 15px 16px 10px;
+  box-shadow: 0 2px 8px rgba(26, 35, 50, 0.05);
+}
+.sg-nt-composer:focus-within { border-color: var(--sg-border-strong); }
+.sg-nt-composer .sg-composer-input { min-height: 72px; font-size: 14px; }
+.sg-nt-composer .sg-composer-bar { margin-top: 2px; }
+.sg-nt-composer .sg-compose-send { width: 34px; height: 34px; border-radius: 10px; }
+.sg-nt-flow-panel {
+  position: absolute;
+  left: 32px;
+  right: 32px;
+  bottom: 210px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--sg-border-default);
+  border-radius: 14px;
+  background: var(--sg-bg-card, #fff);
+  box-shadow: 0 10px 30px rgba(26, 35, 50, 0.1);
+  z-index: 10;
 }
 .sg-nt-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 30px;
-  padding: 0 4px 0 10px;
-  border: 1px solid var(--sg-border-default);
-  border-radius: 999px;
-  background: var(--sg-bg-subtle);
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
   max-width: 280px;
 }
-.sg-nt-pill-label { font-size: 12px; color: var(--sg-text-secondary); flex-shrink: 0; }
 /* 胶囊内的选择器：去边框去背景，融入胶囊 */
 .sg-nt-pill .sg-select,
 .sg-nt-pill-select {
@@ -47,7 +170,7 @@
   background: transparent;
   font-size: 12.5px;
   color: var(--sg-text-primary);
-  padding: 0 4px;
+  padding: 0 20px 0 4px;
   max-width: 190px;
 }
 .sg-nt-pill .sg-select:focus,
@@ -60,6 +183,8 @@
 .sg-nt-flow--dense .sg-nt-step-sep { display: none; }
 
 @media (max-width: 900px) {
+  .sg-nt-wrap--centered { padding-inline: 22px; }
+  .sg-nt-flow-panel { left: 22px; right: 22px; }
   .sg-nt-step { flex: 1 1 40%; }
   .sg-nt-step-sep { display: none; }
 }

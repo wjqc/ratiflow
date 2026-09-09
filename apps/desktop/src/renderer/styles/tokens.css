@@ -1188,19 +1188,6 @@ button.sg-step { cursor: pointer; }
 .sg-dot--warn { background: var(--sg-status-running); }
 
 /* 概览摘要行 */
-.sg-summary-rows { display: flex; flex-direction: column; border-top: 1px solid var(--sg-border-default); }
-.sg-summary-row {
-  display: grid;
-  grid-template-columns: 140px 130px 1fr;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 2px;
-  border-bottom: 1px solid var(--sg-border-default);
-  font-size: 13px;
-}
-.sg-summary-label { color: var(--sg-text-secondary); }
-.sg-summary-detail { min-width: 0; }
-
 /* 阻塞动作行 */
 .sg-blocker-row {
   display: flex;
@@ -1908,7 +1895,48 @@ button.sg-step { cursor: pointer; }
 .sg-timeline-time { font-size: 11px; color: var(--sg-text-secondary); flex-shrink: 0; }
 
 /* 底部输入器补充 */
-.sg-composer-chips { display: flex; gap: 6px; margin-bottom: 8px; }
+.sg-composer-chips { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.sg-chip-remove {
+  border: none;
+  background: none;
+  padding: 0 0 0 2px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.7;
+}
+.sg-chip-remove:hover { opacity: 1; }
+
+/* "/" 技能与 "@" Agent 快捷选择浮层（新建任务输入器内） */
+.sg-quick-palette {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% - 4px);
+  z-index: 30;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--sg-bg-canvas);
+  border: 1px solid var(--sg-border-default);
+  border-radius: var(--sg-radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+.sg-quick-palette-list { list-style: none; margin: 0; padding: 4px; }
+.sg-quick-palette-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: var(--sg-radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+}
+.sg-quick-palette-list li.is-active { background: var(--sg-bg-selected); color: var(--sg-action-primary); }
+.sg-quick-palette-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sg-quick-palette-hint { font-size: 11px; color: var(--sg-text-secondary); flex-shrink: 0; }
+.sg-quick-palette-empty { padding: 10px 12px; font-size: 13px; color: var(--sg-text-secondary); }
 .sg-composer-box {
   border: 1px solid var(--sg-border-default);
   border-radius: var(--sg-radius-md);
@@ -2223,12 +2251,11 @@ button.sg-step { cursor: pointer; }
 .sg-project-list-head label { display: inline-flex; align-items: center; gap: 6px; color: var(--sg-text-secondary); font-size: 12px; }
 .sg-project-list-head input { accent-color: var(--sg-action-primary); }
 .sg-project-rows { border: 1px solid var(--sg-border-default); border-radius: 10px; overflow: hidden; }
-.sg-project-row { display: grid; grid-template-columns: 38px minmax(220px, 1fr) minmax(150px, auto) 64px; align-items: center; gap: 12px; min-height: 62px; padding: 9px 12px; }
+.sg-project-row { display: grid; grid-template-columns: 38px minmax(220px, 1fr) 64px; align-items: center; gap: 12px; min-height: 62px; padding: 9px 12px; }
 .sg-project-row + .sg-project-row { border-top: 1px solid var(--sg-border-default); }
 .sg-project-icon { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 9px; background: var(--sg-bg-subtle); color: var(--sg-text-secondary); }
 .sg-project-row h3 { margin: 0; font-size: 13px; }
 .sg-project-row p { margin: 4px 0 0; color: var(--sg-text-secondary); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sg-project-meta { display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--sg-text-secondary); font-size: 11.5px; }
 .sg-project-empty { min-height: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--sg-text-secondary); text-align: center; }
 .sg-project-empty h3 { margin: 10px 0 4px; color: var(--sg-text-primary); font-size: 14px; }
 .sg-project-empty p { margin: 0 0 14px; font-size: 12px; }
@@ -2254,7 +2281,6 @@ button.sg-step { cursor: pointer; }
   .sg-agent-gate-row .sg-btn { grid-column: 2; justify-self: start; }
   .sg-project-actions, .sg-project-remote-grid { grid-template-columns: 1fr; }
   .sg-project-row { grid-template-columns: 38px minmax(0, 1fr) 64px; }
-  .sg-project-meta { grid-column: 2; justify-content: flex-start; }
 }
 
 /* 右侧目标面板 */
@@ -3347,26 +3373,6 @@ button.sg-step { cursor: pointer; }
 .sg-reference-empty strong { color: var(--sg-text-primary); font-size: 13.5px; }
 .sg-reference-empty span { font-size: 12px; }
 
-.sg-mcp-new,
-.sg-mcp-save {
-  min-height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 13px;
-  border: 1px solid #111214;
-  border-radius: 9px;
-  background: #111214;
-  color: #fff;
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-
-.sg-mcp-new:hover:not(:disabled), .sg-mcp-save:hover:not(:disabled) { background: #292a2d; }
-.sg-mcp-new:disabled, .sg-mcp-save:disabled { opacity: 0.5; cursor: default; }
-
 .sg-mcp-group { display: grid; gap: 10px; }
 .sg-mcp-group h2 { margin: 0; font-size: 13px; font-weight: 650; }
 .sg-mcp-group h2 span { margin-left: 4px; color: var(--sg-text-secondary); font-weight: 400; }
@@ -3499,13 +3505,6 @@ button.sg-step { cursor: pointer; }
 }
 .sg-mcp-json-editor p { margin: 0; color: var(--sg-text-secondary); font-size: 11.5px; }
 .sg-mcp-create-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 0 -16px; padding: 13px 16px; border-top: 1px solid var(--sg-border-default); }
-
-[data-theme='dark'] .sg-mcp-new,
-[data-theme='dark'] .sg-mcp-save {
-  border-color: #e8eaed;
-  background: #e8eaed;
-  color: #17181b;
-}
 
 @media (max-width: 860px) {
   .sg-reference-toolbar { align-items: stretch; flex-direction: column; }

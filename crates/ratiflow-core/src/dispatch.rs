@@ -1176,6 +1176,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 template_id.as_deref(),
             )
             .map_err(store_err)?;
+            // 任务级默认运行面（"@ 指派 Agent" / "/" 技能选择）：创建时校验并冻结版本。
+            apply_workitem_run_defaults(store, &wi.id, params)
+                .map_err(|e| err(ErrorCode::InvalidParams, e))?;
             // 需求文档落盘（工作目录 data/docs/）+ 需求修订/条目/谱系节点（M1）。
             let doc = format!("# {}\n\n{}\n", wi.title, wi.description);
             let doc_path = sg_workitem::docs::save(store, &wi.id, "requirement.md", &doc)
@@ -1208,6 +1211,48 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 .unwrap_or(true);
             sg_workitem::archive(store, &id, archived).map_err(store_err)?;
             Ok(json!({"status": if archived { "archived" } else { "active" }}))
+        }
+        // 任务级默认运行面更新（"@ 指派 Agent" / "/" 技能面的事后调整）：
+        // 字段缺省 = 不动；显式 null = 清空回退全局面。
+        "workitem.updateRunDefaults" => {
+            let workitem_id = str_param(params, "workItemId")?;
+            // 工作项必须存在（fail-loud，不静默 no-op）。
+            let _ = sg_workitem::get(store, &workitem_id).map_err(store_err)?;
+            apply_workitem_run_defaults(store, &workitem_id, params)
+                .map_err(|e| err(ErrorCode::InvalidParams, e))?;
+            let (profile, skills): (Option<String>, String) = store
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT default_profile_version_id, default_skill_version_ids
+                         FROM workitems WHERE id=?1",
+                        [&workitem_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .map_err(Error::from)
+                })
+                .map_err(store_err)?;
+            let skills: Vec<String> = serde_json::from_str(&skills).unwrap_or_default();
+            sg_store::audit::append(
+                store,
+                "local",
+                "workitem.run_defaults.update",
+                "workitem",
+                &workitem_id,
+                json!({"agentProfileVersionId": profile, "skillVersionIds": skills}),
+            )
+            .map_err(store_err)?;
+            sg_store::outbox::emit(
+                store,
+                "workitem",
+                &workitem_id,
+                "run_defaults.updated",
+                json!({"agentProfileVersionId": profile, "skillVersionIds": skills}),
+            )
+            .map_err(store_err)?;
+            Ok(json!({
+                "agentProfileVersionId": profile,
+                "skillVersionIds": skills,
+            }))
         }
         "workitem.documents" => {
             let names = sg_workitem::docs::list(store, &str_param(params, "workItemId")?)
@@ -1988,6 +2033,61 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     bind_plan_task_attempt(store, &run.id, &workitem_id, pa)
                         .map_err(|e| err(ErrorCode::InvalidParams, e))?;
                 }
+                // 规范技能化接入：run 显式技能面（"/" 快捷命令）> workitem 默认面（"@" 创建时
+                // 冻结）> 全局 enabled。显式/默认命中即冻结进 agent_run_skills（证据可回查），
+                // 装配阶段只读冻结表；空集落零行 → 装配回退全局 enabled 面。
+                freeze_run_skills(store, &run.id, &workitem_id, params)
+                    .map_err(|e| err(ErrorCode::InvalidParams, e))?;
+                // "@" Agent 指派：显式参数（最高优先，作 task_override）> 任务级默认。
+                // 命中即选路并冻结 agent_selection_id（无面保持既有行为：无 selection）；
+                // 候选不可用时按选路回退语义落 generic 并记证据，不静默失败。
+                let explicit_profile = opt_str_param(params, "agentProfileVersionId");
+                let workitem_default_profile: Option<String> = store
+                    .with_conn(|conn| {
+                        Ok(conn
+                            .query_row(
+                                "SELECT default_profile_version_id FROM workitems WHERE id=?1",
+                                [&workitem_id],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or(None))
+                    })
+                    .unwrap_or(None);
+                if explicit_profile.is_some() || workitem_default_profile.is_some() {
+                    let run_project: String = store
+                        .with_conn(|conn| {
+                            conn.query_row(
+                                "SELECT project_id FROM workitems WHERE id=?1",
+                                [&workitem_id],
+                                |r| r.get(0),
+                            )
+                            .map_err(Error::from)
+                        })
+                        .map_err(store_err)?;
+                    let selection = sg_agent::router::resolve(
+                        store,
+                        &sg_agent::router::ResolveContext {
+                            project_id: &run_project,
+                            gate: "",
+                            activity_key: "",
+                            stage_activity_id: "",
+                            task_override_version_id: explicit_profile.as_deref(),
+                            workitem_default_version_id: workitem_default_profile.as_deref(),
+                            required_capabilities: &[],
+                            persist: true,
+                        },
+                    )
+                    .map_err(store_err)?;
+                    store
+                        .with_conn(|conn| {
+                            conn.execute(
+                                "UPDATE agent_runs SET agent_selection_id=?1 WHERE id=?2",
+                                rusqlite::params![selection.id, run.id],
+                            )
+                            .map_err(Error::from)
+                        })
+                        .map_err(store_err)?;
+                }
                 // M4-08：冻结 context policy（可回查 digest 链，§3 不变量 8）。
                 if let Some(pid) = &ctx_policy_frozen {
                     let _ = store.with_conn(|conn| {
@@ -2042,14 +2142,21 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             // M4-08：冻结面透出（allowlist 交集 + context/middleware/team 版本引用，
             // §3 不变量 8 可回查 digest 链）。
             {
-                let row: (String, Option<String>, Option<String>, Option<String>) = store
+                let row: (
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                ) = store
                     .with_conn(|conn| {
                         conn.query_row(
                             "SELECT tool_allowlist, context_policy_version_id,
-                                    middleware_profile_version_id, team_version_id
+                                    middleware_profile_version_id, team_version_id,
+                                    agent_selection_id
                              FROM agent_runs WHERE id=?1",
                             [&run_id],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                         )
                         .map_err(Error::from)
                     })
@@ -2059,6 +2166,36 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 v["contextPolicyVersionId"] = json!(row.1);
                 v["middlewareProfileVersionId"] = json!(row.2);
                 v["teamVersionId"] = json!(row.3);
+                v["agentSelectionId"] = json!(row.4);
+            }
+            // 规范技能化接入：run 冻结技能面证据（显式/任务默认命中即有行；空 = 全局面）。
+            {
+                let items: Vec<serde_json::Value> = store
+                    .with_conn(|conn| {
+                        let mut stmt = conn.prepare(
+                            "SELECT s.id, s.name, sv.id, sv.version_no, ars.bytes
+                             FROM agent_run_skills ars
+                             JOIN skill_versions sv ON sv.id = ars.skill_version_id
+                             JOIN skills s ON s.id = sv.skill_id
+                             WHERE ars.agent_run_id=?1 ORDER BY ars.ordinal",
+                        )?;
+                        let rows = stmt.query_map([&run_id], |r| {
+                            Ok(json!({
+                                "skillId": r.get::<_, String>(0)?,
+                                "skillName": r.get::<_, String>(1)?,
+                                "versionId": r.get::<_, String>(2)?,
+                                "versionNo": r.get::<_, i64>(3)?,
+                                "bytes": r.get::<_, i64>(4)?,
+                            }))
+                        })?;
+                        let mut out = Vec::new();
+                        for row in rows {
+                            out.push(row?);
+                        }
+                        Ok(out)
+                    })
+                    .unwrap_or_default();
+                v["skills"] = json!({ "items": items });
             }
             // F10：真实权限快照（'default' 为旧占位）。
             let snap_raw: String = store
@@ -2182,7 +2319,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         .and_then(|v| v.as_object())
                         .map(|m| {
                             m.iter()
-                                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                                .map(|(k, v)| {
+                                    (k.clone(), v.as_str().unwrap_or_default().to_string())
+                                })
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -2197,7 +2336,9 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 }
                 other => Err(err(
                     ErrorCode::InvalidParams,
-                    format!("mcp_transport_invalid: 仅支持 stdio|sse|streamable-http（实际 {other:?}）"),
+                    format!(
+                        "mcp_transport_invalid: 仅支持 stdio|sse|streamable-http（实际 {other:?}）"
+                    ),
                 )),
             }
         }
@@ -2871,7 +3012,19 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     .map_err(|_| Error::Message("not_found: workitem".into()))
                 })
                 .map_err(store_err)?;
-            // 选路（四级优先 + 回退语义），先于运行创建（Run 必须绑定 selection）。
+            // 选路（五级优先 + 回退语义），先于运行创建（Run 必须绑定 selection）。
+            // 任务级默认（"@ 指派"）介于任务显式覆盖与项目/全局绑定之间。
+            let workitem_default: Option<String> = store
+                .with_conn(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT default_profile_version_id FROM workitems WHERE id=?1",
+                            [&workitem_id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(None))
+                })
+                .unwrap_or(None);
             let selection = sg_agent::router::resolve(
                 store,
                 &sg_agent::router::ResolveContext {
@@ -2880,6 +3033,7 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     activity_key: &activity_key,
                     stage_activity_id: &activity_id,
                     task_override_version_id: task_override.as_deref(),
+                    workitem_default_version_id: workitem_default.as_deref(),
                     required_capabilities: &required_caps,
                     persist: true,
                 },
@@ -3924,6 +4078,138 @@ pub(crate) fn effective_executor_mode(
 /// 绑定到 TaskAttempt——真实执行链入口（planTask.transition succeeded 需绑定 Run
 /// 终态证明）。约束：attempt 须属同一工作项（防跨任务拼接）、无其他活跃 Run 占用、
 /// 状态 ready（此处经派发闸推进 running）或 running（崩溃遗留可重绑）。
+/// run 启动时冻结显式技能面（规范技能化接入）：
+/// 面来源 = agent.start 的 skillVersionIds 参数（"/" 显式选择）；
+/// 参数缺省或为空 → workitems.default_skill_version_ids（任务级默认面，"@" 创建时冻结）。
+/// 版本 revoked / 不存在 → fail-closed（不允许静默降级到全局面）。
+/// 命中面写入 agent_run_skills（ordinal 按名称序）；空面落零行（装配回退全局 enabled）。
+fn freeze_run_skills(
+    store: &Store,
+    run_id: &str,
+    workitem_id: &str,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    let mut version_ids: Vec<String> = params
+        .get("skillVersionIds")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if version_ids.is_empty() {
+        let defaults: String = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT default_skill_version_ids FROM workitems WHERE id=?1",
+                    [workitem_id],
+                    |r| r.get(0),
+                )
+                .map_err(sg_store::Error::from)
+            })
+            .map_err(|e| e.to_string())?;
+        version_ids = serde_json::from_str(&defaults).unwrap_or_default();
+        if version_ids.is_empty() {
+            return Ok(()); // 无显式/默认面 → 全局面（既有行为），零冻结行。
+        }
+    }
+    // 校验 + 渲染（同时算出名称序与字节证据；revoked fail-closed）。
+    let (_, evidence) = sg_settings::skills_ext::explicit_versions_text(store, &version_ids)
+        .map_err(|e| format!("skill_face_invalid: {}", e.message))?;
+    let now = sg_store::timefmt::now();
+    store
+        .with_conn(|conn| {
+            for (ordinal, item) in evidence.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO agent_run_skills(agent_run_id, skill_version_id, ordinal, bytes, created_at)
+                     VALUES (?1,?2,?3,?4,?5)",
+                    rusqlite::params![run_id, item.version_id, (ordinal + 1) as i64, item.body_bytes, now],
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 任务级默认运行面写入（workitem.create / workitem.updateRunDefaults 共用）：
+/// - `agentProfileVersionId`：字符串 = 校验（版本存在 + profile enabled）后冻结；
+///   显式 null = 清空（回退项目/全局绑定）；缺省 = 不动。
+/// - `skillVersionIds`：数组 = 经 explicit_versions_text 校验（revoked fail-closed）
+///   后冻结；显式 null = 清空；缺省 = 不动。
+fn apply_workitem_run_defaults(
+    store: &Store,
+    workitem_id: &str,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(profile_value) = params.get("agentProfileVersionId") {
+        let pinned: Option<String> = match profile_value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => {
+                let enabled: i64 = store
+                    .with_conn(|conn| {
+                        Ok(conn
+                            .query_row(
+                                "SELECT p.enabled FROM agent_profile_versions v
+                                 JOIN agent_profiles p ON p.id = v.profile_id
+                                 WHERE v.id=?1",
+                                [s],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or(-1))
+                    })
+                    .unwrap_or(-1);
+                if enabled != 1 {
+                    return Err(format!(
+                        "agent_profile_invalid: 版本 {s} 不存在或所属 profile 未启用"
+                    ));
+                }
+                Some(s.clone())
+            }
+            _ => return Err("agentProfileVersionId 须为字符串或 null".into()),
+        };
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE workitems SET default_profile_version_id=?1, updated_at=?2 WHERE id=?3",
+                    rusqlite::params![pinned, sg_store::timefmt::now(), workitem_id],
+                )
+                .map_err(sg_store::Error::from)
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(skills_value) = params.get("skillVersionIds") {
+        let pinned: Vec<String> = match skills_value {
+            serde_json::Value::Null => Vec::new(),
+            serde_json::Value::Array(a) => {
+                let ids: Vec<String> = a
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                if !ids.is_empty() {
+                    // 校验（存在性 + revoked fail-closed）；渲染结果弃用只取校验副作用。
+                    sg_settings::skills_ext::explicit_versions_text(store, &ids)
+                        .map_err(|e| format!("skill_face_invalid: {}", e.message))?;
+                }
+                ids
+            }
+            _ => return Err("skillVersionIds 须为数组或 null".into()),
+        };
+        let body = serde_json::to_string(&pinned).unwrap_or_else(|_| "[]".into());
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE workitems SET default_skill_version_ids=?1, updated_at=?2 WHERE id=?3",
+                    rusqlite::params![body, sg_store::timefmt::now(), workitem_id],
+                )
+                .map_err(sg_store::Error::from)
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn bind_plan_task_attempt(
     store: &Store,
     run_id: &str,
@@ -4235,8 +4521,21 @@ fn spawn_run_task(
             .collect(),
     };
     // M4：AgentProfile developer 层（persona/SOP/输出契约；无 selection 时为 None）。
-    // 技能段（启用即注入；全局技能恒注入，绑定技能仅该 Agent 的 Run）：拼入 profile 层之后。
+    // 技能段注入优先级：run 冻结面（agent_run_skills，显式/任务默认）> 全局 enabled。
     // _active_profile_id：已解析的 profile id，M4 Profile v2 冻结消费；当前仅用于技能注入过滤。
+    let run_frozen_skill_ids: Option<Vec<String>> = store
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT skill_version_id FROM agent_run_skills WHERE agent_run_id=?1 ORDER BY ordinal",
+            )?;
+            let rows = stmt.query_map([run_id], |r| r.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .ok();
     let (profile_text, _active_profile_id): (Option<String>, Option<String>) = {
         let sel_id: String = store
             .with_conn(|conn| {
@@ -4271,9 +4570,16 @@ fn spawn_run_task(
             Some((text, pid)) => (text, Some(pid)),
             None => (None, None),
         };
-        let skills_text =
-            sg_settings::skills_ext::enabled_bodies_text(store, profile_id.as_deref())
-                .unwrap_or_default();
+        let skills_text = match &run_frozen_skill_ids {
+            Some(ids) if !ids.is_empty() => {
+                sg_settings::skills_ext::explicit_versions_text(store, ids)
+                    .map(|(text, _)| text)
+                    .unwrap_or_default()
+            }
+            // 无冻结面（未显式选择、任务也无默认）→ 全局 enabled 面（既有行为）。
+            _ => sg_settings::skills_ext::enabled_bodies_text(store, profile_id.as_deref())
+                .unwrap_or_default(),
+        };
         // 技能段追加到 profile 层文本（Run 内冻结、确定性拼接，保持前缀稳定）。
         let combined = match (profile, skills_text.is_empty()) {
             (None, true) => None,

@@ -126,4 +126,18 @@ describe('工作流与关卡模板页', () => {
     );
     expect(screen.getByRole('button', { name: /新建模板/ })).toBeDisabled();
   });
+
+  it('查看流程：非草稿版本可只读展开关卡定义', async () => {
+    render(<WorkflowTemplatesPage />);
+    await waitFor(() => expect(screen.getByText('默认六关')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '查看流程' }));
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith('workflowTemplate.get', { templateId: 'wtpl_1', versionId: 'wfv_v1' }),
+    );
+    expect(await screen.findByText(/第 1 关 · 需求关/)).toBeInTheDocument();
+    expect(screen.getByText(/交付物：doc、prd/)).toBeInTheDocument();
+    expect(screen.getByText('PRD 已确认')).toBeInTheDocument();
+    // 只读查看不出现编辑控件。
+    expect(screen.queryByRole('button', { name: '添加关卡' })).not.toBeInTheDocument();
+  });
 });

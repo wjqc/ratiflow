@@ -141,17 +141,11 @@ export function BackupPage() {
       {info ? <div className="sg-banner sg-banner--info" role="status">{info}</div> : null}
 
       <SettingsSection title="备份状态">
-        <div className="sg-summary-rows">
-          <div className="sg-summary-row">
-            <span className="sg-summary-label">数据目录</span>
-            <span className="sg-summary-status"><StatusPill kind="ready" label="本地" /></span>
-            <span className="sg-summary-detail sg-path">{dataDir ?? '读取中…'}</span>
-          </div>
-          <div className="sg-summary-row">
-            <span className="sg-summary-label">schema 版本</span>
-            <span className="sg-summary-status"><StatusPill kind="ready" label={version ? `v${version.schemaVersion}` : '读取中'} /></span>
-            <span className="sg-summary-detail sg-muted">备份与同 schema 版本的 core 配套</span>
-          </div>
+        <div className="sg-kv">
+          <span className="sg-kv-k">数据目录</span>
+          <span className="sg-path">{dataDir ?? '读取中…'}</span>
+          <span className="sg-kv-k">schema 版本</span>
+          <span>{version ? `v${version.schemaVersion}` : '读取中…'}<span className="sg-hint">（备份与同 schema 版本的 core 配套）</span></span>
         </div>
       </SettingsSection>
 

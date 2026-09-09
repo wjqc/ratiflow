@@ -1,6 +1,7 @@
 // S13 工作流与关卡模板：模板版本化治理（draft → active → deprecated）。
 // active 不可原地编辑——正确形态是「复制为新草稿 → 编辑 → 激活为新版本」；
 // 已创建任务继续冻结使用创建时的版本，不受激活/弃用影响。
+// 查看：任意版本可只读展开关卡流程；新建：关卡预填默认六关并可直接改后再创建。
 // 模板域受 RATIFLOW_WORKFLOW_TEMPLATE_V2 门控（显式 =0 关闭），关闭时整页降级提示。
 import { useCallback, useEffect, useState } from 'react';
 import { rpc, rpcErrorMessage } from '../../../rpc/client';
@@ -149,8 +150,11 @@ export function WorkflowTemplatesPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ key: '', name: '' });
   const [formError, setFormError] = useState<string | null>(null);
-  // 展开草稿编辑器的版本（templateKey → versionId）。
+  // 新建表单的关卡编辑态：打开表单时预填默认六关，可直接改后再创建。
+  const [newGates, setNewGates] = useState<GateDraft[] | null>(null);
+  // 展开草稿编辑器/只读流程查看器的版本（templateKey → versionId）。
   const [editingVersion, setEditingVersion] = useState<Record<string, string>>({});
+  const [viewingVersion, setViewingVersion] = useState<Record<string, string>>({});
   const [confirmId, requestConfirm] = useTwoStepConfirm();
 
   const load = useCallback(async (opts?: { keepNotice?: boolean }) => {
@@ -174,6 +178,23 @@ export function WorkflowTemplatesPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const toggleCreating = () => {
+    const next = !creating;
+    setCreating(next);
+    setFormError(null);
+    if (next && newGates == null) {
+      rpc<{ activeVersion?: { gates: GateDefinition[] } }>(
+        'workflowTemplate.get',
+        { templateId: 'six-gate-default' },
+      )
+        .then((seed) => setNewGates(gatesToDraft(seed.activeVersion?.gates ?? [])))
+        .catch((reason) => {
+          setCreating(false);
+          setError(`默认模板读取失败：${rpcErrorMessage(reason)}`);
+        });
+    }
+  };
 
   /** 复制指定版本（默认激活版本）的关卡为新草稿。 */
   const forkDraft = async (template: TemplateRecord, fromVersionId?: string) => {
@@ -220,23 +241,26 @@ export function WorkflowTemplatesPage() {
       setFormError('模板名称必填');
       return;
     }
+    if (newGates == null) {
+      setFormError('关卡加载中，请稍候再试');
+      return;
+    }
+    const invalid = validateDraft(newGates);
+    if (invalid) {
+      setFormError(`无法创建：${invalid}`);
+      return;
+    }
     setBusy('create');
     try {
-      // 初始关卡复制默认六关（six-gate-default 的激活版本），用户随后在草稿里调整。
-      const seed = await rpc<{ activeVersion?: { gates: GateDefinition[] } }>(
-        'workflowTemplate.get',
-        { templateId: 'six-gate-default' },
-      );
-      const gates = seed.activeVersion?.gates ?? [];
-      if (gates.length === 0) throw new Error('默认模板读取失败，无法复制初始关卡');
       const r = await rpc<{ version: VersionRecord }>('workflowTemplate.create', {
-        key, name, gates: draftToGates(gatesToDraft(gates)),
+        key, name, gates: draftToGates(newGates),
       });
       setForm({ key: '', name: '' });
+      setNewGates(null);
       setCreating(false);
       await load({ keepNotice: true });
       setEditingVersion((prev) => ({ ...prev, [key]: r.version.id }));
-      setNotice(`模板 ${name} 已创建（草稿 v${r.version.version_no}，初始关卡复制自默认六关）`);
+      setNotice(`模板 ${name} 已创建草稿 v${r.version.version_no}，可继续编辑或保存并激活`);
     } catch (reason) {
       setFormError(rpcErrorMessage(reason));
     } finally {
@@ -275,7 +299,7 @@ export function WorkflowTemplatesPage() {
             </button>
             <button
               className="sg-btn sg-btn--primary"
-              onClick={() => setCreating((v) => !v)}
+              onClick={toggleCreating}
               disabled={featureDisabled}
             >
               <IconPlus size={14} />
@@ -314,9 +338,16 @@ export function WorkflowTemplatesPage() {
               />
             </label>
           </div>
-          <p className="sg-muted" style={{ margin: '0 16px 12px' }}>
-            初始关卡会复制默认六关（six-gate-default），创建后可在草稿里增删关卡、改顺序与验收条件。
-          </p>
+          {newGates == null ? (
+            <p className="sg-muted" style={{ margin: '0 16px 12px' }}>关卡加载中…</p>
+          ) : (
+            <div style={{ borderTop: '1px solid var(--sg-border)', padding: '4px 16px 12px' }}>
+              <p className="sg-muted" style={{ margin: '8px 0 0', fontSize: 12 }}>
+                关卡已按默认六关预填：可直接增删、改顺序、编辑验收条件后再创建。
+              </p>
+              <GateListEditor gates={newGates} onChange={setNewGates} />
+            </div>
+          )}
           {formError ? (
             <div className="sg-banner sg-banner--error" role="alert" style={{ margin: '0 16px 12px' }}>
               {formError}
@@ -326,7 +357,7 @@ export function WorkflowTemplatesPage() {
             <button
               className="sg-btn sg-btn--primary"
               onClick={() => void createTemplate()}
-              disabled={busy === 'create'}
+              disabled={busy === 'create' || newGates == null}
             >
               <IconCheck size={14} />
               {busy === 'create' ? '创建中…' : '创建草稿'}
@@ -339,6 +370,7 @@ export function WorkflowTemplatesPage() {
         const active = template.versions.find((v) => v.status === 'active');
         const draft = template.versions.find((v) => v.status === 'draft');
         const editing = editingVersion[template.key];
+        const viewing = viewingVersion[template.key];
         const isDefault = template.key === 'six-gate-default';
         return (
           <div className="sg-card" key={template.id} style={{ marginBottom: 16 }}>
@@ -376,7 +408,7 @@ export function WorkflowTemplatesPage() {
                   <th style={{ width: 90 }}>状态</th>
                   <th>内容摘要</th>
                   <th style={{ width: 130 }}>更新时间</th>
-                  <th style={{ width: 90 }}></th>
+                  <th style={{ width: 130 }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -406,12 +438,28 @@ export function WorkflowTemplatesPage() {
                         >
                           {editing === v.id ? '收起' : '编辑'}
                         </button>
-                      ) : null}
+                      ) : (
+                        <button
+                          className="sg-btn sg-btn--sm"
+                          onClick={() =>
+                            setViewingVersion((prev) => ({
+                              ...prev,
+                              [template.key]: prev[template.key] === v.id ? '' : v.id,
+                            }))
+                          }
+                        >
+                          {viewing === v.id ? '收起' : '查看流程'}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+
+            {viewing && template.versions.some((v) => v.id === viewing) ? (
+              <GateViewer templateId={template.id} versionId={viewing} />
+            ) : null}
 
             {editing && template.versions.some((v) => v.id === editing) ? (
               <DraftEditor
@@ -443,98 +491,29 @@ export function WorkflowTemplatesPage() {
   );
 }
 
-/** 草稿编辑器：加载指定版本定义 → 编辑关卡（标识/标题/目的/交付物/验收）→ 保存草稿 / 激活。 */
-function DraftEditor({
-  templateId,
-  versionId,
-  onSaved,
-}: {
-  templateId: string;
-  versionId: string;
-  onSaved: (message: string) => Promise<void>;
+/** 关卡编辑列表（纯编辑 UI）：新建表单与草稿编辑器共用。增删、上下移、逐字段编辑。 */
+function GateListEditor({ gates, onChange }: {
+  gates: GateDraft[];
+  onChange: (next: GateDraft[]) => void;
 }) {
-  const [gates, setGates] = useState<GateDraft[] | null>(null);
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
   const [confirmId, requestConfirm] = useTwoStepConfirm();
 
-  useEffect(() => {
-    let cancelled = false;
-    rpc<{ version?: { gates: GateDefinition[] }; activeVersion?: { gates: GateDefinition[] } }>(
-      'workflowTemplate.get',
-      { templateId, versionId },
-    )
-      .then((r) => {
-        if (cancelled) return;
-        const source = r.version ?? r.activeVersion;
-        setGates(gatesToDraft(source?.gates ?? []));
-      })
-      .catch((reason) => {
-        if (!cancelled) setError(rpcErrorMessage(reason));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [templateId, versionId]);
-
   const patch = (index: number, next: Partial<GateDraft>) => {
-    setGates((current) =>
-      current ? current.map((g, i) => (i === index ? { ...g, ...next } : g)) : current,
-    );
+    onChange(gates.map((g, i) => (i === index ? { ...g, ...next } : g)));
   };
   const move = (index: number, delta: -1 | 1) => {
-    setGates((current) => {
-      if (!current) return current;
-      const target = index + delta;
-      if (target < 0 || target >= current.length) return current;
-      const next = [...current];
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
-    });
+    const target = index + delta;
+    if (target < 0 || target >= gates.length) return;
+    const next = [...gates];
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
   };
   const remove = (index: number) => {
-    setGates((current) => (current ? current.filter((_, i) => i !== index) : current));
+    onChange(gates.filter((_, i) => i !== index));
   };
-
-  const save = async (thenActivate: boolean) => {
-    if (!gates) return;
-    const invalid = validateDraft(gates);
-    if (invalid) {
-      setError(`无法保存：${invalid}`);
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      await rpc('workflowTemplate.updateDraft', { versionId, gates: draftToGates(gates) });
-      if (thenActivate) {
-        await rpc('workflowTemplate.activate', { versionId });
-        await onSaved('草稿已保存并激活：新任务将使用此版本，已创建任务继续使用原版本');
-      } else {
-        await onSaved('草稿已保存（尚未激活，新建任务仍使用当前激活版本）');
-      }
-    } catch (reason) {
-      setError(rpcErrorMessage(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (gates == null) {
-    return (
-      <p className="sg-muted" style={{ margin: '8px 16px 12px' }}>
-        {error ? `草稿加载失败：${error}` : '草稿加载中…'}
-      </p>
-    );
-  }
 
   return (
-    <div style={{ borderTop: '1px solid var(--sg-border)', padding: '12px 16px 16px' }}>
-      {error ? (
-        <div className="sg-banner sg-banner--error" role="alert" style={{ marginBottom: 12 }}>
-          {error}
-        </div>
-      ) : null}
+    <>
       {gates.map((gate, i) => (
         <div
           key={`${gate.gateId}-${i}`}
@@ -602,10 +581,152 @@ function DraftEditor({
         </div>
       ))}
 
-      <button className="sg-btn sg-btn--sm" style={{ marginTop: 12 }} onClick={() => setGates([...gates, emptyGate()])}>
+      <button className="sg-btn sg-btn--sm" style={{ marginTop: 12 }} onClick={() => onChange([...gates, emptyGate()])}>
         <IconPlus size={13} />
         添加关卡
       </button>
+    </>
+  );
+}
+
+/** 只读流程查看器：加载指定版本定义，按序展示关卡（标题/目的/交付物/验收）。 */
+function GateViewer({ templateId, versionId }: { templateId: string; versionId: string }) {
+  const [gates, setGates] = useState<GateDefinition[] | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    rpc<{ version?: { gates: GateDefinition[] }; activeVersion?: { gates: GateDefinition[] } }>(
+      'workflowTemplate.get',
+      { templateId, versionId },
+    )
+      .then((r) => {
+        if (cancelled) return;
+        setGates((r.version ?? r.activeVersion)?.gates ?? []);
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(rpcErrorMessage(reason));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [templateId, versionId]);
+
+  if (error) {
+    return <p className="sg-muted" style={{ margin: '8px 16px 12px' }}>流程加载失败：{error}</p>;
+  }
+  if (gates == null) {
+    return <p className="sg-muted" style={{ margin: '8px 16px 12px' }}>流程加载中…</p>;
+  }
+  return (
+    <div style={{ borderTop: '1px solid var(--sg-border)', padding: '4px 16px 12px' }}>
+      {gates.map((g, i) => (
+        <div
+          key={g.gate_id}
+          style={{
+            padding: '10px 0',
+            borderBottom: i < gates.length - 1 ? '1px solid var(--sg-border)' : undefined,
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 600 }}>
+            第 {i + 1} 关 · {g.title}
+            <span className="sg-muted" style={{ fontWeight: 400, marginLeft: 8, fontSize: 12 }}>
+              {g.gate_id}
+            </span>
+          </div>
+          {g.purpose ? (
+            <div className="sg-muted" style={{ fontSize: 12, marginTop: 2 }}>{g.purpose}</div>
+          ) : null}
+          <div className="sg-muted" style={{ fontSize: 12, marginTop: 4 }}>
+            交付物：{(g.deliverables ?? []).join('、') || '—'}
+            {(g.acceptance ?? []).length > 0 ? ` · 验收 ${g.acceptance.length} 条` : ''}
+          </div>
+          {(g.acceptance ?? []).length > 0 ? (
+            <ul style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 12, color: 'var(--sg-text-secondary)' }}>
+              {(g.acceptance ?? []).map((a, j) => (
+                <li key={j}>{typeof a === 'string' ? a : JSON.stringify(a)}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 草稿编辑器：加载指定版本定义 → 编辑关卡（标识/标题/目的/交付物/验收）→ 保存草稿 / 激活。 */
+function DraftEditor({
+  templateId,
+  versionId,
+  onSaved,
+}: {
+  templateId: string;
+  versionId: string;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const [gates, setGates] = useState<GateDraft[] | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    rpc<{ version?: { gates: GateDefinition[] }; activeVersion?: { gates: GateDefinition[] } }>(
+      'workflowTemplate.get',
+      { templateId, versionId },
+    )
+      .then((r) => {
+        if (cancelled) return;
+        const source = r.version ?? r.activeVersion;
+        setGates(gatesToDraft(source?.gates ?? []));
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(rpcErrorMessage(reason));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [templateId, versionId]);
+
+  const save = async (thenActivate: boolean) => {
+    if (!gates) return;
+    const invalid = validateDraft(gates);
+    if (invalid) {
+      setError(`无法保存：${invalid}`);
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await rpc('workflowTemplate.updateDraft', { versionId, gates: draftToGates(gates) });
+      if (thenActivate) {
+        await rpc('workflowTemplate.activate', { versionId });
+        await onSaved('草稿已保存并激活：新任务将使用此版本，已创建任务继续使用原版本');
+      } else {
+        await onSaved('草稿已保存（尚未激活，新建任务仍使用当前激活版本）');
+      }
+    } catch (reason) {
+      setError(rpcErrorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (gates == null) {
+    return (
+      <p className="sg-muted" style={{ margin: '8px 16px 12px' }}>
+        {error ? `草稿加载失败：${error}` : '草稿加载中…'}
+      </p>
+    );
+  }
+
+  return (
+    <div style={{ borderTop: '1px solid var(--sg-border)', padding: '12px 16px 16px' }}>
+      {error ? (
+        <div className="sg-banner sg-banner--error" role="alert" style={{ marginBottom: 12 }}>
+          {error}
+        </div>
+      ) : null}
+      <GateListEditor gates={gates} onChange={setGates} />
 
       <div style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
         <button className="sg-btn" onClick={() => void save(false)} disabled={busy}>

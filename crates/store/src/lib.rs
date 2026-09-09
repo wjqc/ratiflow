@@ -7,6 +7,7 @@ pub mod ids;
 pub mod migration;
 pub mod objects;
 pub mod outbox;
+pub mod prefstore;
 pub mod scan;
 pub mod store;
 #[cfg(test)]

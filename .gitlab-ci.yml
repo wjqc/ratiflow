@@ -86,6 +86,7 @@ protocol-rdws-linux:
     - node tests/e2e-protocol/with-timeout.mjs 300 gate-release-race-e2e.mjs
     - node tests/e2e-protocol/with-timeout.mjs 300 rollback-e2e.mjs
     - node tests/e2e-protocol/with-timeout.mjs 300 agent-routing-e2e.mjs
+    - node tests/e2e-protocol/with-timeout.mjs 300 run-defaults-e2e.mjs
     - node tests/e2e-protocol/with-timeout.mjs 300 memory-e2e.mjs
     - node tests/e2e-protocol/with-timeout.mjs 300 workflow-template-e2e.mjs
     - node tests/e2e-protocol/with-timeout.mjs 300 gate-acceptance-e2e.mjs

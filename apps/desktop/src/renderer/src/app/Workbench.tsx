@@ -27,6 +27,8 @@ import {
 } from '../components/Icons';
 import { ModelPicker } from './ModelPicker';
 import RecoveryPanel from './RecoveryPanel';
+import TaskGovernancePanel from './TaskGovernancePanel';
+import TracePanel from './TracePanel';
 import { renderMarkdown } from '../lib/markdown';
 import { isDeltaEvent, streamBuffer, type RunStreamSnapshot } from '../lib/streamBuffer';
 import { useTwoStepConfirm } from './settings/components/useTwoStepConfirm';
@@ -422,6 +424,13 @@ export function Workbench({
           </div>
         )}
         <RecoveryPanel workItemId={workItemId} />
+        <TaskGovernancePanel
+          workItemId={workItemId}
+          currentGate={currentGate}
+          stages={progress?.stages ?? []}
+          onChanged={loadAll}
+        />
+        <TracePanel workItemId={workItemId} />
         <Conversation runs={runs} trace={trace} workItemId={workItemId} onOpenRevision={openRevision} />
       </div>
 
@@ -2171,4 +2180,3 @@ function GateChecksCard({ stage, progress }: { stage?: StageInfo; progress: Prog
 }
 
 /* ---------------- 验证关 ---------------- */
-

@@ -732,8 +732,10 @@ mod tests {
         });
         assert!(bad_state.is_err(), "attempt state CHECK 应拒绝 done");
     }
-    /// M2-05（0034）：autonomy_grants/workspace_policy_versions/task_workspaces/
-    /// run_interrupts/agent_runs 冻结 refs/approvals 扩作用域。
+    /// M2-05（0034）：autonomy_grants/task_workspaces/agent_runs 冻结 refs/approvals 扩作用域。
+    /// （run_interrupts 已随 0057 死表清理删除；workspace_policy_versions 因是
+    /// task_workspaces/agent_runs 外键锚点保留，但其 policy 外键列生产恒 NULL，
+    /// 保留 NULL 可写断言。）
     #[test]
     fn migration_0034_autonomy_workspace_semantics() {
         let (store, _guard) = open();
@@ -780,32 +782,13 @@ mod tests {
             )?)
         });
         assert!(bad_grant.is_err(), "grant status CHECK 应拒绝 paused");
-        // workspace policy：合法 + 非法策略拒绝。
-        store
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO workspace_policy_versions(id, strategy, sandbox_minimum, digest, created_at, updated_at)
-                     VALUES ('wsp1','task_worktree','kernel_restricted','d','t','t')",
-                    [],
-                )
-                .map_err(crate::Error::from)?;
-                Ok(())
-            })
-            .unwrap();
-        let bad_policy: Result<usize, crate::Error> = store.with_conn(|c| {
-            Ok(c.execute(
-                "INSERT INTO workspace_policy_versions(id, strategy, sandbox_minimum, digest, created_at, updated_at)
-                 VALUES ('wsp2','unsafe','kernel_restricted','d','t','t')",
-                [],
-            )?)
-        });
-        assert!(bad_policy.is_err(), "strategy CHECK 应拒绝 unsafe");
-        // task workspace：attempt 唯一 + path 唯一（两个写 task 不共享路径——EV-007）。
+        // task workspace：policy 外键列 NULL 可写（父表已随 0057 删除）+
+        // attempt 唯一 + path 唯一（两个写 task 不共享路径——EV-007）。
         store
             .with_conn(|c| {
                 c.execute(
                     "INSERT INTO task_workspaces(id, task_attempt_id, workspace_policy_version_id, path, base_head, created_at, updated_at)
-                     VALUES ('tw1','pa1','wsp1','dataDir/worktrees/wi/pr1/pa1','head1','t','t')",
+                     VALUES ('tw1','pa1',NULL,'dataDir/worktrees/wi/pr1/pa1','head1','t','t')",
                     [],
                 )
                 .map_err(crate::Error::from)?;
@@ -848,17 +831,16 @@ mod tests {
             bad_subject.is_err(),
             "approvals subject_type CHECK 应拒绝 plan"
         );
-        // agent_runs 冻结 refs 列存在且可写。
+        // agent_runs 冻结 refs 列存在且可写（policy 外键列 NULL；run_interrupts 已随 0057 删除）。
         store
             .with_conn(|c| {
-                c.execute_batch(
+                c.execute(
                     "INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
                         tool_allowlist, budget, policy_snapshot, idempotency_key, status, plan_revision_id,
                         plan_task_attempt_id, workspace_policy_version_id, phase, created_at, updated_at)
                      VALUES ('run1','wi','','g','sha','ctx1','[]','{}','default','ik34','queued',
-                        'pr1','pa1','wsp1','execution','t','t');
-                    INSERT INTO run_interrupts(id, run_id, kind, question, created_at, updated_at)
-                     VALUES ('ri1','run1','clarification','要不要继续？','t','t');",
+                        'pr1','pa1',NULL,'execution','t','t')",
+                    [],
                 )
                 .map_err(crate::Error::from)?;
                 Ok(())
@@ -1606,7 +1588,6 @@ mod tests {
             .unwrap();
     }
 
-
     #[test]
     fn migration_0056_workitem_search_shadow() {
         let (store, _guard) = open();
@@ -1645,14 +1626,15 @@ mod tests {
             .unwrap();
     }
 
-    /// 0058：远程 MCP 传输——CHECK 扩 ('stdio','sse','streamable-http')、
-    /// headers_json 列就位、'https' 不再是合法值、静态头 JSON 可存可读。
     #[test]
+    /// 0058：远程 MCP 传输——CHECK 扩 ('stdio','sse','streamable-http')、
+    /// headers_json 列就位、遗留 'https' 行映射为 streamable-http、索引重建保留。
     fn migration_0058_mcp_remote_transports() {
         let (store, _guard) = open();
         assert!(store.schema_version().unwrap() >= 58);
         store
             .with_conn(|c| {
+                // 两个远程传输 + 一个 stdio 均可写入（CHECK 放行）。
                 c.execute_batch(
                     "INSERT INTO mcp_servers(id, name, transport, url, headers_json, status, created_at)
                      VALUES ('m58a','sse-svc','sse','https://x/sse','[]','candidate','t');
@@ -1661,6 +1643,7 @@ mod tests {
                      INSERT INTO mcp_servers(id, name, transport, command, status, created_at)
                      VALUES ('m58c','local','stdio','/bin/cat','candidate','t');",
                 )?;
+                // 静态头 JSON 可存可读（值存原文；读模型脱敏在 settings 层）。
                 c.execute(
                     "UPDATE mcp_servers SET headers_json=?1 WHERE id='m58a'",
                     [r#"[{"name":"Authorization","value":"Bearer t"}]"#],
@@ -1671,12 +1654,77 @@ mod tests {
                     |r| r.get(0),
                 )?;
                 assert!(headers.contains("Authorization"));
+                // 旧 CHECK 值已非法（https 不再是合法 transport）。
                 let rejected = c.execute(
                     "INSERT INTO mcp_servers(id, name, transport, status, created_at)
                      VALUES ('m58d','legacy','https','candidate','t')",
                     [],
                 );
                 assert!(rejected.is_err(), "'https' 传输应被新 CHECK 拒绝");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    /// 0059：任务级默认运行面——agent_run_skills 冻结表可写（run↔skill_version
+    /// 双向可查）、workitems 默认两列可写（profile 外键 + JSON 数组技能面）、
+    /// 未指派任务默认值为 NULL/'[]'（存量兼容）。
+    fn migration_0059_run_defaults() {
+        let (store, _guard) = open();
+        assert!(store.schema_version().unwrap() >= 59);
+        store
+            .with_conn(|c| {
+                c.execute_batch(
+                    "INSERT INTO projects(id, gitlab_instance, namespace, project, default_branch, created_at)
+                     VALUES ('pj59','u','n','p','main','t');
+                     INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi59a','pj59','带默认面','描述','[]','requirements','t','t');
+                     INSERT INTO workitems(id, project_id, title, description, labels, current_gate, created_at, updated_at)
+                     VALUES ('wi59b','pj59','无默认面','描述','[]','requirements','t','t');
+                     INSERT INTO agent_profiles(id, project_id, name, adapter_kind, enabled, created_at, updated_at)
+                     VALUES ('apr59',NULL,'规范执行者','local_harness',1,'t','t');
+                     INSERT INTO agent_profile_versions(id, profile_id, version_no, content_digest, created_at)
+                     VALUES ('apv59','apr59',1,'dg59','t');
+                     INSERT INTO context_manifests(id, workitem_id, scope, data_policy, created_at)
+                     VALUES ('ctx59','wi59a','{}','standard','t');
+                     INSERT INTO agent_runs(id, workitem_id, task_id, goal, input_baseline_sha, context_manifest_id,
+                         tool_allowlist, budget, policy_snapshot, idempotency_key, status, created_at, updated_at)
+                     VALUES ('run59','wi59a','','g','sha','ctx59','[]','{}','default','ik59','queued','t','t');
+                     INSERT INTO skills(id, name, description, body_object_sha256, body_bytes, source, created_at, updated_at)
+                     VALUES ('sk59','side-effect-safety','写操作安全','sha',32,'import','t','t');
+                     INSERT INTO skill_versions(id, skill_id, version_no, status, body_object_sha256, body_bytes,
+                         description, content_digest, created_at, updated_at)
+                     VALUES ('skv59','sk59',1,'active','sha',32,'写操作安全','dg','t','t');",
+                )?;
+                // 默认面写入：profile 版本外键 + 技能 JSON 数组。
+                c.execute(
+                    "UPDATE workitems SET default_profile_version_id='apv59',
+                         default_skill_version_ids='[\"skv59\"]' WHERE id='wi59a'",
+                    [],
+                )?;
+                // run 显式技能冻结表：ordinal 证据行可写，按版本反查 run 可用。
+                c.execute(
+                    "INSERT INTO agent_run_skills(agent_run_id, skill_version_id, ordinal, bytes, created_at)
+                     VALUES ('run59','skv59',1,32,'t')",
+                    [],
+                )?;
+                let runs: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM agent_run_skills ars
+                     JOIN skill_versions sv ON sv.id = ars.skill_version_id
+                     WHERE sv.status = 'active'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(runs, 1, "按技能版本反查 run 生效");
+                // 未指派任务：默认 NULL / 空数组（不回填、不强制）。
+                let (profile, skills_json): (Option<String>, String) = c.query_row(
+                    "SELECT default_profile_version_id, default_skill_version_ids FROM workitems WHERE id='wi59b'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                assert!(profile.is_none());
+                assert_eq!(skills_json, "[]");
                 Ok(())
             })
             .unwrap();

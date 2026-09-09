@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { rpc } from '../../rpc/client';
 import type { ProjectListResult, ProjectRow } from './types';
 import { SettingsPageHeader } from './components/SettingsPageHeader';
-import { StatusPill } from './components/StatusPill';
 import {
   IconCheck,
   IconCloud,
@@ -34,6 +33,8 @@ export function ProjectsPage() {
     Array<{ id: string; title: string; projectId: string; projectName: string }>
   >([]);
   const [restoringTask, setRestoringTask] = useState('');
+  const [detail, setDetail] = useState<{ project: ProjectRow; summary: unknown } | null>(null);
+  const [detailForm, setDetailForm] = useState({ name: '', localRoot: '', defaultBranch: 'main' });
 
   const load = useCallback(async (archived: boolean) => {
     setLoading(true);
@@ -155,6 +156,44 @@ export function ProjectsPage() {
     }
   };
 
+  const openDetail = async (projectId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const [project, summary] = await Promise.all([
+        rpc<ProjectRow>('project.get', { projectId }),
+        rpc('project.summary', { projectId }),
+      ]);
+      setDetail({ project, summary });
+      setDetailForm({ name: project.name, localRoot: project.local_root ?? '', defaultBranch: project.default_branch ?? 'main' });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '项目详情加载失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveDetail = async () => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      await rpc('project.update', {
+        projectId: detail.project.id,
+        name: detailForm.name.trim(),
+        localRoot: detailForm.localRoot.trim(),
+        defaultBranch: detailForm.defaultBranch.trim(),
+      });
+      setDetail(null);
+      setNotice('项目设置已更新。');
+      await load(includeArchived);
+      notifyProjectsChanged();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '项目更新失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="sg-set-page sg-projects-page">
       <SettingsPageHeader
@@ -207,11 +246,8 @@ export function ProjectsPage() {
               <article className="sg-project-row" key={project.id}>
                 <span className="sg-project-icon"><IconFolder size={18} /></span>
                 <div><h3>{project.name}</h3><p>{project.local_root || '未绑定本地目录'}</p></div>
-                <div className="sg-project-meta">
-                  {project.gitlab_instance && project.gitlab_instance !== 'local' ? <span>{project.namespace}/{project.project}</span> : <span>仅本地</span>}
-                  <StatusPill kind={project.archived_at ? 'readonly' : 'ready'} label={project.archived_at ? '已归档' : '可用'} />
-                </div>
                 <button className="sg-btn sg-btn--sm" onClick={() => void archive(project, !project.archived_at)}>{project.archived_at ? '恢复' : '归档'}</button>
+                <button className="sg-btn sg-btn--sm" onClick={() => void openDetail(project.id)}>详情</button>
               </article>
             ))}
           </div>
@@ -228,9 +264,6 @@ export function ProjectsPage() {
               <article className="sg-project-row" key={task.id}>
                 <span className="sg-project-icon"><IconFolder size={18} /></span>
                 <div><h3>{task.title}</h3><p>{task.projectName}</p></div>
-                <div className="sg-project-meta">
-                  <StatusPill kind="readonly" label="已归档" />
-                </div>
                 <button className="sg-btn sg-btn--sm" disabled={restoringTask !== ''} onClick={() => void restoreTask(task)}>
                   {restoringTask === task.id ? '恢复中…' : '恢复'}
                 </button>
@@ -238,6 +271,20 @@ export function ProjectsPage() {
             ))}
           </div>
         </section>
+      ) : null}
+      {detail ? (
+        <div className="sg-drawer-backdrop" onClick={() => setDetail(null)}>
+          <div className="sg-drawer" role="dialog" aria-label="项目详情" onClick={(event) => event.stopPropagation()}>
+            <div className="sg-drawer-head"><strong>项目详情</strong><button className="sg-icon-btn" aria-label="关闭" onClick={() => setDetail(null)}>✕</button></div>
+            <div className="sg-setting-list">
+              <label className="sg-set-item"><span>名称</span><input className="sg-input" value={detailForm.name} onChange={(event) => setDetailForm({ ...detailForm, name: event.target.value })} /></label>
+              <label className="sg-set-item"><span>本地目录</span><input className="sg-input" value={detailForm.localRoot} onChange={(event) => setDetailForm({ ...detailForm, localRoot: event.target.value })} /></label>
+              <label className="sg-set-item"><span>默认分支</span><input className="sg-input" value={detailForm.defaultBranch} onChange={(event) => setDetailForm({ ...detailForm, defaultBranch: event.target.value })} /></label>
+            </div>
+            <pre style={{ maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{JSON.stringify(detail.summary, null, 2)}</pre>
+            <div className="sg-row"><button className="sg-btn sg-btn--primary" disabled={busy || !detailForm.name.trim()} onClick={() => void saveDetail()}>保存</button><button className="sg-btn" onClick={() => setDetail(null)}>取消</button></div>
+          </div>
+        </div>
       ) : null}
     </div>
   );

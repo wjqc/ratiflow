@@ -1183,17 +1183,19 @@ mod g5g6_tests {
     }
 
     fn set_flag(store: &Store, key: &str, value: bool) {
-        store
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO app_settings(scope, project_id, key, value_json, revision, updated_at)
-                     VALUES ('global', '', ?1, ?2, 1, ?3)
-                     ON CONFLICT(scope, project_id, key) DO UPDATE SET value_json=excluded.value_json",
-                    rusqlite::params![key, json!(value).to_string(), timefmt::now()],
-                )
-                .map_err(Into::into)
-            })
-            .unwrap();
+        sg_store::prefstore::write(store, |doc| -> Result<(), sg_store::Error> {
+            doc.insert(
+                sg_store::prefstore::composite("global", "", key),
+                sg_store::prefstore::PrefEntry {
+                    value: json!(value),
+                    revision: 1,
+                    updated_at: timefmt::now(),
+                    updated_by: "local".into(),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     fn write_manifest(store: &Store, root: &Path) -> String {

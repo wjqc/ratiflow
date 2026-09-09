@@ -10,9 +10,70 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 import { strict as assert } from 'node:assert';
+import { createServer } from 'node:http';
 
 const CORE = process.env.CORE_BIN ?? join(process.cwd(), 'target', 'release', 'ratiflow-core');
 const SERVER_DIR = '/tmp/sg-mcp-e2e';
+
+/// 远程 fake server（同进程 node:http）：
+/// - Streamable HTTP：POST /mcp，json 响应（initialize/tools/list/tools/call）。
+/// - legacy SSE：GET /sse 长连接（endpoint 事件 → /messages）；POST /messages
+///   受理 202 并把响应帧写回 SSE 连接。
+function startRemoteFakeServer() {
+  const sseResponses = new Set();
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8');
+      let msg = {};
+      try { msg = JSON.parse(body); } catch { /* ignore */ }
+      const method = msg.method ?? '';
+      const id = msg.id;
+      const sendJson = (status, obj) => {
+        const payload = JSON.stringify(obj);
+        res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
+        res.end(payload);
+      };
+      if (req.method === 'GET' && req.url === '/sse') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('event: endpoint\ndata: /messages\n\n');
+        sseResponses.add(res);
+        // 删除监听挂 res（连接关闭）——req 的 close 在无 body 请求 end 后即触发，
+        // 会把活跃通道误删（POST 时响应帧写不到任何流）。
+        res.on('close', () => sseResponses.delete(res));
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/messages') {
+        const result = method === 'initialize'
+          ? { serverInfo: { name: 'legacy-sse-e2e', version: '1' }, protocolVersion: '2024-11-05' }
+          : method === 'tools/list'
+            ? { tools: [{ name: 'sse_query', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }] }
+            : { content: [{ type: 'text', text: 'sse-done' }] };
+        sendJson(202, {});
+        const frame = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id, result })}\n\n`;
+        for (const s of sseResponses) s.write(frame);
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/mcp') {
+        if (method === 'notifications/initialized') return sendJson(202, {});
+        const result = method === 'initialize'
+          ? { serverInfo: { name: 'remote-e2e', version: '2' }, protocolVersion: '2025-03-26' }
+          : method === 'tools/list'
+            ? { tools: [
+                { name: 'remote_read', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+                { name: 'remote_send', inputSchema: { type: 'object' } },
+              ] }
+            : { content: [{ type: 'text', text: 'remote-invoked' }], isError: false };
+        return sendJson(200, { jsonrpc: '2.0', id, result });
+      }
+      sendJson(404, {});
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+  });
+}
 
 function ensureFakeServer() {
   mkdirSync(SERVER_DIR, { recursive: true });
@@ -174,6 +235,50 @@ async function main() {
     const toolsAfter = await client.call('mcp.toolsList', {});
     assert.ok(toolsAfter.items.every((t) => t.status === 'revoked' || t.status === 'superseded'));
     ok('撤销：server 与工具 revoked，注册侧明确失败');
+
+    // 6) 远程 MCP（streamable-http）：注册探针（url+静态头）→ 批准 → 活跃工具；
+    //    读模型 url 透出、静态头只透出名（值不进 UI）。
+    const remote = await startRemoteFakeServer();
+    try {
+      const r = await client.call('mcp.serverAdd', {
+        name: 'remote-svc', transport: 'streamable-http',
+        url: `http://127.0.0.1:${remote.port}/mcp`,
+        headers: { Authorization: 'Bearer e2e-secret' },
+      });
+      assert.equal(r.status, 'candidate', JSON.stringify(r));
+      assert.equal(r.serverInfo.name, 'remote-e2e');
+      assert.equal(r.transport, 'streamable-http');
+      assert.deepEqual(r.headerNames, ['Authorization']);
+      assert.ok(!JSON.stringify(r).includes('e2e-secret'), '静态头值不得进读模型');
+      const rApproved = await client.call('mcp.serverApprove', { serverId: r.serverId, decidedBy: 'admin' });
+      assert.equal(rApproved.status, 'active');
+      const rTools = await client.call('mcp.toolsList', {});
+      const rActive = rTools.items.filter((t) => t.status === 'active' && t.serverName === 'remote-svc');
+      assert.equal(rActive.length, 2, JSON.stringify(rActive));
+      ok('远程 streamable-http：探针→候选→批准→活跃（静态头值脱敏）');
+
+      // 7) 远程 MCP（legacy SSE）：GET 通道 + endpoint 事件 + 响应回流探针链。
+      const s = await client.call('mcp.serverAdd', {
+        name: 'sse-svc', transport: 'sse',
+        url: `http://127.0.0.1:${remote.port}/sse`,
+      });
+      assert.equal(s.status, 'candidate', JSON.stringify(s));
+      assert.equal(s.serverInfo.name, 'legacy-sse-e2e');
+      ok('远程 SSE：endpoint 事件 + 响应回流探针链');
+
+      // 8) 非法参数负例：transport/url 校验在探针前拒绝。
+      await assert.rejects(
+        () => client.call('mcp.serverAdd', { name: 'bad1', transport: 'https', url: 'https://x' }),
+        /sse\|streamable-http/,
+      );
+      await assert.rejects(
+        () => client.call('mcp.serverAdd', { name: 'bad2', transport: 'sse', url: 'file:///etc' }),
+        /http\/https/,
+      );
+      ok('远程注册负例：非法 transport/URL 探针前拒绝');
+    } finally {
+      remote.server.close();
+    }
 
     console.log('\n受控 MCP ToolProvider 协议 E2E 通过。');
   } finally {

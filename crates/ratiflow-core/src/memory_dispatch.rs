@@ -432,8 +432,8 @@ fn enqueue_capture(
     run_id: &str,
     idem_key: &str,
 ) -> RpcResult {
-    let result = mem::capture::start_job(store, project_id, run_id, idem_key, "", 0)
-        .map_err(mem_err)?;
+    let result =
+        mem::capture::start_job(store, project_id, run_id, idem_key, "", 0).map_err(mem_err)?;
     let job_id = result["jobId"].as_str().unwrap_or_default().to_string();
     if !job_id.is_empty() {
         let run_store = state.run_store.clone();
@@ -460,7 +460,14 @@ pub(crate) fn auto_capture_after_run(
     project_id: &str,
     run_id: &str,
 ) {
-    match mem::capture::start_job(run_store, project_id, run_id, &format!("auto::{run_id}"), "", 0) {
+    match mem::capture::start_job(
+        run_store,
+        project_id,
+        run_id,
+        &format!("auto::{run_id}"),
+        "",
+        0,
+    ) {
         Ok(result) => {
             let job_id = result["jobId"].as_str().unwrap_or_default().to_string();
             if !job_id.is_empty() {
@@ -567,10 +574,8 @@ mod auto_capture_tests {
     }
 
     fn open_store(tag: &str) -> Store {
-        let dir = std::env::temp_dir().join(format!(
-            "sg-auto-cap-{tag}-{}",
-            sg_store::ids::new_id("t")
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sg-auto-cap-{tag}-{}", sg_store::ids::new_id("t")));
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir, "test").unwrap()
     }
@@ -628,7 +633,13 @@ mod auto_capture_tests {
         let model = Arc::new(sg_agent::modelgw::Gateway::new(Box::new(FailingProvider)));
 
         // capture_mode=off（默认）：静默跳过，不产生 job。
-        auto_capture_after_run(&tokio::runtime::Handle::current(), &run_store, &model, "pj", &run_id);
+        auto_capture_after_run(
+            &tokio::runtime::Handle::current(),
+            &run_store,
+            &model,
+            "pj",
+            &run_id,
+        );
         assert_eq!(job_count(&run_store, &run_id), 0);
 
         // suggest：completed run 入队一条 pending job。
@@ -644,11 +655,23 @@ mod auto_capture_tests {
             &sg_store::ids::new_id("k"),
         )
         .unwrap();
-        auto_capture_after_run(&tokio::runtime::Handle::current(), &run_store, &model, "pj", &run_id);
+        auto_capture_after_run(
+            &tokio::runtime::Handle::current(),
+            &run_store,
+            &model,
+            "pj",
+            &run_id,
+        );
         assert_eq!(job_count(&run_store, &run_id), 1);
 
         // 同 run 重复触发（resume 后再次结束）：幂等键 auto::<run_id> 命中收据，不重复入队。
-        auto_capture_after_run(&tokio::runtime::Handle::current(), &run_store, &model, "pj", &run_id);
+        auto_capture_after_run(
+            &tokio::runtime::Handle::current(),
+            &run_store,
+            &model,
+            "pj",
+            &run_id,
+        );
         assert_eq!(job_count(&run_store, &run_id), 1);
     }
 }

@@ -146,7 +146,24 @@ export default function ApprovalsPage({ onDecided }: Props) {
       if (selected?.subject_type === 'gate_release') {
         // M2：关卡放行经独立放行事务（evaluate 只计算，推进只在这里原子发生）。
         await rpc('gate.decideRelease', { approvalId, decision, decidedBy: actor.trim(), reason: reason.trim() });
+      } else if (selected?.subject_type === 'mcp_import_probe' || selected?.subject_type === 'mcp_import_activate') {
+        // MCP 仓库导入有独立八态状态机；必须由领域入口同时推进审批与导入状态。
+        await rpc('mcp.importDecide', {
+          importId: selected.subject_id,
+          decision,
+          decidedBy: actor.trim(),
+          reason: reason.trim(),
+          idempotencyKey: `ui-mcp-import-approval-${crypto.randomUUID()}`,
+        });
+      } else if (selected?.subject_type === 'rollback') {
+        await rpc('rollback.decide', {
+          approvalId,
+          decision,
+          decidedBy: actor.trim(),
+          reason: reason.trim(),
+        });
       } else {
+        // Core 会再按 plan_revision / gate_skip / rework / manual_confirm 路由到领域状态机。
         await rpc('approval.decide', { approvalId, decision, decidedBy: actor.trim(), reason: reason.trim() });
       }
       setReason('');

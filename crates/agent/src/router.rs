@@ -1,5 +1,6 @@
 //! 阶段 Agent 选路（ADR-030 M4 / SG-AGT-003..005 / 蓝图 §8.1）。
-//! 优先级固定：任务显式覆盖 → 项目 activity 绑定 → 全局绑定 → 内置通用 Agent；
+//! 优先级固定：任务显式覆盖 → 任务级默认（"@ 指派"，workitem 冻结版本）→
+//! 项目 activity 绑定 → 全局绑定 → 内置通用 Agent；
 //! 校验 enabled + profile digest + 适配器健康 + 能力；fallback 分 generic / fail_closed；
 //! 每次选路冻结 requested/resolved/候选/原因/fallback 标记并写入 agent_selections。
 
@@ -32,11 +33,14 @@ pub struct ResolveContext<'a> {
     pub activity_key: &'a str,
     pub stage_activity_id: &'a str,
     pub task_override_version_id: Option<&'a str>,
+    /// 任务级默认 Agent（workitems.default_profile_version_id，"@ 指派"）：
+    /// 优先级介于任务显式覆盖与项目/全局绑定之间；None = 未指派。
+    pub workitem_default_version_id: Option<&'a str>,
     pub required_capabilities: &'a [String],
     pub persist: bool,
 }
 
-/// 四级候选：task_override → project_binding → global_binding → builtin_generic。
+/// 五级候选：task_override → workitem_default → project_binding → global_binding → builtin_generic。
 pub fn resolve(store: &Store, ctx: &ResolveContext<'_>) -> Result<Selection, Error> {
     let ResolveContext {
         project_id,
@@ -44,6 +48,7 @@ pub fn resolve(store: &Store, ctx: &ResolveContext<'_>) -> Result<Selection, Err
         activity_key,
         stage_activity_id,
         task_override_version_id,
+        workitem_default_version_id,
         required_capabilities,
         persist,
     } = *ctx;
@@ -54,6 +59,7 @@ pub fn resolve(store: &Store, ctx: &ResolveContext<'_>) -> Result<Selection, Err
         activity_key,
         stage_activity_id,
         task_override_version_id,
+        workitem_default_version_id,
         required_capabilities,
         persist,
     )
@@ -67,6 +73,7 @@ fn resolve_inner(
     activity_key: &str,
     stage_activity_id: &str,
     task_override_version_id: Option<&str>,
+    workitem_default_version_id: Option<&str>,
     required_capabilities: &[String],
     persist: bool,
 ) -> Result<Selection, Error> {
@@ -93,6 +100,32 @@ fn resolve_inner(
             );
         }
         fallback_mode_of_failed = Some("generic".into());
+    }
+
+    // 1.5 任务级默认（"@ 指派"，创建/更新时冻结的版本）：候选不可用不阻断——
+    //     记入报告后继续走绑定链（指派是偏好不是硬约束；与 fail_closed 语义区分）。
+    if let Some(version_id) = workitem_default_version_id.filter(|v| !v.is_empty()) {
+        let outcome = check_candidate(store, version_id, required_capabilities);
+        let ok = outcome.is_ok();
+        report.push(candidate("workitem_default", version_id, &outcome));
+        if ok {
+            let had_failure = task_override_version_id.is_some();
+            return commit(
+                store,
+                stage_activity_id,
+                Some(version_id),
+                version_id,
+                "workitem_default",
+                had_failure,
+                if had_failure {
+                    "task_override_failed"
+                } else {
+                    ""
+                },
+                report,
+                persist,
+            );
+        }
     }
 
     // 2/3. 项目绑定 → 全局绑定（priority 降序）。
@@ -285,6 +318,7 @@ pub fn resolve_preview(
         activity_key,
         "preview",
         None,
+        None,
         required_capabilities,
         false,
     ) {
@@ -369,6 +403,7 @@ mod tests {
                 activity_key: "code_analysis",
                 stage_activity_id: "act_1",
                 task_override_version_id: None,
+                workitem_default_version_id: None,
                 required_capabilities: &[],
                 persist: true,
             },
@@ -405,6 +440,7 @@ mod tests {
                 activity_key: "frontend",
                 stage_activity_id: "act_1",
                 task_override_version_id: None,
+                workitem_default_version_id: None,
                 required_capabilities: &[],
                 persist: true,
             },
@@ -413,6 +449,118 @@ mod tests {
         assert_eq!(sel.source_scope, "project_binding");
         assert!(!sel.fallback_used);
         assert_eq!(sel.resolved_profile_version_id, version);
+    }
+
+    #[test]
+    fn workitem_default_wins_over_bindings_but_not_task_override() {
+        let s = setup();
+        let assigned = make_profile(&s, "被指派分身", "local_harness", &[]);
+        let bound = make_profile(&s, "绑定分身", "local_harness", &[]);
+        let task_override = make_profile(&s, "关卡显式分身", "local_harness", &[]);
+        profile::set_binding(
+            &s,
+            Some("pj"),
+            "development",
+            "frontend",
+            &bound,
+            "generic",
+            0,
+        )
+        .unwrap();
+        // 任务级默认（"@ 指派"）健康 → 压过项目绑定。
+        let sel = resolve(
+            &s,
+            &ResolveContext {
+                project_id: "pj",
+                gate: "development",
+                activity_key: "frontend",
+                stage_activity_id: "act_1",
+                task_override_version_id: None,
+                workitem_default_version_id: Some(&assigned),
+                required_capabilities: &[],
+                persist: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(sel.source_scope, "workitem_default");
+        assert!(!sel.fallback_used);
+        assert_eq!(sel.resolved_profile_version_id, assigned);
+        assert_eq!(
+            sel.requested_profile_version_id.as_deref(),
+            Some(assigned.as_str())
+        );
+        // 任务显式覆盖（关卡级）> 任务默认。
+        let sel = resolve(
+            &s,
+            &ResolveContext {
+                project_id: "pj",
+                gate: "development",
+                activity_key: "frontend",
+                stage_activity_id: "act_2",
+                task_override_version_id: Some(&task_override),
+                workitem_default_version_id: Some(&assigned),
+                required_capabilities: &[],
+                persist: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(sel.source_scope, "task_override");
+        assert_eq!(sel.resolved_profile_version_id, task_override);
+    }
+
+    #[test]
+    fn workitem_default_unhealthy_falls_through_to_bindings() {
+        let s = setup();
+        let assigned_profile =
+            profile::create_profile(&s, Some("pj"), "指派但禁用", "local_harness").unwrap();
+        profile::set_profile_enabled(&s, &assigned_profile.id, false).unwrap();
+        let assigned = profile::create_version(
+            &s,
+            &assigned_profile.id,
+            "persona",
+            "sop",
+            &[],
+            "",
+            "{}",
+            "{}",
+        )
+        .unwrap()
+        .id;
+        let bound = make_profile(&s, "绑定分身", "local_harness", &[]);
+        profile::set_binding(
+            &s,
+            Some("pj"),
+            "development",
+            "frontend",
+            &bound,
+            "generic",
+            0,
+        )
+        .unwrap();
+        // 指派是偏好不是硬约束：候选不可用 → 记报告后继续绑定链（不拒启）。
+        let sel = resolve(
+            &s,
+            &ResolveContext {
+                project_id: "pj",
+                gate: "development",
+                activity_key: "frontend",
+                stage_activity_id: "act_1",
+                task_override_version_id: None,
+                workitem_default_version_id: Some(&assigned),
+                required_capabilities: &[],
+                persist: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(sel.source_scope, "project_binding");
+        assert_eq!(sel.resolved_profile_version_id, bound);
+        assert!(
+            sel.candidate_report
+                .to_string()
+                .contains("workitem_default"),
+            "失败候选应留痕：{}",
+            sel.candidate_report
+        );
     }
 
     #[test]
@@ -438,6 +586,7 @@ mod tests {
                 activity_key: "e2e_testing",
                 stage_activity_id: "act_2",
                 task_override_version_id: None,
+                workitem_default_version_id: None,
                 required_capabilities: &[],
                 persist: true,
             },
@@ -483,6 +632,7 @@ mod tests {
                 activity_key: "e2e_testing",
                 stage_activity_id: "act_3",
                 task_override_version_id: None,
+                workitem_default_version_id: None,
                 required_capabilities: &[],
                 persist: true,
             },
@@ -513,6 +663,7 @@ mod tests {
                 activity_key: "backend",
                 stage_activity_id: "act_4",
                 task_override_version_id: None,
+                workitem_default_version_id: None,
                 required_capabilities: &["backend".to_string()],
                 persist: true,
             },
@@ -549,6 +700,7 @@ mod tests {
                 activity_key: "frontend",
                 stage_activity_id: "act_5",
                 task_override_version_id: Some(&over),
+                workitem_default_version_id: None,
                 required_capabilities: &[],
                 persist: true,
             },

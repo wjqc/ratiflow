@@ -189,26 +189,6 @@ export interface SettingsSummary {
   recentChanges: Array<{ key: string; revision: number; updatedAt: string; updatedBy: string }>;
 }
 
-/** update.check / update.status。 */
-export interface UpdateCheckInfo {
-  channel: string;
-  autoCheck: boolean;
-  autoDownload: boolean;
-  currentVersion: string;
-  latestVersion: string;
-  updateAvailable: boolean;
-  note: string;
-}
-
-export interface UpdateStatusInfo {
-  desktop: string;
-  core: string;
-  protocol: number;
-  schema: number;
-  signatureVerified: boolean;
-  note: string;
-}
-
 // --- S12 项目记忆（ADR-032 / 实施方案 v1.0 §3/§9.1；与 contracts fixtures 对应） ---
 
 export type MemoryKind = 'decision' | 'convention' | 'fact' | 'lesson' | 'preference';

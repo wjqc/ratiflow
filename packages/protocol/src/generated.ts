@@ -28,6 +28,7 @@ export type RpcMethodName =
   | 'workitem.get'
   | 'workitem.archive'
   | 'workitem.create'
+  | 'workitem.updateRunDefaults'
   | 'workitem.progress'
   | 'workitem.documents'
   | 'workitem.getDocument'
@@ -285,6 +286,7 @@ export type RpcMethodName =
   | 'goal.autoReleaseCheck'
   | 'notification.list'
   | 'skill.importFromRegistry'
+  | 'skill.importDirectory'
   | 'skill.marketList'
   | 'skill.marketImport'
   | 'skill.marketSourceSave'
@@ -326,6 +328,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'workitem.get',
   'workitem.archive',
   'workitem.create',
+  'workitem.updateRunDefaults',
   'workitem.progress',
   'workitem.documents',
   'workitem.getDocument',
@@ -583,6 +586,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'goal.autoReleaseCheck',
   'notification.list',
   'skill.importFromRegistry',
+  'skill.importDirectory',
   'skill.marketList',
   'skill.marketImport',
   'skill.marketSourceSave',
@@ -855,6 +859,14 @@ export interface WorkitemCreateParams {
   gitlabIssueIid?: string;
   labels?: unknown[];
   templateId?: string;
+  agentProfileVersionId?: string;
+  skillVersionIds?: unknown;
+}
+
+export interface WorkitemUpdateRunDefaultsParams {
+  workItemId: string;
+  agentProfileVersionId?: string;
+  skillVersionIds?: unknown;
 }
 
 export interface WorkitemProgressParams {
@@ -935,6 +947,8 @@ export interface AgentStartParams {
   toolAllowlist?: unknown[];
   budget?: unknown;
   taskId?: string;
+  skillVersionIds?: unknown;
+  agentProfileVersionId?: string;
 }
 
 export interface AgentGetParams {
@@ -2230,6 +2244,11 @@ export type NotificationListParams = Record<string, never>;
 export interface SkillImportFromRegistryParams {
   repoUrl: string;
   pinSha: string;
+}
+
+export interface SkillImportDirectoryParams {
+  path: string;
+  subdirs?: unknown;
 }
 
 export type SkillMarketListParams = Record<string, never>;
