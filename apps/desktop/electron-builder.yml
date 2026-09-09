@@ -10,8 +10,12 @@ extraResources:
     to: ratiflow-core
 mac:
   category: public.app-category.developer-tools
-  target: dir
+  target:
+    - dir
+    - dmg
   icon: icon.icns
+dmg:
+  artifactName: Ratiflow-${version}-${arch}.dmg
 win:
   icon: icon.ico
 linux:

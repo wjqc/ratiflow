@@ -123,6 +123,9 @@ run: build ## Launch desktop app
 package: build ## Package desktop app (dir, unsigned)
 	npm --workspace @ratiflow/desktop run package
 
+package-dmg: build ## Package macOS dmg (unsigned, for Releases)
+	npm --workspace @ratiflow/desktop run package:dmg
+
 ci: fmt-check clippy codegen-drift typecheck test test-contract rdws-manifest e2e test-electron ## Local CI sequence（平台清单见 e2e 目标输出）
 
 clean: ## Clean build outputs

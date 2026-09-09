@@ -2,7 +2,7 @@
   "productName": "Ratiflow",
   "name": "@ratiflow/desktop",
   "private": true,
-  "version": "3.0.0",
+  "version": "3.1.0",
   "main": "dist/main/main.js",
   "scripts": {
     "build:renderer": "vite build",
@@ -13,6 +13,7 @@
     "start": "node scripts/start-desktop.mjs",
     "start:raw": "npm run build && electron .",
     "package": "npm run build && electron-builder --dir",
+    "package:dmg": "npm run build && electron-builder --mac dmg",
     "build:preload": "tsc -p tsconfig.preload.json",
     "test:e2e": "npm run build && playwright test"
   },
