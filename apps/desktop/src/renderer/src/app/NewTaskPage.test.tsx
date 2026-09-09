@@ -238,6 +238,47 @@ describe('新建任务', () => {
     );
   });
 
+  it('聚焦空输入框弹触发提示菜单，点选技能行直接唤起浮层', async () => {
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'skill.activeList') {
+        return Promise.resolve({
+          items: [{ skillId: 'skill_a', name: 'side-effect-safety', versionId: 'skv_a', versionNo: 1 }],
+        });
+      }
+      if (method === 'workitem.create') return Promise.resolve({ id: 'wi_new' });
+      if (method === 'stage.startActivity') return Promise.resolve({ runId: 'run_prd' });
+      return Promise.resolve({});
+    });
+    render(
+      <NewTaskPage
+        projectId="pj_1"
+        projects={[{ id: 'pj_1', name: 'Ratiflow' }]}
+        onCreated={onCreated}
+        onWorkspaceChanged={() => undefined}
+        onOpenRemote={() => undefined}
+        onBack={() => undefined}
+      />,
+    );
+    // placeholder 不再携带触发提示。
+    expect(screen.getByPlaceholderText('描述你的需求…')).toBeInTheDocument();
+    const input = screen.getByLabelText('需求描述');
+    // 聚焦空输入框 → 提示菜单（附件 / @ Agent / / 技能）。
+    fireEvent.focus(input);
+    const menu = await screen.findByRole('menu', { name: '输入提示' });
+    expect(menu).toBeInTheDocument();
+    expect(screen.getAllByRole('menuitem').length).toBe(3);
+    // 点选「使用 / 选择技能」→ 插入触发符并唤起技能浮层，菜单关闭。
+    fireEvent.mouseDown(screen.getByRole('menuitem', { name: /选择技能/ }));
+    await screen.findByRole('listbox', { name: '快捷选择' });
+    expect(screen.queryByRole('menu', { name: '输入提示' })).not.toBeInTheDocument();
+    expect(input).toHaveValue('/');
+    // 输入文字后菜单不再出现（仅空输入聚焦时提示）。
+    fireEvent.change(input, { target: { value: '支付网关重构' } });
+    fireEvent.blur(input);
+    fireEvent.focus(input);
+    expect(screen.queryByRole('menu', { name: '输入提示' })).not.toBeInTheDocument();
+  });
+
   it('Escape 关闭浮层不拾取；正文中的普通 "/" 不误触发', async () => {
     rpcMock.mockImplementation((method: string) => {
       if (method === 'skill.activeList') {

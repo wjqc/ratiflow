@@ -1937,6 +1937,49 @@ button.sg-step { cursor: pointer; }
 .sg-quick-palette-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sg-quick-palette-hint { font-size: 11px; color: var(--sg-text-secondary); flex-shrink: 0; }
 .sg-quick-palette-empty { padding: 10px 12px; font-size: 13px; color: var(--sg-text-secondary); }
+
+/* 聚焦空输入框时的触发提示菜单行（附件 / @ Agent / / 技能） */
+.sg-quick-hint { padding: 4px; }
+.sg-quick-hint-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 7px 10px;
+  border-radius: var(--sg-radius-sm);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  color: var(--sg-text-primary);
+  text-align: left;
+}
+.sg-quick-hint-row:hover { background: var(--sg-bg-subtle); }
+.sg-quick-hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 1px solid var(--sg-border-default);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--sg-text-secondary);
+}
+.sg-quick-kbd {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 0 5px;
+  border: 1px solid var(--sg-border-default);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--sg-action-primary);
+  background: var(--sg-bg-subtle);
+}
 .sg-composer-box {
   border: 1px solid var(--sg-border-default);
   border-radius: var(--sg-radius-md);
@@ -2899,6 +2942,20 @@ button.sg-step { cursor: pointer; }
 .sg-setting-list {
   margin: -16px;
 }
+
+/* 技能市场（市场 tab）：源卡片 → 扁平技能行（名称 | 描述 | 开关）。 */
+.sg-mkt-source { border: 1px solid var(--sg-border-default); border-radius: 12px; background: var(--sg-reference-row, var(--sg-bg-subtle)); overflow: hidden; }
+.sg-mkt-source + .sg-mkt-source { margin-top: 16px; }
+.sg-mkt-source-head { display: grid; gap: 3px; padding: 14px 20px 12px; }
+.sg-mkt-source-name { margin: 0; font-size: 14px; font-weight: 600; color: var(--sg-text-primary); }
+.sg-mkt-source-desc { color: var(--sg-text-secondary); font-size: 12px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sg-mkt-note { padding: 10px 20px 12px; color: var(--sg-text-secondary); font-size: 12px; }
+.sg-mkt-skills { border-top: 1px solid var(--sg-border-default); }
+.sg-mkt-skill { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; align-items: center; gap: 16px; min-height: 46px; padding: 8px 20px 8px 32px; }
+.sg-mkt-skill + .sg-mkt-skill { border-top: 1px solid var(--sg-border-default); }
+.sg-mkt-skill-name { font-size: 12.5px; font-weight: 600; color: var(--sg-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sg-mkt-skill-desc { color: var(--sg-text-secondary); font-size: 12px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sg-mkt-skill-control { display: flex; align-items: center; justify-content: flex-end; }
 
 /* 行式设置项：标题+描述在左、控件右对齐；相邻行自动加分隔线。 */
 .sg-set-item {

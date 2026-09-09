@@ -14,7 +14,7 @@ import {
   IconText,
 } from '../components/Icons';
 import { ModelPicker } from './ModelPicker';
-import { QuickPalette } from './QuickPalette';
+import { QuickPalette, TriggerHintMenu } from './QuickPalette';
 import type { PaletteItem } from './QuickPalette';
 import {
   friendlyAgentError,
@@ -105,6 +105,8 @@ export default function NewTaskPage({
   const [picker, setPicker] = useState<{ kind: 'skill' | 'agent'; start: number } | null>(null);
   const [pickerQuery, setPickerQuery] = useState('');
   const [pickerIndex, setPickerIndex] = useState(0);
+  // 聚焦空输入框时的触发提示菜单（附件 / @ Agent / / 技能）：点选直接唤起。
+  const [hintOpen, setHintOpen] = useState(false);
   const [skillOptions, setSkillOptions] = useState<Array<PaletteItem & SelectedSkill>>([]);
   const [agentOptions, setAgentOptions] = useState<Array<PaletteItem & SelectedAgent>>([]);
   const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
@@ -266,9 +268,45 @@ export default function NewTaskPage({
     setPickerIndex(0);
   };
 
+  // 菜单行点选：把触发符插入正文末尾并直接唤起对应浮层（@ Agent / / 技能）。
+  const insertTrigger = (trigger: '/' | '@') => {
+    const base = description.trimEnd();
+    const text = base ? `${base} ${trigger}` : trigger;
+    setDescription(text);
+    setHintOpen(false);
+    setPicker({ kind: trigger === '/' ? 'skill' : 'agent', start: text.length - 1 });
+    setPickerQuery('');
+    setPickerIndex(0);
+  };
+
+  const hintRows = [
+    {
+      key: 'attach',
+      symbol: '＋',
+      label: '添加附件（图片或文档）',
+      onPick: () => {
+        setHintOpen(false);
+        void attachFromMenu();
+      },
+    },
+    {
+      key: 'agent',
+      symbol: '@',
+      label: <>使用 <kbd className="sg-quick-kbd">@</kbd> 指派 Agent</>,
+      onPick: () => insertTrigger('@'),
+    },
+    {
+      key: 'skill',
+      symbol: '/',
+      label: <>使用 <kbd className="sg-quick-kbd">/</kbd> 选择技能</>,
+      onPick: () => insertTrigger('/'),
+    },
+  ];
+
   // 触发检测：行首/空白后的 "/" 或 "@" 开启浮层；已开启时随输入过滤，遇空白/删除触发符关闭。
   const onDescriptionChange = (value: string, caret: number) => {
     setDescription(value);
+    if (value) setHintOpen(false);
     if (picker) {
       if (caret <= picker.start) {
         closePicker();
@@ -288,6 +326,7 @@ export default function NewTaskPage({
     if (trigger !== '/' && trigger !== '@') return;
     const prev = caret >= 2 ? value[caret - 2] : '';
     if (caret > 1 && prev !== ' ' && prev !== '\n') return;
+    setHintOpen(false);
     setPicker({ kind: trigger === '/' ? 'skill' : 'agent', start: caret - 1 });
     setPickerQuery('');
     setPickerIndex(0);
@@ -315,6 +354,11 @@ export default function NewTaskPage({
   };
 
   const onDescriptionKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (hintOpen && event.key === 'Escape') {
+      event.preventDefault();
+      setHintOpen(false);
+      return;
+    }
     if (!picker) return;
     if (event.key === 'ArrowDown') {
       event.preventDefault();
@@ -589,9 +633,13 @@ export default function NewTaskPage({
               placeholder={
                 mode === 'issue'
                   ? '补充说明（可选）…'
-                  : '描述你的需求…（/ 选技能 · @ 指 Agent）'
+                  : '描述你的需求…'
               }
               value={description}
+              onFocus={() => {
+                if (!description) setHintOpen(true);
+              }}
+              onBlur={() => setHintOpen(false)}
               onChange={(e) => {
                 // jsdom 合成事件不携带光标位（selectionStart 恒 0）：非空文本回退按末位处理，
                 // 真实浏览器走真实光标。
@@ -602,6 +650,7 @@ export default function NewTaskPage({
               onKeyDown={onDescriptionKeyDown}
               aria-label="需求描述"
             />
+            {hintOpen && !picker ? <TriggerHintMenu rows={hintRows} /> : null}
             {picker ? (
               <QuickPalette
                 items={pickerItems}
