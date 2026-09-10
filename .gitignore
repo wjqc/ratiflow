@@ -31,3 +31,4 @@ __pycache__/
 
 # 会话工具本地状态
 /.zcode/
+.codegraph/

@@ -64,6 +64,17 @@ describe('设置页接线', () => {
               { day: '2026-09-03', tokensIn: 8000, totalTokens: 10000, cachedTokens: 3200, cacheHitRatio: 0.4 },
             ],
           });
+        // 治理总览四指标：形状与 workflow::metrics 输出对齐（缺失字段会在渲染层崩溃）。
+        case 'metrics.overview':
+          return ok({
+            windowDays: 30,
+            orphanRate: { totalNodes: 3, orphanCount: 1, rate: 0.33, insufficientData: false },
+            loopRate: { completedReworks: 2, reworkedWorkitems: 1, workitemsWithReleases: 2, averageReworkCount: 1.5, reworkWorkitemRate: 0.5, insufficientData: false },
+            approvalLayers: { dimensions: ['subjectType', 'risk'], layers: [{ subjectType: 'workitem', risk: 'medium', approved: 3, rejected: 1, pending: 0, expired: 0, changesRequested: 0, passRate: 0.75, sample: 4, insufficientData: false, rubberStampSuspect: false }] },
+            aiSuggestionAdoption: { decided: 4, accepted: 2, rate: 0.5, insufficientData: false },
+          });
+        case 'triage.list':
+          return ok({ items: [], knowledgeBlocked: [] });
         default: return ok({});
       }
     });

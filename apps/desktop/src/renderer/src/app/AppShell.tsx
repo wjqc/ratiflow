@@ -365,16 +365,15 @@ export default function AppShell() {
           onBack={() => navigate(lastWorkspaceRoute.current)}
         />
       ) : sidebarCollapsed ? (
-        <div className="sg-sidebar-rail">
-          <button
-            className="sg-icon-btn"
-            title="展开菜单栏"
-            aria-label="展开菜单栏"
-            onClick={() => setSidebarCollapsed(false)}
-          >
-            <IconPanelLeft size={15} />
-          </button>
-        </div>
+        <button
+          className="sg-icon-btn sg-sidebar-expand"
+          title="展开菜单栏"
+          aria-label="展开菜单栏"
+          aria-expanded={false}
+          onClick={() => setSidebarCollapsed(false)}
+        >
+          <IconPanelLeft size={15} />
+        </button>
       ) : (
         <ProjectSidebar
           projects={projects}

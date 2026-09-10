@@ -25,6 +25,8 @@ import {
   IconX,
 } from '../components/Icons';
 import { ModelPicker } from './ModelPicker';
+import { QuickPalette } from './QuickPalette';
+import { useComposerAssignments } from './useComposerAssignments';
 import RecoveryPanel from './RecoveryPanel';
 import TaskGovernancePanel from './TaskGovernancePanel';
 import TracePanel from './TracePanel';
@@ -455,7 +457,7 @@ export function Workbench({
   );
 
   return (
-    <div className="sg-workbench">
+    <div className={`sg-workbench${view === 'timeline' && !summaryHidden ? ' sg-workbench--summary-visible' : ''}`}>
       {view === 'timeline' ? (
         <>
         <div className="sg-workbench-center">
@@ -478,6 +480,8 @@ export function Workbench({
                 className={`sg-icon-btn${summaryHidden ? '' : ' sg-icon-btn--active'}`}
                 title={summaryHidden ? '显示关卡摘要' : '隐藏关卡摘要'}
                 aria-label="关卡摘要"
+                aria-expanded={!summaryHidden}
+                aria-controls="gate-summary-panel"
                 onClick={() => setSummaryHidden((value) => !value)}
               >
                 <IconTarget size={15} />
@@ -553,7 +557,7 @@ export function Workbench({
           )}
         </div>
         {!summaryHidden ? (
-          <div className="sg-gate-summary">
+          <aside className="sg-gate-summary-float" id="gate-summary-panel" aria-label="关卡摘要面板">
             <GateDetailFloat
               gate={currentGate}
               stagesByGate={stagesByGate}
@@ -561,7 +565,7 @@ export function Workbench({
               onOpenGate={() => setView('gate')}
               onHide={() => setSummaryHidden(true)}
             />
-          </div>
+          </aside>
         ) : null}
         </>
       ) : (
@@ -959,7 +963,7 @@ function GateDetailFloat({
         <button
           className="sg-icon-btn"
           onClick={onHide}
-          title="隐藏关卡摘要（…菜单可恢复）"
+          title="隐藏关卡摘要"
           aria-label="隐藏关卡摘要"
         >
           <IconX size={13} />
@@ -1400,11 +1404,12 @@ function Composer({
   onOpenModels: () => void;
 }) {
   const [text, setText] = useState('');
+  const assignments = useComposerAssignments(text, setText);
   const [busy, setBusy] = useState(false);
   const [runId, setRunId] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  // “+”添加菜单：附件导入与 @ 知识来源引用（均接真实 RPC）。
+  // “+”添加菜单：附件导入与 # 知识来源引用（均接真实 RPC）。
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [addMenuView, setAddMenuView] = useState<'root' | 'context'>('root');
   const [contextSources, setContextSources] = useState<{ id: string; name: string }[]>([]);
@@ -1438,7 +1443,8 @@ function Composer({
     }
   };
 
-  // @ 上下文：列出项目知识来源，点选后以 @名称 写入输入，随消息一起交给 Agent 检索。
+  // 引用知识源：列出项目知识来源，点选后以 #名称 写入输入，随消息一起交给 Agent 检索。
+  // 符号约定（2026-09-09 统一）：@ 全站指派 Agent；知识源提及用 #，避免一号两义。
   const openContextMenu = async () => {
     setAddMenuView('context');
     try {
@@ -1451,7 +1457,7 @@ function Composer({
 
   const mentionSource = (name: string) => {
     setAddMenuOpen(false);
-    setText((prev) => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}@${name} `);
+    setText((prev) => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}#${name} `);
   };
 
   // 长任务可取消（推理型模型一次生成可达数分钟）：调 agent.cancel，
@@ -1472,6 +1478,7 @@ function Composer({
     setError('');
     setNotice(currentGate === 'requirements' ? '正在根据补充说明起草 PRD…' : 'Agent 正在处理…');
     try {
+      await assignments.apply(workItemId);
       if (currentGate === 'requirements') {
         const id = await startPrdDraft(
           workItemId,
@@ -1543,6 +1550,17 @@ function Composer({
         </div>
       ) : null}
       <div className="sg-composer-main">
+        {assignments.agent || assignments.skills.length ? (
+          <div className="sg-composer-assignments" aria-label="已选 Agent 和技能">
+            {assignments.agent ? <span className="sg-composer-chip">@ {assignments.agent.label}
+              <button className="sg-icon-btn" disabled={busy} aria-label={`移除指派 Agent ${assignments.agent.label}`} onClick={assignments.removeAgent}><IconX size={12} /></button>
+            </span> : null}
+            {assignments.skills.map((skill) => <span className="sg-composer-chip" key={skill.versionId}>/ {skill.label}
+              <button className="sg-icon-btn" disabled={busy} aria-label={`移除技能 ${skill.label}`} onClick={() => assignments.removeSkill(skill.versionId)}><IconX size={12} /></button>
+            </span>)}
+          </div>
+        ) : null}
+        {assignments.picker ? <QuickPalette items={assignments.items} highlight={assignments.highlight} emptyText={assignments.emptyText} onPick={assignments.pick} /> : null}
         {addStatus ? (
           <div className="sg-compose-add-status" role="status">
             <span>{addStatus}</span>
@@ -1553,11 +1571,15 @@ function Composer({
         ) : null}
         <textarea
           className="sg-composer-input"
+          ref={assignments.inputRef}
+          readOnly={busy}
           placeholder="提出后续修改要求"
           rows={2}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => { setAddMenuOpen(false); assignments.change(e.target.value, e.target.selectionStart); }}
+          onBlur={assignments.close}
           onKeyDown={(e) => {
+            if (assignments.onKeyDown(e)) return;
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               void submit();
@@ -1573,7 +1595,9 @@ function Composer({
                 title="添加"
                 aria-label="添加"
                 aria-expanded={addMenuOpen}
+                disabled={busy}
                 onClick={() => {
+                  assignments.close();
                   setAddMenuOpen((v) => {
                     if (!v) setAddMenuView('root');
                     return !v;
@@ -1594,13 +1618,19 @@ function Composer({
                         <IconPaperclip size={14} />
                         <span>添加附件</span>
                       </button>
+                      <button className="sg-compose-add-item" role="menuitem" onClick={() => { setAddMenuOpen(false); assignments.open('agent'); }}>
+                        <span aria-hidden="true">@</span><span>指派 Agent</span>
+                      </button>
+                      <button className="sg-compose-add-item" role="menuitem" onClick={() => { setAddMenuOpen(false); assignments.open('skill'); }}>
+                        <span aria-hidden="true">/</span><span>选择技能</span>
+                      </button>
                       <button
                         className="sg-compose-add-item"
                         role="menuitem"
                         onClick={() => void openContextMenu()}
                       >
                         <IconText size={14} />
-                        <span>使用 @ 添加上下文</span>
+                        <span>引用知识源（#）</span>
                       </button>
                     </>
                   ) : (
@@ -1619,7 +1649,7 @@ function Composer({
                             onClick={() => mentionSource(source.name)}
                           >
                             <IconBook size={14} />
-                            <span>@{source.name}</span>
+                            <span>#{source.name}</span>
                           </button>
                         ))
                       )}
