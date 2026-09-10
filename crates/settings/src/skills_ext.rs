@@ -307,13 +307,40 @@ pub fn set_enabled(
 }
 
 pub fn remove(store: &Store, id: &str, expected_revision: i64) -> SettingsResult<()> {
+    // 硬删除 = 连同版本、绑定与运行引用一并清除，依赖序执行避免 FK 部分删除：
+    // skill_versions/bindings_v2/agent_run_skills 均无 ON DELETE 级联（历史迁移未带）。
     let deleted = store
         .with_conn(|conn| {
-            conn.execute(
-                "DELETE FROM skills WHERE id=?1 AND revision=?2",
-                rusqlite::params![id, expected_revision],
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(sg_store::Error::from)?;
+            tx.execute(
+                "DELETE FROM skill_bindings_v2 WHERE skill_version_id IN (
+                    SELECT id FROM skill_versions WHERE skill_id = ?1
+                )",
+                rusqlite::params![id],
             )
-            .map_err(Error::from)
+            .map_err(sg_store::Error::from)?;
+            tx.execute(
+                "DELETE FROM agent_run_skills WHERE skill_version_id IN (
+                    SELECT id FROM skill_versions WHERE skill_id = ?1
+                )",
+                rusqlite::params![id],
+            )
+            .map_err(sg_store::Error::from)?;
+            tx.execute(
+                "DELETE FROM skill_versions WHERE skill_id = ?1",
+                rusqlite::params![id],
+            )
+            .map_err(sg_store::Error::from)?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM skills WHERE id=?1 AND revision=?2",
+                    rusqlite::params![id, expected_revision],
+                )
+                .map_err(sg_store::Error::from)?;
+            tx.commit().map_err(sg_store::Error::from)?;
+            Ok(deleted)
         })
         .map_err(store_err)?;
     if deleted == 0 {
@@ -550,6 +577,38 @@ mod tests {
         // 删除（CAS）→ 不存在。
         remove(&store, &created.id, updated.revision).unwrap();
         assert!(get(&store, &created.id).is_err());
+    }
+
+    /// 删除必须连带版本与绑定：两张表均无 ON DELETE 级联，
+    /// 市场导入技能（必带 draft 版本）此前删除直接 FOREIGN KEY 失败。
+    #[test]
+    fn remove_cascades_versions_and_bindings() {
+        let store = setup();
+        let skill = create(&store, "market-import", "", "市场导入正文", "market", None).unwrap();
+        let v1 = create_version(&store, &skill.id, "v1 正文", "第一版").unwrap();
+        // 全局绑定（profile_version_id = NULL）。
+        let bid = bind_version(&store, &v1.id, None).unwrap();
+        remove(&store, &skill.id, skill.revision).unwrap();
+        assert!(get(&store, &skill.id).is_err());
+        let (versions, bindings): (i64, i64) = store
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM skill_versions WHERE skill_id=?1",
+                        [&skill.id],
+                        |r| r.get(0),
+                    )
+                    .unwrap(),
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM skill_bindings_v2 WHERE id=?1",
+                        [bid],
+                        |r| r.get(0),
+                    )
+                    .unwrap(),
+                ))
+            })
+            .unwrap();
+        assert_eq!((versions, bindings), (0, 0), "版本与绑定必须一并清除");
     }
 
     /// 非法名与空正文拒绝；秘密正文被 objects 总闸拦截。
