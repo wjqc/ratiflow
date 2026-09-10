@@ -71,6 +71,65 @@ interface MarketSourceBrowse {
   error: string;
 }
 
+// 市场技能本地缓存（localStorage，仅存本设备）：打开 tab 立即出上次的技能列表，
+// 后台刷新完成后回写。存扁平条目 + 来源 id/名（安装开关按 sourceId 走 marketImport）。
+interface MarketCacheEntry {
+  name: string;
+  dirName: string;
+  description: string;
+  plugin: string;
+  version: string;
+  sourceId: string;
+  sourceName: string;
+}
+
+interface MarketCache {
+  cachedAt: number;
+  items: MarketCacheEntry[];
+}
+
+const MARKET_CACHE_KEY = 'ratiflow.skill.market.v1';
+const MARKET_CACHE_MAX = 500;
+
+function loadMarketCache(): MarketCache {
+  try {
+    const raw = localStorage.getItem(MARKET_CACHE_KEY);
+    if (!raw) return { cachedAt: 0, items: [] };
+    const parsed = JSON.parse(raw) as MarketCache;
+    if (!Array.isArray(parsed.items)) return { cachedAt: 0, items: [] };
+    const items = parsed.items.filter(
+      (it) =>
+        it &&
+        typeof it.name === 'string' &&
+        typeof it.dirName === 'string' &&
+        typeof it.sourceId === 'string',
+    );
+    return { cachedAt: typeof parsed.cachedAt === 'number' ? parsed.cachedAt : 0, items };
+  } catch {
+    return { cachedAt: 0, items: [] };
+  }
+}
+
+/** 缓存回填用的源占位（安装只消费 id/name，其余字段不参与）。 */
+function cachedSourceStub(sourceId: string, sourceName: string): MarketSourceBrowse {
+  return {
+    id: sourceId,
+    name: sourceName,
+    kind: 'remote_url',
+    rootPath: '',
+    marketplaceId: '',
+    enabled: true,
+    revision: 0,
+    resolvedRoot: '',
+    marketplaceName: '',
+    description: '',
+    pluginCount: 0,
+    skills: [],
+    plugins: [],
+    error: '',
+  };
+}
+
 const NAME_RE = /^[A-Za-z0-9_-]+$/;
 
 /** 从导入的 Markdown 提取描述：frontmatter description 优先，否则取首个非空段落。 */
@@ -121,6 +180,11 @@ export function SkillsPage() {
   pluginSkillsRef.current = pluginSkills;
   // 进行中的插件拉取 key（防并发重复拉取）。
   const pendingPluginRef = useRef<Set<string>>(new Set());
+  // 市场扁平清单：搜索词 + 分页（默认 10 条，「更多」每次加 20）。
+  const [marketQuery, setMarketQuery] = useState('');
+  const [marketLimit, setMarketLimit] = useState(10);
+  // 上次拉取成功的本地缓存（打开 tab 即显示，后台刷新后更新）。
+  const [marketCache] = useState<MarketCache>(loadMarketCache);
   const debounceRef = useRef<number | null>(null);
 
   const load = useCallback(async () => {
@@ -449,6 +513,81 @@ export function SkillsPage() {
       }),
     );
   };
+
+  // 全源扁平技能清单：合并所有启用源的技能（本地直读 + 各插件已拉取列表），
+  // 按技能名去重（同名技能安装状态本就按名判定），排序供搜索与分页。
+  // 实时数据未到齐的部分用本地缓存补位：打开 tab 即有内容，刷新逐插件就位。
+  const allMarketSkills = useMemo(() => {
+    const map = new Map<string, { src: MarketSourceBrowse; entry: MarketSkillEntry }>();
+    for (const src of markets ?? []) {
+      if (!src.enabled || src.error) continue;
+      const entries =
+        src.plugins.length > 0
+          ? src.plugins.flatMap((p) => pluginSkills[`${src.id}/${p.name}`]?.items ?? [])
+          : src.skills;
+      for (const entry of entries) {
+        if (!map.has(entry.name)) map.set(entry.name, { src, entry });
+      }
+    }
+    for (const it of marketCache.items) {
+      if (!map.has(it.name)) {
+        map.set(it.name, {
+          src: cachedSourceStub(it.sourceId, it.sourceName),
+          entry: { name: it.name, dirName: it.dirName, description: it.description, plugin: it.plugin, version: it.version },
+        });
+      }
+    }
+    return [...map.values()].sort((a, b) => a.entry.name.localeCompare(b.entry.name));
+  }, [markets, pluginSkills, marketCache]);
+
+  const filteredMarketSkills = useMemo(() => {
+    const q = marketQuery.trim().toLowerCase();
+    if (!q) return allMarketSkills;
+    return allMarketSkills.filter(
+      ({ entry }) =>
+        entry.name.toLowerCase().includes(q) || entry.description.toLowerCase().includes(q),
+    );
+  }, [allMarketSkills, marketQuery]);
+
+  // 各插件拉取状态汇总：加载中 / 失败清单（供整页状态行与一键重试）。
+  const marketLoading = useMemo(
+    () =>
+      (markets ?? []).some((src) =>
+        src.enabled && !src.error
+          ? src.plugins.some((p) => pluginSkills[`${src.id}/${p.name}`]?.loading)
+          : false,
+      ),
+    [markets, pluginSkills],
+  );
+  const marketFailed = useMemo(() => {
+    const out: Array<{ srcId: string; plugin: string }> = [];
+    for (const src of markets ?? []) {
+      if (!src.enabled || src.error) continue;
+      for (const p of src.plugins) {
+        if (pluginSkills[`${src.id}/${p.name}`]?.error) out.push({ srcId: src.id, plugin: p.name });
+      }
+    }
+    return out;
+  }, [markets, pluginSkills]);
+
+  // 刷新全部完成后回写本地缓存：下次打开即见列表（来源变更/下线技能随刷新自然更替）。
+  useEffect(() => {
+    if (markets === null || markets.length === 0 || marketLoading || allMarketSkills.length === 0) return;
+    const items = allMarketSkills.slice(0, MARKET_CACHE_MAX).map(({ src, entry }) => ({
+      name: entry.name,
+      dirName: entry.dirName,
+      description: entry.description,
+      plugin: entry.plugin,
+      version: entry.version,
+      sourceId: src.id,
+      sourceName: src.name,
+    }));
+    try {
+      localStorage.setItem(MARKET_CACHE_KEY, JSON.stringify({ cachedAt: Date.now(), items }));
+    } catch {
+      // 存储配额/隐私模式失败不影响功能，仅无缓存可用。
+    }
+  }, [markets, marketLoading, allMarketSkills]);
 
   const toggleSource = async (src: MarketSourceBrowse) => {
     setMarketBusy(src.id);
@@ -857,9 +996,16 @@ export function SkillsPage() {
 
           <div className="sg-reference-toolbar">
             <div className="sg-reference-toolbar-start">
-              <span className="sg-reference-count" aria-label="市场源数量">
-                {markets === null ? '加载中…' : `${markets.filter((s) => s.enabled).length} 个市场源`}
-              </span>
+              <label className="sg-reference-search">
+                <IconSearch size={14} />
+                <input
+                  type="search"
+                  aria-label="搜索市场技能"
+                  placeholder="搜索技能名称或描述…"
+                  value={marketQuery}
+                  onChange={(e) => setMarketQuery(e.target.value)}
+                />
+              </label>
             </div>
             <div className="sg-reference-toolbar-end">
               <button
@@ -877,76 +1023,51 @@ export function SkillsPage() {
           </div>
 
           <div className="sg-memory-files">
-            {markets === null ? (
+            {markets === null && marketCache.items.length === 0 ? (
               <div className="sg-skeleton-rows" aria-busy="true"><div className="sg-skeleton-row" /></div>
-            ) : markets.length === 0 ? (
+            ) : markets !== null && markets.length === 0 && marketCache.items.length === 0 ? (
               <div className="sg-empty">
                 <span>还没有市场源。点右上角「管理源」添加一个（远程清单、远程 Git 仓库或本机市场目录）。</span>
               </div>
             ) : (
-              markets.map((src) => (
-                <section className="sg-mkt-source" key={src.id}>
-                  <header className="sg-mkt-source-head">
-                    <h3 className="sg-mkt-source-name">{src.name}</h3>
-                    <small className="sg-mkt-source-desc">
-                      {src.error
-                        ? `不可用：${src.error}`
-                        : !src.enabled
-                          ? '已停用'
-                          : src.plugins.length > 0
-                            ? `${src.plugins.length} 个插件 · 按插件安装`
-                            : `${src.skills.length} 个可安装技能`}
-                      {' · '}{src.rootPath}
-                    </small>
-                  </header>
-                  {src.enabled && !src.error ? (
-                    src.plugins.length > 0 ? (
-                      (() => {
-                        // 扁平合并全部插件的技能列表：只呈现技能行，不展示插件分组。
-                        const states = src.plugins.map((p) => pluginSkills[`${src.id}/${p.name}`]);
-                        const entries = src.plugins
-                          .flatMap((_, i) => states[i]?.items ?? [])
-                          .sort((a, b) => a.name.localeCompare(b.name));
-                        const loading = states.some((st) => st?.loading);
-                        const failed = src.plugins.filter((_, i) => states[i]?.error).map((p) => p.name);
-                        const fetched = states.every((st) => st && !st.loading);
-                        return (
-                          <>
-                            {loading ? <div className="sg-mkt-note">正在拉取技能列表…</div> : null}
-                            {entries.length > 0 ? (
-                              <div className="sg-mkt-skills" role="list" aria-label={`${src.name} 可安装技能`}>
-                                {entries.map((entry) => renderMarketSkillRow(src, entry))}
-                              </div>
-                            ) : null}
-                            {!loading && failed.length > 0 ? (
-                              <div className="sg-mkt-note">
-                                {failed.join('、')} 拉取失败
-                                <button
-                                  type="button"
-                                  className="sg-btn sg-btn--sm"
-                                  style={{ marginLeft: 12 }}
-                                  onClick={() => { for (const name of failed) void loadPluginSkills(src.id, name); }}
-                                >
-                                  重试
-                                </button>
-                              </div>
-                            ) : null}
-                            {fetched && failed.length === 0 && entries.length === 0 ? (
-                              <div className="sg-mkt-note">该市场源暂无可安装技能。</div>
-                            ) : null}
-                          </>
-                        );
-                      })()
-                    ) : src.skills.length === 0 ? (
-                      <div className="sg-mkt-note">该市场源暂无可安装技能（本地未安装相关插件，或仓库内无 SKILL.md）。</div>
-                    ) : (
-                      <div className="sg-mkt-skills" role="list" aria-label={`${src.name} 可安装技能`}>
-                        {src.skills.map((entry) => renderMarketSkillRow(src, entry))}
-                      </div>
-                    )
-                  ) : null}
-                </section>
-              ))
+              <>
+                {filteredMarketSkills.length > 0 ? (
+                  <div className="sg-mkt-skills" role="list" aria-label="可安装技能">
+                    {filteredMarketSkills.slice(0, marketLimit).map(({ src, entry }) => renderMarketSkillRow(src, entry))}
+                  </div>
+                ) : null}
+                {(markets === null || marketLoading) && marketCache.items.length > 0 ? (
+                  <div className="sg-mkt-note">正在后台刷新…</div>
+                ) : null}
+                {marketLoading && marketCache.items.length === 0 ? (
+                  <div className="sg-mkt-note">正在拉取技能列表…</div>
+                ) : null}
+                {!marketLoading && marketFailed.length > 0 ? (
+                  <div className="sg-mkt-note">
+                    {marketFailed.map((f) => f.plugin).join('、')} 拉取失败
+                    <button
+                      type="button"
+                      className="sg-btn sg-btn--sm"
+                      style={{ marginLeft: 12 }}
+                      onClick={() => { for (const f of marketFailed) void loadPluginSkills(f.srcId, f.plugin); }}
+                    >
+                      重试
+                    </button>
+                  </div>
+                ) : null}
+                {!marketLoading && marketFailed.length === 0 && filteredMarketSkills.length === 0 ? (
+                  <div className="sg-mkt-note">
+                    {marketQuery.trim() ? `没有匹配「${marketQuery.trim()}」的技能。` : '暂无可安装技能。'}
+                  </div>
+                ) : null}
+                {filteredMarketSkills.length > marketLimit ? (
+                  <div className="sg-mkt-more">
+                    <button type="button" className="sg-btn" onClick={() => setMarketLimit((n) => n + 20)}>
+                      加载更多（还有 {filteredMarketSkills.length - marketLimit} 个）
+                    </button>
+                  </div>
+                ) : null}
+              </>
             )}
           </div>
 

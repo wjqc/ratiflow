@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpc } from '../rpc/client';
+import { IconPanelLeft } from '../components/Icons';
 import { ProjectSidebar, gateLabel, workItemGate } from './ProjectSidebar';
 import type { KnowledgeSourceInfo, Project, WorkItemSummary } from './ProjectSidebar';
 import { Workbench } from './Workbench';
 import NewTaskPage from './NewTaskPage';
 import ApprovalsPage from './ApprovalsPage';
-import GovernancePage from './GovernancePage';
 import KnowledgePage from './KnowledgePage';
 import SettingsShell from './settings/SettingsShell';
 import { SettingsSidebar } from './settings/SettingsSidebar';
@@ -25,7 +25,6 @@ export type Route =
   | { page: 'new'; projectId: string }
   | { page: 'task'; projectId: string; workItemId: string }
   | { page: 'approvals' }
-  | { page: 'governance' }
   | { page: 'knowledge'; projectId: string }
   | { page: 'settings'; section?: SettingsRouteId };
 
@@ -34,6 +33,23 @@ export type Route =
 // 设置页是工具页不算"工作现场"：写入与恢复两侧都排除，启动永不落在设置页。
 const LS_ROUTE = 'sg:lastRoute';
 const LS_PROJECT = 'sg:lastProject';
+
+/** 本地布尔标记读写；localStorage 不可用（隐私模式/测试环境）时静默降级。 */
+function readFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeFlag(key: string, value: boolean) {
+  try {
+    localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    /* 隐私模式等场景忽略 */
+  }
+}
 
 function loadStoredRoute(): Route | null {
   try {
@@ -67,6 +83,8 @@ function storeLast(route: Route, projectId: string | null): void {
 
 export default function AppShell() {
   const [route, setRoute] = useState<Route>(() => loadStoredRoute() ?? { page: 'home' });
+  // 左侧菜单栏整体收起（记忆在本地；设置中心有自己的侧栏不受影响）。
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readFlag('sg:sidebarCollapsed'));
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [tasksByProject, setTasksByProject] = useState<Record<string, WorkItemSummary[]>>({});
@@ -76,6 +94,10 @@ export default function AppShell() {
   const [listVersion, setListVersion] = useState(0);
   const [coreReady, setCoreReady] = useState<boolean | null>(null);
   const lastWorkspaceRoute = useRef<Route>({ page: 'home' });
+
+  useEffect(() => {
+    writeFlag('sg:sidebarCollapsed', sidebarCollapsed);
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     (async () => {
@@ -331,13 +353,28 @@ export default function AppShell() {
   }, [activeProjectId, navigate]);
 
   return (
-    <div className="sg-shell">
+    <div
+      className={`sg-shell${
+        sidebarCollapsed && route.page !== 'settings' ? ' sg-shell--collapsed' : ''
+      }`}
+    >
       {route.page === 'settings' ? (
         <SettingsSidebar
           section={route.section}
           onNavigate={(section) => navigate({ page: 'settings', section })}
           onBack={() => navigate(lastWorkspaceRoute.current)}
         />
+      ) : sidebarCollapsed ? (
+        <div className="sg-sidebar-rail">
+          <button
+            className="sg-icon-btn"
+            title="展开菜单栏"
+            aria-label="展开菜单栏"
+            onClick={() => setSidebarCollapsed(false)}
+          >
+            <IconPanelLeft size={15} />
+          </button>
+        </div>
       ) : (
         <ProjectSidebar
           projects={projects}
@@ -358,6 +395,7 @@ export default function AppShell() {
             if (pid) openTask(pid, workItemId);
           }}
           onNavigate={navigate}
+          onCollapse={() => setSidebarCollapsed(true)}
         />
       )}
       <main className="sg-main">
@@ -402,7 +440,6 @@ export default function AppShell() {
                 onDecided={() => activeProjectId && void loadProjectData(activeProjectId)}
               />
             )}
-            {route.page === 'governance' && <GovernancePage />}
             {route.page === 'knowledge' && (
               <KnowledgePage projectId={route.projectId} projectName={activeProject?.name} />
             )}

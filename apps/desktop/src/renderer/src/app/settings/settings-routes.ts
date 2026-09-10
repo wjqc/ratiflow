@@ -27,6 +27,7 @@ export type SettingsRouteId =
   | 'mcp'
   | 'skills'
   | 'automations'
+  | 'governance'
   | 'execution'
   | 'agent-center'
   | 'integrations'
@@ -75,6 +76,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
       { id: 'mcp', code: 'S24', name: 'MCP 服务器', availability: 'real', icon: IconServer },
       { id: 'skills', code: 'S25', name: '技能', availability: 'real', icon: IconBook },
       { id: 'automations', code: 'S26', name: '自动化', availability: 'real', icon: IconZap },
+      { id: 'governance', code: 'S60', name: '治理总览', availability: 'real', icon: IconTarget },
       { id: 'execution', code: 'S22', name: '执行与沙箱', availability: 'real', icon: IconZap },
       { id: 'agent-center', code: 'S23', name: 'Agent 中心', availability: 'real', icon: IconTarget },
     ],
@@ -127,6 +129,7 @@ export const SETTINGS_ADVANCED_ITEMS = settingsItems([
   'mcp',
   'skills',
   'automations',
+  'governance',
   'execution',
   'backup',
   'diagnostics',

@@ -20,6 +20,7 @@ import { ExecutionPage } from './pages/ExecutionPage';
 import { IntegrationsPage } from './pages/IntegrationsPage';
 import { WorkflowTemplatesPage } from './pages/WorkflowTemplatesPage';
 import { AutomationsPage } from './pages/AutomationsPage';
+import GovernancePage from './pages/GovernancePage';
 
 export default function SettingsShell({ section }: { section?: string }) {
   const route: SettingsRouteId = isSettingsRouteId(section) ? section : DEFAULT_SETTINGS_ROUTE;
@@ -50,6 +51,8 @@ export default function SettingsShell({ section }: { section?: string }) {
         return <SkillsPage />;
       case 'automations':
         return <AutomationsPage />;
+      case 'governance':
+        return <GovernancePage />;
       case 'agent-center':
         return <AgentCenterPage />;
       case 'execution':

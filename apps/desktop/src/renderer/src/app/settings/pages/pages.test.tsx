@@ -188,7 +188,7 @@ describe('设置页接线', () => {
     );
   });
 
-  it('S25 技能页：市场 tab 显示市场源与安装开关（开=安装）', async () => {
+  it('S25 技能页：市场 tab 扁平技能列表（搜索 + 分页，开关=安装）', async () => {
     rpcMock.mockImplementation((method: string) => {
       if (method === 'skill.list') {
         return ok({ items: [
@@ -206,17 +206,58 @@ describe('设置页接线', () => {
     });
     render(<SkillsPage />);
     await waitFor(() => expect(screen.getByText('deploy-check')).toBeInTheDocument());
-    // 切到市场 tab：懒加载市场源。
+    // 切到市场 tab：不显示市场源名，直接平铺技能行。
     fireEvent.click(screen.getByRole('tab', { name: /市场/ }));
-    await waitFor(() => expect(screen.getByText('远端技能库')).toBeInTheDocument());
-    expect(screen.getByText(/1 个可安装技能/)).toBeInTheDocument();
-    // 展开源 → 技能行开关未安装 → 打开开关 = marketImport。
-    fireEvent.click(screen.getByText('远端技能库'));
-    const sw = screen.getByRole('switch', { name: '安装技能 remote-alpha' });
+    const sw = await waitFor(() => screen.getByRole('switch', { name: '安装技能 remote-alpha' }));
+    expect(screen.queryByText('远端技能库')).not.toBeInTheDocument();
     expect(sw).not.toBeChecked();
+    // 开关打开 = marketImport。
     fireEvent.click(sw);
     await waitFor(() =>
       expect(rpcMock).toHaveBeenCalledWith('skill.marketImport', expect.objectContaining({ sourceId: 'mkt_1', skillName: 'remote-alpha' })),
+    );
+  });
+
+  it('S25 技能页：市场技能本地缓存——刷新成功落缓存，拉取失败仍显示上次列表', async () => {
+    // 测试环境无 localStorage：打桩到内存 Map（组件按同 key 读写）。
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+      clear: () => void store.clear(),
+    });
+    const marketOk = { items: [
+      { id: 'mkt_1', name: '远端技能库', kind: 'remote_git', rootPath: 'https://example.com/r.git', marketplaceId: '', enabled: true, revision: 1, resolvedRoot: '', marketplaceName: 'r', description: '', pluginCount: 0, skills: [
+        { name: 'cached-skill', dirName: 'cached-skill', description: '缓存技能', plugin: '', version: 'abcd1234' },
+      ], plugins: [], error: '' },
+    ] };
+    // 第一次：刷新成功 → 列表出现且写入 localStorage。
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'skill.list') return ok({ items: [] });
+      if (method === 'skill.marketList') return ok(marketOk);
+      return ok({});
+    });
+    const first = render(<SkillsPage />);
+    fireEvent.click(screen.getByRole('tab', { name: /市场/ }));
+    await waitFor(() => expect(screen.getByText('cached-skill')).toBeInTheDocument());
+    await waitFor(() => expect(localStorage.getItem('ratiflow.skill.market.v1')).toBeTruthy());
+    first.unmount();
+
+    // 第二次：marketList 拒绝（离线）→ 仍显示缓存列表，不出「还没有市场源」空态。
+    rpcMock.mockImplementation((method: string) => {
+      if (method === 'skill.list') return ok({ items: [] });
+      if (method === 'skill.marketList') return Promise.reject(new Error('网络不可达'));
+      return ok({});
+    });
+    render(<SkillsPage />);
+    fireEvent.click(screen.getByRole('tab', { name: /市场/ }));
+    await waitFor(() => expect(screen.getByText('cached-skill')).toBeInTheDocument());
+    expect(screen.queryByText('还没有市场源')).not.toBeInTheDocument();
+    // 缓存行的安装开关照常可用（走缓存里的 sourceId）。
+    fireEvent.click(screen.getByRole('switch', { name: '安装技能 cached-skill' }));
+    await waitFor(() =>
+      expect(rpcMock).toHaveBeenCalledWith('skill.marketImport', expect.objectContaining({ sourceId: 'mkt_1', skillName: 'cached-skill' })),
     );
   });
 

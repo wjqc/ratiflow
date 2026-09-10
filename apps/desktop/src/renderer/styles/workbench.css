@@ -42,21 +42,31 @@
 .sg-process-file svg { color: var(--sg-text-secondary); flex-shrink: 0; }
 .sg-process-info-more { margin-top: 6px; font-size: 11.5px; color: var(--sg-action-primary); cursor: pointer; }
 
-/* 选中关详情悬浮框（右下角，可缩为胶囊） */
-.sg-detail-float { position: fixed; right: 16px; top: 60px; z-index: 80; width: 300px; padding: 14px 16px; border: 1px solid var(--sg-border-default); border-radius: 12px; background: var(--sg-bg-card, #fff); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16); }
-.sg-detail-float-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.sg-detail-float-head strong { flex: 1; font-size: 14px; }
+/* 关卡摘要浮动卡（右上角；头部按钮或卡片 ✕ 均可隐藏） */
+.sg-gate-summary {
+  position: absolute;
+  top: 58px;
+  right: 16px;
+  z-index: 40;
+  width: 320px;
+  max-height: calc(100% - 76px);
+  overflow-y: auto;
+  border: 1px solid var(--sg-border-default);
+  border-radius: 12px;
+  background: var(--sg-bg-card, #fff);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+}
+.sg-gate-rail-card { padding: 14px 16px; }
+.sg-gate-rail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.sg-gate-rail-head strong { flex: 1; font-size: 14px; }
+.sg-gate-rail-head .sg-chip { margin-left: auto; }
 .sg-detail-float-note { margin-top: 10px; padding: 9px 11px; border-radius: 8px; background: var(--sg-bg-subtle); font-size: 12px; color: var(--sg-text-secondary); }
 .sg-detail-float-note--action { color: var(--sg-action-primary); }
-.sg-detail-capsule { position: fixed; right: 16px; top: 16px; z-index: 80; display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid var(--sg-border-default); border-radius: 999px; background: var(--sg-bg-card, #fff); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); color: var(--sg-text-primary); font-family: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; }
-.sg-detail-capsule:hover { background: var(--sg-bg-subtle); }
-.sg-detail-capsule svg { color: var(--sg-action-primary); }
-.sg-detail-capsule-caret { font-size: 10px; color: var(--sg-text-secondary); }
 
-.sg-detail-collapse { margin-left: auto; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: none; border-radius: 6px; background: transparent; color: var(--sg-text-secondary); cursor: pointer; }
-.sg-detail-collapse:hover { background: var(--sg-bg-subtle); color: var(--sg-text-primary); }
-.sg-detail-float-head .sg-chip { margin-left: auto; }
-.sg-detail-float-head .sg-detail-collapse { margin-left: 0; }
+/* 左侧菜单栏收起态：窄轨仅保留展开按钮（grid 列宽随 shell 收起态切换） */
+.sg-shell--collapsed { grid-template-columns: 44px 1fr; }
+.sg-sidebar-rail { display: flex; justify-content: center; align-items: flex-start; padding-top: 10px; background: var(--sg-bg-sidebar); border-right: 1px solid var(--sg-border-default); min-height: 0; }
+.sg-sidebar-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
 
 /* 知识库页：产物查看弹层 */
 .sg-knowledge-doc-view { position: fixed; inset: 0; z-index: 120; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; }

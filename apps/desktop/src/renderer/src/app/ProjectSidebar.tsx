@@ -8,11 +8,11 @@ import {
   IconFolder,
   IconGear,
   IconInfo,
-  IconLogo,
+  IconHome,
+  IconPanelLeft,
   IconPlus,
   IconSearch,
   IconShield,
-  IconTarget,
   IconX,
 } from '../components/Icons';
 
@@ -61,6 +61,8 @@ interface Props {
   /** 打开任务：第二参数是任务所属项目（树可多项目同时展开，不能假定是活动项目）。 */
   onTaskOpen: (workItemId: string, projectId?: string) => void;
   onNavigate: (route: Route) => void;
+  /** 收起整个侧栏（AppShell 记忆状态，左上角悬浮按钮可恢复）。 */
+  onCollapse: () => void;
 }
 
 const GATE_LABELS: Record<string, string> = {
@@ -105,6 +107,7 @@ export function ProjectSidebar({
   onTaskRemove,
   onTaskOpen,
   onNavigate,
+  onCollapse,
 }: Props) {
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
@@ -180,22 +183,30 @@ export function ProjectSidebar({
 
   return (
     <aside className="sg-sidebar" aria-label="项目导航">
-      <button
-        className="sg-brand sg-brand-button"
-        onClick={() => onNavigate({ page: 'home' })}
-        aria-label="返回任务首页"
-      >
-        <IconLogo size={20} className="sg-brand-logo" />
-        <span>Ratiflow</span>
+      <div className="sg-sidebar-head">
+        <button
+          className="sg-icon-btn"
+          onClick={onCollapse}
+          title="收起菜单栏"
+          aria-label="收起菜单栏"
+        >
+          <IconPanelLeft size={15} />
+        </button>
         {coreReady === false ? (
           <span className="sg-status sg-status--error" title="Rust core 不可用">
             core 异常
           </span>
         ) : null}
-      </button>
+      </div>
 
       <nav style={{ padding: '0 8px', display: 'flex', flexDirection: 'column', gap: 2 }}>
         <button
+          className={`sg-nav-item ${route.page === 'home' ? 'sg-nav-item--active' : ''}`}
+          onClick={() => onNavigate({ page: 'home' })}
+        >
+          <IconHome size={15} />
+          任务首页
+        </button>        <button
           className={`sg-nav-item ${route.page === 'new' ? 'sg-nav-item--active' : ''}`}
           onClick={() => activeProjectId && onNavigate({ page: 'new', projectId: activeProjectId })}
           disabled={!activeProjectId}
@@ -211,13 +222,6 @@ export function ProjectSidebar({
         >
           <IconShield size={15} />
           审批中心
-        </button>
-        <button
-          className={`sg-nav-item ${route.page === 'governance' ? 'sg-nav-item--active' : ''}`}
-          onClick={() => onNavigate({ page: 'governance' })}
-        >
-          <IconTarget size={15} />
-          治理总览
         </button>
       </nav>
 

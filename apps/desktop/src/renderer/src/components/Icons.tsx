@@ -237,6 +237,14 @@ export const IconLayers = ({ size = 16, ...rest }: IconProps) => (
   </svg>
 );
 
+/** 侧栏开合（左侧面板 + 竖分隔线）。 */
+export const IconPanelLeft = ({ size = 16, ...rest }: IconProps) => (
+  <svg {...base(size)} {...rest}>
+    <rect x="1.8" y="2.3" width="12.4" height="11.4" rx="1.6" />
+    <path d="M6 2.5v11" />
+  </svg>
+);
+
 export const IconInbox = ({ size = 16, ...rest }: IconProps) => (
   <svg {...base(size)} {...rest}>
     <path d="M2.5 9.5h3l1 1.5h3l1-1.5h3" />

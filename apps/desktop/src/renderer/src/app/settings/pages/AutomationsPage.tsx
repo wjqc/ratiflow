@@ -31,6 +31,35 @@ interface Observation {
   reviews: Array<{ false_positive: boolean }>;
 }
 
+const DECISION_LABEL: Record<string, string> = {
+  accepted: '已采纳',
+  rejected: '已拒绝',
+  ignored: '已忽略',
+  expired: '已过期',
+};
+
+/** 建议内容摘要：优先取 goal 字段，否则原样 JSON（行内截断交给样式）。 */
+function contentText(content: unknown): string {
+  if (content && typeof content === 'object') {
+    const goal = (content as { goal?: unknown }).goal;
+    if (typeof goal === 'string' && goal.trim()) return goal;
+  }
+  return JSON.stringify(content);
+}
+
+function pct(v: unknown): string {
+  return `${Math.round((Number(v) || 0) * 100)}%`;
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="sg-token-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
 export function AutomationsPage() {
   const [items, setItems] = useState<Automation[]>([]);
   const [key, setKey] = useState('');
@@ -114,37 +143,76 @@ export function AutomationsPage() {
               <span className="sg-set-item-title">{item.key} · {item.status}</span>
               <small className="sg-set-item-desc">每 {item.intervalSecs} 秒 · 下次 {item.nextFireAt}{item.workItemId ? ` · ${item.workItemId}` : ''}</small>
             </div>
-            <div className="sg-set-item-control">
+            <div className="sg-set-item-control" style={{ gap: 8 }}>
               {item.status === 'active' ? <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void act(item.id, () => rpc('automation.pause', { automationId: item.id, expectedRevision: item.revision }), '规则已暂停')}>暂停</button> : <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void act(item.id, () => rpc('automation.resume', { automationId: item.id, expectedRevision: item.revision }), '规则已恢复')}>恢复</button>}
-              <button className="sg-btn sg-btn--sm sg-btn--primary" style={{ marginLeft: 8 }} disabled={!!busy} onClick={() => void act(`${item.id}:run`, () => rpc('automation.runNow', { automationId: item.id, scheduledFor: new Date().toISOString() }), '已请求立即执行')}>立即执行</button>
-              <button className="sg-btn sg-btn--sm" style={{ marginLeft: 8 }} disabled={!!busy} onClick={() => void act(`${item.id}:shadow`, () => rpc('automation.setShadowMode', { automationId: item.id, shadowMode: true, expectedRevision: item.revision, idempotencyKey: `ui-automation-shadow-${crypto.randomUUID()}` }), '规则已切换到影子模式')}>影子模式</button>
-              <button className="sg-btn sg-btn--sm" style={{ marginLeft: 8 }} disabled={!!busy} onClick={() => void act(`${item.id}:live`, () => rpc('automation.setShadowMode', { automationId: item.id, shadowMode: false, expectedRevision: item.revision, idempotencyKey: `ui-automation-live-${crypto.randomUUID()}` }), '规则已通过观察门槛并切换到实时模式')}>实时模式</button>
-              <button className="sg-btn sg-btn--sm" style={{ marginLeft: 8 }} disabled={!!busy} onClick={() => void rpc<{ items: AutomationRun[] }>('automation.history', { automationId: item.id }).then((result) => setHistory({ title: item.key, items: result.items ?? [] })).catch((cause) => setError(rpcErrorMessage(cause)))}>历史</button>
+              <button className="sg-btn sg-btn--sm sg-btn--primary" disabled={!!busy} onClick={() => void act(`${item.id}:run`, () => rpc('automation.runNow', { automationId: item.id, scheduledFor: new Date().toISOString() }), '已请求立即执行')}>立即执行</button>
+              <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void act(`${item.id}:shadow`, () => rpc('automation.setShadowMode', { automationId: item.id, shadowMode: true, expectedRevision: item.revision, idempotencyKey: `ui-automation-shadow-${crypto.randomUUID()}` }), '规则已切换到影子模式')}>影子模式</button>
+              <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void act(`${item.id}:live`, () => rpc('automation.setShadowMode', { automationId: item.id, shadowMode: false, expectedRevision: item.revision, idempotencyKey: `ui-automation-live-${crypto.randomUUID()}` }), '规则已通过观察门槛并切换到实时模式')}>实时模式</button>
+              <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void rpc<{ items: AutomationRun[] }>('automation.history', { automationId: item.id }).then((result) => setHistory({ title: item.key, items: result.items ?? [] })).catch((cause) => setError(rpcErrorMessage(cause)))}>历史</button>
             </div>
           </div>
         ))}
       </div>
-      {history ? <div className="sg-card" style={{ marginTop: 12 }}><div className="sg-card-head">{history.title} 执行历史 <span className="sg-card-extra"><button className="sg-btn sg-btn--sm" onClick={() => setHistory(null)}>关闭</button></span></div><pre style={{ padding: 12, overflow: 'auto' }}>{JSON.stringify(history.items, null, 2)}</pre></div> : null}
-      <div className="sg-card" style={{ marginTop: 12 }}>
-        <div className="sg-card-head">影子建议与观测 <span className="sg-card-extra sg-muted">{JSON.stringify(stats)}</span></div>
-        {observations.length === 0 ? <div className="sg-empty"><span>暂无影子建议。</span></div> : observations.map((item) => (
-          <div className="sg-set-item" key={item.id}>
-            <div className="sg-set-item-copy">
-              <span className="sg-set-item-title">{item.suggestion_type} · {item.decision?.decision ?? '待裁决'}{item.legacy ? ' · legacy 只读' : ''}</span>
-              <small className="sg-set-item-desc">{JSON.stringify(item.content)}</small>
-            </div>
-            <div className="sg-set-item-control">
-              {!item.decision && !item.legacy ? <>
-                <button className="sg-btn sg-btn--sm sg-btn--primary" disabled={!!busy} onClick={() => void act(`suggestion:${item.id}:accept`, () => rpc('automation.decideSuggestion', { suggestionId: item.id, decision: 'accepted', decidedBy: 'local-user', note: 'settings-ui accepted', idempotencyKey: `ui-suggestion-${crypto.randomUUID()}` }), '建议已采纳；涉及豁免时仍须单独应用')}>采纳</button>
-                <button className="sg-btn sg-btn--sm" style={{ marginLeft: 8 }} disabled={!!busy} onClick={() => void act(`suggestion:${item.id}:reject`, () => rpc('automation.decideSuggestion', { suggestionId: item.id, decision: 'rejected', decidedBy: 'local-user', note: 'settings-ui rejected', idempotencyKey: `ui-suggestion-${crypto.randomUUID()}` }), '建议已拒绝')}>拒绝</button>
-              </> : null}
-              {item.decision && item.reviews.length === 0 && !item.legacy ? <>
-                <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void act(`review:${item.id}:ok`, () => rpc('automation.reviewSuggestion', { suggestionId: item.id, falsePositive: false, reviewer: 'local-user', note: 'settings-ui review', idempotencyKey: `ui-review-${crypto.randomUUID()}` }), '建议已复核为有效')}>有效建议</button>
-                <button className="sg-btn sg-btn--sm" style={{ marginLeft: 8 }} disabled={!!busy} onClick={() => void act(`review:${item.id}:fp`, () => rpc('automation.reviewSuggestion', { suggestionId: item.id, falsePositive: true, reviewer: 'local-user', note: 'settings-ui false positive', idempotencyKey: `ui-review-${crypto.randomUUID()}` }), '建议已标记为误报')}>标记误报</button>
-              </> : null}
-            </div>
+      {history ? (
+        <div className="sg-card" style={{ marginTop: 12 }}>
+          <div className="sg-card-head">
+            {history.title} 执行历史
+            <span className="sg-card-extra"><button className="sg-btn sg-btn--sm" onClick={() => setHistory(null)}>关闭</button></span>
           </div>
-        ))}
+          <div className="sg-auto-runs" role="list" aria-label="执行历史">
+            {history.items.length === 0 ? (
+              <div className="sg-inline-note">暂无执行记录。</div>
+            ) : history.items.map((run, index) => (
+              <div className="sg-auto-run" role="listitem" key={run.id ?? index}>
+                <span className="sg-auto-run-status">{run.status || '未知'}</span>
+                <small className="sg-auto-run-time">计划 {run.scheduled_for || '—'} · 创建 {run.created_at || '—'}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      <div className="sg-card" style={{ marginTop: 12 }}>
+        <div className="sg-card-head">
+          影子建议与观测
+          <span className="sg-card-extra sg-muted">影子模式规则的试运行产出与质量观测</span>
+        </div>
+        <div className="sg-auto-metrics" aria-label="影子建议观测统计">
+          <Metric label="累计建议" value={Number(stats.total ?? 0).toLocaleString()} />
+          <Metric label="已裁决" value={Number(stats.decided ?? 0).toLocaleString()} />
+          <Metric label="已复核" value={Number(stats.reviewed ?? 0).toLocaleString()} />
+          <Metric label="误报" value={Number(stats.false_positives ?? 0).toLocaleString()} />
+          <Metric label="误报率" value={pct(stats.false_positive_rate)} />
+          <Metric label="复核覆盖" value={pct(stats.review_coverage)} />
+        </div>
+        {observations.length === 0 ? (
+          <div className="sg-inline-note">暂无影子建议。</div>
+        ) : observations.map((item) => {
+          const review = item.reviews[0];
+          const reviewLabel = review ? (review.false_positive ? '复核：误报' : '复核：有效') : '';
+          const decisionLabel = item.decision ? (DECISION_LABEL[item.decision.decision] ?? item.decision.decision) : '待裁决';
+          return (
+            <div className="sg-set-item" key={item.id}>
+              <div className="sg-set-item-copy">
+                <span className="sg-set-item-title">
+                  {item.suggestion_type} · {decisionLabel}
+                  {reviewLabel ? ` · ${reviewLabel}` : ''}
+                  {item.legacy ? ' · legacy 只读' : ''}
+                </span>
+                <small className="sg-set-item-desc">{contentText(item.content)}</small>
+              </div>
+              <div className="sg-set-item-control" style={{ gap: 8 }}>
+                {!item.decision && !item.legacy ? <>
+                  <button className="sg-btn sg-btn--sm sg-btn--primary" disabled={!!busy} onClick={() => void act(`suggestion:${item.id}:accept`, () => rpc('automation.decideSuggestion', { suggestionId: item.id, decision: 'accepted', decidedBy: 'local-user', note: 'settings-ui accepted', idempotencyKey: `ui-suggestion-${crypto.randomUUID()}` }), '建议已采纳；涉及豁免时仍须单独应用')}>采纳</button>
+                  <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void act(`suggestion:${item.id}:reject`, () => rpc('automation.decideSuggestion', { suggestionId: item.id, decision: 'rejected', decidedBy: 'local-user', note: 'settings-ui rejected', idempotencyKey: `ui-suggestion-${crypto.randomUUID()}` }), '建议已拒绝')}>拒绝</button>
+                </> : null}
+                {item.decision && item.reviews.length === 0 && !item.legacy ? <>
+                  <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void act(`review:${item.id}:ok`, () => rpc('automation.reviewSuggestion', { suggestionId: item.id, falsePositive: false, reviewer: 'local-user', note: 'settings-ui review', idempotencyKey: `ui-review-${crypto.randomUUID()}` }), '建议已复核为有效')}>有效建议</button>
+                  <button className="sg-btn sg-btn--sm" disabled={!!busy} onClick={() => void act(`review:${item.id}:fp`, () => rpc('automation.reviewSuggestion', { suggestionId: item.id, falsePositive: true, reviewer: 'local-user', note: 'settings-ui false positive', idempotencyKey: `ui-review-${crypto.randomUUID()}` }), '建议已标记为误报')}>标记误报</button>
+                </> : null}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

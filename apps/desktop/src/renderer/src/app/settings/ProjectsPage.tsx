@@ -94,7 +94,7 @@ export function ProjectsPage() {
         name,
         localRoot,
       });
-      setNotice(`“${project.name}”已添加，可以直接在新建任务中使用。`);
+      setNotice(null);
       await load(includeArchived);
       notifyProjectsChanged();
     } catch (reason) {
@@ -246,8 +246,10 @@ export function ProjectsPage() {
               <article className="sg-project-row" key={project.id}>
                 <span className="sg-project-icon"><IconFolder size={18} /></span>
                 <div><h3>{project.name}</h3><p>{project.local_root || '未绑定本地目录'}</p></div>
-                <button className="sg-btn sg-btn--sm" onClick={() => void archive(project, !project.archived_at)}>{project.archived_at ? '恢复' : '归档'}</button>
-                <button className="sg-btn sg-btn--sm" onClick={() => void openDetail(project.id)}>详情</button>
+                <div className="sg-project-row-actions">
+                  <button className="sg-btn sg-btn--sm" onClick={() => void openDetail(project.id)}>详情</button>
+                  <button className="sg-btn sg-btn--sm" onClick={() => void archive(project, !project.archived_at)}>{project.archived_at ? '恢复' : '归档'}</button>
+                </div>
               </article>
             ))}
           </div>
@@ -276,13 +278,39 @@ export function ProjectsPage() {
         <div className="sg-drawer-backdrop" onClick={() => setDetail(null)}>
           <div className="sg-drawer" role="dialog" aria-label="项目详情" onClick={(event) => event.stopPropagation()}>
             <div className="sg-drawer-head"><strong>项目详情</strong><button className="sg-icon-btn" aria-label="关闭" onClick={() => setDetail(null)}>✕</button></div>
-            <div className="sg-setting-list">
-              <label className="sg-set-item"><span>名称</span><input className="sg-input" value={detailForm.name} onChange={(event) => setDetailForm({ ...detailForm, name: event.target.value })} /></label>
-              <label className="sg-set-item"><span>本地目录</span><input className="sg-input" value={detailForm.localRoot} onChange={(event) => setDetailForm({ ...detailForm, localRoot: event.target.value })} /></label>
-              <label className="sg-set-item"><span>默认分支</span><input className="sg-input" value={detailForm.defaultBranch} onChange={(event) => setDetailForm({ ...detailForm, defaultBranch: event.target.value })} /></label>
+            <div className="sg-drawer-body sg-project-detail">
+              <section className="sg-pd-section">
+                <h4>基本信息</h4>
+                <div className="sg-project-remote-grid sg-pd-form">
+                  <label><span>名称</span><input value={detailForm.name} onChange={(event) => setDetailForm({ ...detailForm, name: event.target.value })} /></label>
+                  <label><span>本地目录</span><input value={detailForm.localRoot} onChange={(event) => setDetailForm({ ...detailForm, localRoot: event.target.value })} /></label>
+                  <label><span>默认分支</span><input value={detailForm.defaultBranch} onChange={(event) => setDetailForm({ ...detailForm, defaultBranch: event.target.value })} /></label>
+                </div>
+              </section>
+              {(() => {
+                const summary = (detail.summary ?? {}) as Record<string, unknown>;
+                const num = (key: string) => (typeof summary[key] === 'number' ? String(summary[key]) : '0');
+                const statusRaw = typeof summary.status === 'string' ? summary.status : '';
+                const statusLabel = statusRaw === 'not_ready' ? '未就绪' : statusRaw === 'ready' ? '就绪' : statusRaw || '—';
+                return (
+                  <section className="sg-pd-section">
+                    <h4>概览</h4>
+                    <dl className="sg-pd-kv">
+                      <div><dt>状态</dt><dd>{statusLabel}</dd></div>
+                      <div><dt>归档</dt><dd>{summary.archived === true ? '已归档' : '未归档'}</dd></div>
+                      <div><dt>任务</dt><dd>{num('workItemCount')}</dd></div>
+                      <div><dt>阻塞任务</dt><dd>{num('blockedCount')}</dd></div>
+                      <div><dt>知识源</dt><dd>{num('knowledgeSourceCount')}</dd></div>
+                      <div><dt>项目 ID</dt><dd className="sg-pd-mono">{typeof summary.id === 'string' ? summary.id : detail.project.id}</dd></div>
+                    </dl>
+                  </section>
+                );
+              })()}
             </div>
-            <pre style={{ maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{JSON.stringify(detail.summary, null, 2)}</pre>
-            <div className="sg-row"><button className="sg-btn sg-btn--primary" disabled={busy || !detailForm.name.trim()} onClick={() => void saveDetail()}>保存</button><button className="sg-btn" onClick={() => setDetail(null)}>取消</button></div>
+            <div className="sg-drawer-foot">
+              <button className="sg-btn sg-btn--primary" disabled={busy || !detailForm.name.trim()} onClick={() => void saveDetail()}>保存</button>
+              <button className="sg-btn" onClick={() => setDetail(null)}>取消</button>
+            </div>
           </div>
         </div>
       ) : null}

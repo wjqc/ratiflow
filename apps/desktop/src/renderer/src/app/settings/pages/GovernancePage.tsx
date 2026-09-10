@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { rpc, rpcErrorMessage } from '../rpc/client';
+import { rpc, rpcErrorMessage } from '../../../rpc/client';
 
 // P1-5（RDWS 审计 §8）：治理总览页——metrics 唯一口径（WP-10 A5）+ Triage 聚合
 // （WP-11/P1-3）+ knowledge freshness（WP-13 B10）。

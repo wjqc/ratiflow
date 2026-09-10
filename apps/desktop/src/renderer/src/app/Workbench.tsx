@@ -7,7 +7,6 @@ import { formatDateTime, relativeTime } from '../lib/format';
 import {
   IconAlert,
   IconArrowLeft,
-  IconChevronDown,
   IconBook,
   IconCheck,
   IconCpu,
@@ -219,8 +218,23 @@ export function Workbench({
   const [trace, setTrace] = useState<RunTrace | null>(null);
   const [error, setError] = useState('');
   const [view, setView] = useState<'timeline' | 'gate'>('timeline');
-  // 右下角悬浮详情卡（跟随当前关）：胶囊化状态。
-  const [detailMinimized, setDetailMinimized] = useState(false);
+  // 右侧关卡摘要栏：可整体隐藏（…菜单里恢复），展示时独占右侧栏不再悬浮遮挡。
+  const [summaryHidden, setSummaryHidden] = useState(() => {
+    try {
+      return localStorage.getItem('sg:gateSummaryHidden') === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('sg:gateSummaryHidden', summaryHidden ? '1' : '0');
+    } catch {
+      /* 隐私模式等场景忽略 */
+    }
+  }, [summaryHidden]);  // 任务头部「更多」菜单：治理操作 / 追溯 抽屉入口。
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [drawerPanel, setDrawerPanel] = useState<null | 'governance' | 'trace'>(null);
   const [prdState, setPrdState] = useState<'idle' | 'drafting' | 'ready' | 'failed'>('idle');
   const [prdMessage, setPrdMessage] = useState('');
 
@@ -424,13 +438,6 @@ export function Workbench({
           </div>
         )}
         <RecoveryPanel workItemId={workItemId} />
-        <TaskGovernancePanel
-          workItemId={workItemId}
-          currentGate={currentGate}
-          stages={progress?.stages ?? []}
-          onChanged={loadAll}
-        />
-        <TracePanel workItemId={workItemId} />
         <Conversation runs={runs} trace={trace} workItemId={workItemId} onOpenRevision={openRevision} />
       </div>
 
@@ -450,6 +457,7 @@ export function Workbench({
   return (
     <div className="sg-workbench">
       {view === 'timeline' ? (
+        <>
         <div className="sg-workbench-center">
           <header className="sg-workbench-head">
             <div className="sg-workbench-crumb">
@@ -466,12 +474,43 @@ export function Workbench({
               <span>{gateLabel(currentGate)}</span>
             </div>
             <div className="sg-workbench-actions">
-              <button className="sg-icon-btn" title="搜索（规划中）" aria-label="搜索" disabled>
-                <IconSearch size={15} />
+              <button
+                className={`sg-icon-btn${summaryHidden ? '' : ' sg-icon-btn--active'}`}
+                title={summaryHidden ? '显示关卡摘要' : '隐藏关卡摘要'}
+                aria-label="关卡摘要"
+                onClick={() => setSummaryHidden((value) => !value)}
+              >
+                <IconTarget size={15} />
               </button>
-              <button className="sg-icon-btn" title="更多操作（规划中）" aria-label="更多操作" disabled>
+              <button className="sg-icon-btn" title="更多操作" aria-label="更多操作" onClick={() => setHeaderMenuOpen((value) => !value)}>
                 <IconMore size={15} />
               </button>
+              {headerMenuOpen ? (
+                <>
+                  <div
+                    style={{ position: 'fixed', inset: 0, zIndex: 29 }}
+                    onClick={() => setHeaderMenuOpen(false)}
+                  />
+                  <div className="sg-header-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="sg-header-menu-item"
+                      onClick={() => { setHeaderMenuOpen(false); setDrawerPanel('governance'); }}
+                    >
+                      治理操作
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="sg-header-menu-item"
+                      onClick={() => { setHeaderMenuOpen(false); setDrawerPanel('trace'); }}
+                    >
+                      追溯（需求 → 产物 → 证据）
+                    </button>
+                  </div>
+                </>
+              ) : null}
             </div>
           </header>
 
@@ -513,6 +552,18 @@ export function Workbench({
             centerBody
           )}
         </div>
+        {!summaryHidden ? (
+          <div className="sg-gate-summary">
+            <GateDetailFloat
+              gate={currentGate}
+              stagesByGate={stagesByGate}
+              gateOpen={false}
+              onOpenGate={() => setView('gate')}
+              onHide={() => setSummaryHidden(true)}
+            />
+          </div>
+        ) : null}
+        </>
       ) : (
         <GateWorkspace
           gate={currentGate}
@@ -532,14 +583,29 @@ export function Workbench({
         />
       )}
 
-      <GateDetailFloat
-        gate={currentGate}
-        stagesByGate={stagesByGate}
-        gateOpen={view === 'gate'}
-        minimized={detailMinimized}
-        onToggleMinimized={() => setDetailMinimized((v) => !v)}
-        onOpenGate={() => setView('gate')}
-      />
+      {drawerPanel ? (
+        <div className="sg-drawer-backdrop" onClick={() => setDrawerPanel(null)}>
+          <div className="sg-drawer sg-drawer--wide" role="dialog" aria-label={drawerPanel === 'governance' ? '治理操作' : '追溯'} onClick={(event) => event.stopPropagation()}>
+            <div className="sg-drawer-head">
+              <strong>{drawerPanel === 'governance' ? '治理操作' : '追溯（需求 → 产物 → 证据）'}</strong>
+              <button className="sg-icon-btn" aria-label="关闭" onClick={() => setDrawerPanel(null)}>✕</button>
+            </div>
+            <div className="sg-drawer-body">
+              {drawerPanel === 'governance' ? (
+                <TaskGovernancePanel
+                  workItemId={workItemId}
+                  currentGate={currentGate}
+                  stages={progress?.stages ?? []}
+                  onChanged={loadAll}
+                  embedded
+                />
+              ) : (
+                <TracePanel workItemId={workItemId} />
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -849,16 +915,14 @@ function GateDetailFloat({
   gate,
   stagesByGate,
   gateOpen,
-  minimized,
-  onToggleMinimized,
   onOpenGate,
+  onHide,
 }: {
   gate: Gate;
   stagesByGate: Map<string, StageInfo>;
   gateOpen: boolean;
-  minimized: boolean;
-  onToggleMinimized: () => void;
   onOpenGate: () => void;
+  onHide: () => void;
 }) {
   const state = stagesByGate.get(gate)?.state;
   const started = state !== undefined && state !== 'not_started' && state !== 'pending';
@@ -887,31 +951,18 @@ function GateDetailFloat({
           : '';
   const stateText = GATE_STATE_LABELS[state ?? 'pending'] ?? state ?? '';
 
-  if (minimized) {
-    return (
-      <button className="sg-detail-capsule" onClick={onToggleMinimized} title="展开关卡详情">
-        <IconTarget size={13} />
-        <span>
-          {gateLabel(gate)}
-          {stateText ? ` · ${stateText}` : ''}
-        </span>
-        <span className="sg-detail-capsule-caret">⌃</span>
-      </button>
-    );
-  }
-
   return (
-    <div className="sg-detail-float">
-      <div className="sg-detail-float-head">
+    <div className="sg-gate-rail-card">
+      <div className="sg-gate-rail-head">
         <strong>{gateLabel(gate)}</strong>
         {stateText ? <span className={`sg-chip ${chipCls}`}>{stateText}</span> : null}
         <button
-          className="sg-detail-collapse"
-          onClick={onToggleMinimized}
-          title="收起为胶囊"
-          aria-label="收起关卡详情"
+          className="sg-icon-btn"
+          onClick={onHide}
+          title="隐藏关卡摘要（…菜单可恢复）"
+          aria-label="隐藏关卡摘要"
         >
-          <IconChevronDown size={14} />
+          <IconX size={13} />
         </button>
       </div>
       <div className="sg-gate-detail-label">执行步骤</div>

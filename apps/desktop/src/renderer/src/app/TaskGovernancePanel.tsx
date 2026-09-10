@@ -14,11 +14,14 @@ export default function TaskGovernancePanel({
   currentGate,
   stages,
   onChanged,
+  embedded = false,
 }: {
   workItemId: string;
   currentGate: string;
   stages: Stage[];
   onChanged: () => void;
+  /** embedded = 抽屉内嵌：无卡片头与折叠条，内容常开。 */
+  embedded?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [plans, setPlans] = useState<PlanRevision[]>([]);
@@ -50,10 +53,12 @@ export default function TaskGovernancePanel({
     setConfirmations(confirmationResult.items ?? []);
   }, [currentGate, workItemId]);
 
+  const effectiveOpen = embedded || open;
+
   useEffect(() => {
     setTargetGate(currentGate);
-    if (open) void reload();
-  }, [currentGate, open, reload]);
+    if (effectiveOpen) void reload();
+  }, [currentGate, effectiveOpen, reload]);
 
   const run = async (key: string, action: () => Promise<unknown>, success: string) => {
     setBusy(key);
@@ -90,18 +95,10 @@ export default function TaskGovernancePanel({
     });
   };
 
-  return (
-    <div className="sg-card" data-testid="task-governance-panel" style={{ marginBottom: 12 }}>
-      <div className="sg-card-head">
-        治理操作
-        <button type="button" className="sg-btn sg-btn--sm" style={{ marginLeft: 12 }} onClick={() => setOpen((value) => !value)}>
-          {open ? '收起' : '展开'}
-        </button>
-      </div>
-      {open ? (
-        <div style={{ padding: 12, display: 'grid', gap: 14 }}>
-          {error ? <div className="sg-banner sg-banner--error" role="alert">{error}</div> : null}
-          {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
+  const body = (
+    <div style={{ padding: 12, display: 'grid', gap: 14 }}>
+      {error ? <div className="sg-banner sg-banner--error" role="alert">{error}</div> : null}
+      {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
 
           <section style={{ display: 'grid', gap: 8 }} aria-label="关卡治理">
             <strong>关卡治理</strong>
@@ -171,8 +168,24 @@ export default function TaskGovernancePanel({
               {plans.find((plan) => plan.status === 'running') ? <button className="sg-btn" disabled={!!busy} onClick={() => { const running = plans.find((plan) => plan.status === 'running')!; void run('dispatch', () => rpc('plan.dispatchReady', { planRevisionId: running.id, maxParallel: 4 }), '就绪任务已派发'); }}>派发就绪任务</button> : null}
             </div>
           </section>
-        </div>
-      ) : null}
+    </div>
+  );
+
+  if (embedded) {
+    return <div data-testid="task-governance-panel">{body}</div>;
+  }
+
+  return (
+    <div className="sg-card" data-testid="task-governance-panel" style={{ marginBottom: 12 }}>
+      <div className="sg-card-head">
+        治理操作
+        <span className="sg-card-extra">
+          <button type="button" className="sg-btn sg-btn--sm" onClick={() => setOpen((value) => !value)}>
+            {open ? '收起' : '展开'}
+          </button>
+        </span>
+      </div>
+      {open ? body : null}
     </div>
   );
 }
