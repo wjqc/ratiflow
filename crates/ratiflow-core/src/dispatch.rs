@@ -3906,20 +3906,6 @@ fn diagnostics_checks(state: &AppState, store: &Store) -> Vec<Value> {
     ]
 }
 
-pub fn diagnostics_run_pub(state: &AppState, store: &Store, check_id: &str) -> RpcResult {
-    diagnostics_run(state, store, check_id)
-}
-
-/// diagnostics.run(checkId)：单项重查（S50）。
-fn diagnostics_run(state: &AppState, store: &Store, check_id: &str) -> RpcResult {
-    let checks = diagnostics_checks(state, store);
-    let found = checks
-        .into_iter()
-        .find(|c| c["checkId"] == json!(check_id))
-        .ok_or_else(|| err(ErrorCode::InvalidParams, format!("未知检查项 {check_id}")))?;
-    Ok(found)
-}
-
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     // 轻量 base64（无外部依赖）。
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

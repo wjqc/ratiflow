@@ -787,6 +787,22 @@
       "result": "value"
     },
     {
+      "name": "agent.list",
+      "params": [
+        {
+          "name": "workItemId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "result": "value"
+    },
+    {
       "name": "agent.cancel",
       "params": [
         {
@@ -1886,33 +1902,6 @@
       "result": "value"
     },
     {
-      "name": "logs.list",
-      "params": [
-        {
-          "name": "limit",
-          "type": "number",
-          "required": false
-        }
-      ],
-      "result": "value"
-    },
-    {
-      "name": "logs.exportDiagnosticBundle",
-      "params": [],
-      "result": "value"
-    },
-    {
-      "name": "operation.get",
-      "params": [
-        {
-          "name": "operationId",
-          "type": "string",
-          "required": true
-        }
-      ],
-      "result": "value"
-    },
-    {
       "name": "knowledge.settings.get",
       "params": [
         {
@@ -2015,17 +2004,6 @@
     {
       "name": "executor.check",
       "params": [],
-      "result": "value"
-    },
-    {
-      "name": "diagnostics.run",
-      "params": [
-        {
-          "name": "checkId",
-          "type": "string",
-          "required": true
-        }
-      ],
       "result": "value"
     },
     {
@@ -5506,6 +5484,28 @@
         }
       ],
       "description": "影响面（纯读）：双向遍历+facts 全列 digest；complete|incomplete|unknown 三态"
+    },
+    {
+      "name": "agent.trace",
+      "params": [
+        {
+          "name": "runId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
+    },
+    {
+      "name": "skill.body",
+      "params": [
+        {
+          "name": "skillId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value"
     }
   ],
   "events": [

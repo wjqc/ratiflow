@@ -105,7 +105,7 @@ fn bind_inline_secret(
     Ok(())
 }
 
-const PREFIXES: [&str; 29] = [
+  const PREFIXES: [&str; 26] = [
     "skill.",
     "settings.",
     "modelProvider.",
@@ -119,14 +119,11 @@ const PREFIXES: [&str; 29] = [
     "backup.",
     "audit.get",
     "audit.export",
-    "logs.",
-    "operation.",
     "knowledge.settings.",
     "knowledge.searchV2",
     "project.inspectRoot",
     "update.",
     "executor.",
-    "diagnostics.run",
     "sshTarget.bindProject",
     "gitlabProfile.currentUser",
     "gitlabProfile.checkProjectPermissions",
@@ -912,19 +909,6 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
             p.get("limit").and_then(|v| v.as_i64()).unwrap_or(200),
         )
         .map_err(serr),
-        "logs.list" => {
-            settings::backup_ext::logs_list(p.get("limit").and_then(|v| v.as_i64()).unwrap_or(50))
-                .map_err(serr)
-        }
-        "logs.exportDiagnosticBundle" => {
-            settings::backup_ext::export_diagnostic_bundle(store).map_err(serr)
-        }
-
-        // --- 长操作 ---
-        "operation.get" => {
-            let v = settings::operations::get(store, s(p, "operationId")?).map_err(serr)?;
-            Ok(serde_json::to_value(v).unwrap_or_default())
-        }
 
         // --- 知识默认 / 检索 v2 / 项目根 ---
         "knowledge.settings.get" => {
@@ -989,8 +973,6 @@ fn run(state: &AppState, store: &Store, method: &str, p: &Value) -> R {
         "executor.check" => Ok(settings::executor_ext::check(store).map_err(serr)?),
 
         // --- 诊断单项重查（S50） ---
-        "diagnostics.run" => crate::dispatch::diagnostics_run_pub(state, store, s(p, "checkId")?),
-
         // --- GitLab 细分（S30） ---
         "gitlabProfile.currentUser" => {
             let profile =

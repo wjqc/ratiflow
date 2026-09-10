@@ -125,31 +125,6 @@ export interface AuditGetResult {
   entry: AuditEntryExt;
 }
 
-/** audit.export 返回：去敏后扁平 JSON 数组（camelCase）。 */
-export interface AuditExportEntry {
-  seq: number;
-  actor: string;
-  actorKind: string;
-  action: string;
-  targetType: string;
-  targetId: string;
-  result: string;
-  correlationId?: string;
-  metadataRedacted: boolean;
-  createdAt: string;
-}
-
-/** logs.list 条目。 */
-export interface LogEntry {
-  name: string;
-  sizeBytes: number;
-  path: string;
-}
-
-export interface LogListResult {
-  items: LogEntry[];
-}
-
 /** project.inspectRoot 结果。 */
 export interface InspectRootResult {
   path: string;

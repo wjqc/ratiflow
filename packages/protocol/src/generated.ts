@@ -44,6 +44,7 @@ export type RpcMethodName =
   | 'artifact.freezeBaseline'
   | 'agent.start'
   | 'agent.get'
+  | 'agent.list'
   | 'agent.cancel'
   | 'agent.proposals'
   | 'gate.evaluate'
@@ -109,9 +110,6 @@ export type RpcMethodName =
   | 'backup.delete'
   | 'audit.get'
   | 'audit.export'
-  | 'logs.list'
-  | 'logs.exportDiagnosticBundle'
-  | 'operation.get'
   | 'knowledge.settings.get'
   | 'knowledge.settings.update'
   | 'knowledge.searchV2'
@@ -121,7 +119,6 @@ export type RpcMethodName =
   | 'executor.settings.get'
   | 'executor.settings.update'
   | 'executor.check'
-  | 'diagnostics.run'
   | 'gitlabProfile.currentUser'
   | 'gitlabProfile.checkProjectPermissions'
   | 'sshTarget.bindProject'
@@ -300,7 +297,9 @@ export type RpcMethodName =
   | 'mcp.importRevoke'
   | 'mcp.importList'
   | 'mcp.importGet'
-  | 'impact.forProposal';
+  | 'impact.forProposal'
+  | 'agent.trace'
+  | 'skill.body';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
   'core.version',
@@ -344,6 +343,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'artifact.freezeBaseline',
   'agent.start',
   'agent.get',
+  'agent.list',
   'agent.cancel',
   'agent.proposals',
   'gate.evaluate',
@@ -409,9 +409,6 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'backup.delete',
   'audit.get',
   'audit.export',
-  'logs.list',
-  'logs.exportDiagnosticBundle',
-  'operation.get',
   'knowledge.settings.get',
   'knowledge.settings.update',
   'knowledge.searchV2',
@@ -421,7 +418,6 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'executor.settings.get',
   'executor.settings.update',
   'executor.check',
-  'diagnostics.run',
   'gitlabProfile.currentUser',
   'gitlabProfile.checkProjectPermissions',
   'sshTarget.bindProject',
@@ -601,6 +597,8 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'mcp.importList',
   'mcp.importGet',
   'impact.forProposal',
+  'agent.trace',
+  'skill.body',
 ] as const;
 
 export const EVENT_TYPES: readonly string[] = [
@@ -955,6 +953,11 @@ export interface AgentGetParams {
   runId: string;
 }
 
+export interface AgentListParams {
+  workItemId: string;
+  limit?: number;
+}
+
 export interface AgentCancelParams {
   runId: string;
 }
@@ -1283,16 +1286,6 @@ export interface AuditExportParams {
   limit?: number;
 }
 
-export interface LogsListParams {
-  limit?: number;
-}
-
-export type LogsExportDiagnosticBundleParams = Record<string, never>;
-
-export interface OperationGetParams {
-  operationId: string;
-}
-
 export interface KnowledgeSettingsGetParams {
   projectId?: string;
 }
@@ -1326,10 +1319,6 @@ export interface ExecutorSettingsUpdateParams {
 }
 
 export type ExecutorCheckParams = Record<string, never>;
-
-export interface DiagnosticsRunParams {
-  checkId: string;
-}
 
 export interface GitlabProfileCurrentUserParams {
   profileId: string;
@@ -2328,4 +2317,12 @@ export interface McpImportGetParams {
 
 export interface ImpactForProposalParams {
   proposalId: string;
+}
+
+export interface AgentTraceParams {
+  runId: string;
+}
+
+export interface SkillBodyParams {
+  skillId: string;
 }

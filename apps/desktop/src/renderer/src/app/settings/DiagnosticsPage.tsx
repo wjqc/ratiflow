@@ -149,9 +149,6 @@ export function DiagnosticsPage() {
   const [usage, setUsage] = useState<ModelUsage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [systemData, setSystemData] = useState<Record<string, unknown>>({});
-  const [checkId, setCheckId] = useState('');
-  const [operationId, setOperationId] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -174,16 +171,6 @@ export function DiagnosticsPage() {
     : `${Math.round(usage.cacheHitRatio * 100)}%`;
   const daily = usage?.daily ?? [];
   const hasDailyVolume = daily.some((p) => p.totalTokens > 0);
-
-  const inspect = async (key: string, method: string, params: Record<string, unknown> = {}) => {
-    try {
-      const value = await rpc(method, params);
-      setSystemData((current) => ({ ...current, [key]: value }));
-      setError(null);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '诊断操作失败');
-    }
-  };
 
   return (
     <div className="sg-set-page">
@@ -240,22 +227,6 @@ export function DiagnosticsPage() {
             暂无模型缓存观测数据。
           </div>
         )}
-      </SettingsSection>
-      <SettingsSection title="诊断与审计" description="读取本地日志、通知、审计和不确定操作状态；导出内容由 Core 去敏。">
-        <div className="sg-row" style={{ flexWrap: 'wrap' }}>
-          <button className="sg-btn" onClick={() => void inspect('logs', 'logs.list', { limit: 100 })}>查看日志文件</button>
-          <button className="sg-btn" onClick={() => void inspect('diagnosticBundle', 'logs.exportDiagnosticBundle')}>导出诊断包</button>
-          <button className="sg-btn" onClick={() => void inspect('audit', 'audit.list', { limit: 100 })}>查看审计</button>
-          <button className="sg-btn" onClick={() => void inspect('auditExport', 'audit.export', { limit: 100 })}>导出去敏审计</button>
-          <button className="sg-btn" onClick={() => void inspect('notifications', 'notification.list')}>查看通知</button>
-        </div>
-        <div className="sg-row" style={{ marginTop: 10, flexWrap: 'wrap' }}>
-          <input className="sg-input" aria-label="诊断检查 ID" value={checkId} onChange={(event) => setCheckId(event.target.value)} placeholder="检查 ID" />
-          <button className="sg-btn" disabled={!checkId.trim()} onClick={() => void inspect('diagnosticRun', 'diagnostics.run', { checkId: checkId.trim() })}>运行检查</button>
-          <input className="sg-input" aria-label="操作 ID" value={operationId} onChange={(event) => setOperationId(event.target.value)} placeholder="unknown / pending 操作 ID" />
-          <button className="sg-btn" disabled={!operationId.trim()} onClick={() => void inspect('operation', 'operation.get', { operationId: operationId.trim() })}>查询操作状态</button>
-        </div>
-        {Object.keys(systemData).length > 0 ? <pre style={{ maxHeight: 380, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{JSON.stringify(systemData, null, 2)}</pre> : null}
       </SettingsSection>
     </div>
   );
