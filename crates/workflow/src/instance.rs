@@ -23,6 +23,8 @@ pub struct InstanceGate {
     pub ordinal: i64,
     pub title: String,
     pub purpose: String,
+    /// 本关默认执行 Agent 展示名（模板声明，随版本冻结；空 = UI 通用文案）。
+    pub agent: String,
     pub deliverables: Vec<String>,
     /// 本关验收策略（WP-7 双形态：字符串=仅展示；对象=结构化机器契约；
     /// 模板声明，随版本冻结；空 = 通用六输入门禁基线）。
@@ -102,7 +104,7 @@ pub fn gates_for_workitem(
     };
     store.with_conn(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT gd.gate_id, gd.ordinal, gd.title, gd.purpose, gd.deliverables_json,
+            "SELECT gd.gate_id, gd.ordinal, gd.title, gd.purpose, COALESCE(gd.agent,''), gd.deliverables_json,
                     COALESCE(gd.acceptance_json,'[]'), ig.state
              FROM workflow_instance_gates ig
              JOIN workflow_gate_definitions gd ON gd.id = ig.gate_definition_id
@@ -114,9 +116,10 @@ pub fn gates_for_workitem(
                 ordinal: r.get(1)?,
                 title: r.get(2)?,
                 purpose: r.get(3)?,
-                deliverables: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-                acceptance: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
-                state: r.get(6)?,
+                agent: r.get(4)?,
+                deliverables: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+                acceptance: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
+                state: r.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -328,6 +331,7 @@ mod tests {
                     gate_id: "fix".into(),
                     title: "修复关".into(),
                     purpose: String::new(),
+                    agent: String::new(),
                     deliverables: vec!["code".into()],
                     acceptance: vec!["补丁通过编译与回归".into()],
                     context_policy_ref: None,
@@ -340,6 +344,7 @@ mod tests {
                     gate_id: "confirm".into(),
                     title: "确认关".into(),
                     purpose: String::new(),
+                    agent: String::new(),
                     deliverables: vec!["verification".into()],
                     acceptance: vec![],
                     context_policy_ref: None,

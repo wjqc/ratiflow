@@ -11,7 +11,7 @@ describe('新建任务', () => {
     cleanup();
     rpcMock.mockReset();
     onCreated.mockReset();
-    rpcMock.mockImplementation((method: string) => {
+    rpcMock.mockImplementation((method: string, params?: { templateId?: string }) => {
       switch (method) {
         case 'workitem.create': return Promise.resolve({ id: 'wi_new' });
         case 'artifact.list': return Promise.resolve({ items: [] });
@@ -65,7 +65,7 @@ describe('新建任务', () => {
   });
 
   it('底部上下文栏展示工作区、本地状态、关卡模板与流程入口', async () => {
-    rpcMock.mockImplementation((method: string) => {
+    rpcMock.mockImplementation((method: string, params?: { templateId?: string }) => {
       if (method === 'workflowTemplate.list') {
         return Promise.resolve({
           items: [{ key: 'six-gate-default', name: '默认六关', versions: [{ status: 'active' }] }],
@@ -95,7 +95,7 @@ describe('新建任务', () => {
   });
 
   it('交付流程按所选模板动态展示：标签带「按所选模板」标注', async () => {
-    rpcMock.mockImplementation((method: string) => {
+    rpcMock.mockImplementation((method: string, params?: { templateId?: string }) => {
       if (method === 'workflowTemplate.list') {
         return Promise.resolve({
           items: [
@@ -105,15 +105,22 @@ describe('新建任务', () => {
         });
       }
       if (method === 'workflowTemplate.get') {
-        return Promise.resolve({
-          activeVersion: {
-            gates: [
-              { gate_id: 'requirements', title: '需求关', purpose: '澄清' },
-              { gate_id: 'development', title: '开发关', purpose: '编码' },
-              { gate_id: 'verification', title: '验证关', purpose: '验收' },
-            ],
-          },
-        });
+        const gates =
+          params?.templateId === 'tri-gate'
+            ? [
+                { gate_id: 'requirements', title: '需求关', purpose: '澄清' },
+                { gate_id: 'development', title: '开发关', purpose: '编码' },
+                { gate_id: 'verification', title: '验证关', purpose: '验收' },
+              ]
+            : [
+                { gate_id: 'requirements', title: '需求关', purpose: '澄清' },
+                { gate_id: 'design', title: '设计关', purpose: '方案' },
+                { gate_id: 'development', title: '开发关', purpose: '编码' },
+                { gate_id: 'testing', title: '测试关', purpose: '验证' },
+                { gate_id: 'deployment', title: '部署关', purpose: '发布' },
+                { gate_id: 'verification', title: '验证关', purpose: '验收' },
+              ];
+        return Promise.resolve({ activeVersion: { gates } });
       }
       return Promise.resolve({});
     });
@@ -128,9 +135,9 @@ describe('新建任务', () => {
       />,
     );
     await waitFor(() => expect(screen.getByLabelText('关卡模板')).toBeInTheDocument());
-    expect(screen.queryByText(/交付流程（6 关）/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/交付流程（6 关 · 按所选模板）/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /查看流程/ }));
-    expect(screen.getByText(/交付流程（6 关）/)).toBeInTheDocument();
+    expect(screen.getByText(/交付流程（6 关 · 按所选模板）/)).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('关卡模板'));
     fireEvent.click(screen.getByRole('button', { name: '三关精简' }));
     expect(screen.queryByRole('dialog', { name: '选择关卡模板' })).not.toBeInTheDocument();
@@ -142,7 +149,7 @@ describe('新建任务', () => {
   });
 
   it('"/" 选技能：浮层拾取后以胶囊呈现，提交携带冻结版本 id', async () => {
-    rpcMock.mockImplementation((method: string) => {
+    rpcMock.mockImplementation((method: string, params?: { templateId?: string }) => {
       if (method === 'skill.activeList') {
         return Promise.resolve({
           items: [
@@ -193,7 +200,7 @@ describe('新建任务', () => {
   });
 
   it('"@" 指 Agent：拾取后胶囊呈现，提交携带任务级默认 profile 版本', async () => {
-    rpcMock.mockImplementation((method: string) => {
+    rpcMock.mockImplementation((method: string, params?: { templateId?: string }) => {
       if (method === 'agentProfile.list') {
         return Promise.resolve({
           items: [
@@ -239,7 +246,7 @@ describe('新建任务', () => {
   });
 
   it('聚焦空输入框弹触发提示菜单，点选技能行直接唤起浮层', async () => {
-    rpcMock.mockImplementation((method: string) => {
+    rpcMock.mockImplementation((method: string, params?: { templateId?: string }) => {
       if (method === 'skill.activeList') {
         return Promise.resolve({
           items: [{ skillId: 'skill_a', name: 'side-effect-safety', versionId: 'skv_a', versionNo: 1 }],
@@ -280,7 +287,7 @@ describe('新建任务', () => {
   });
 
   it('Escape 关闭浮层不拾取；正文中的普通 "/" 不误触发', async () => {
-    rpcMock.mockImplementation((method: string) => {
+    rpcMock.mockImplementation((method: string, params?: { templateId?: string }) => {
       if (method === 'skill.activeList') {
         return Promise.resolve({
           items: [{ skillId: 'skill_a', name: 'side-effect-safety', versionId: 'skv_a', versionNo: 1 }],

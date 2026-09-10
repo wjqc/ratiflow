@@ -30,6 +30,7 @@ interface GateDefinition {
   gate_id: string;
   title: string;
   purpose: string;
+  agent?: string;
   deliverables: string[];
   acceptance: unknown[];
   context_policy_ref?: string | null;
@@ -44,6 +45,8 @@ interface GateDraft {
   gateId: string;
   title: string;
   purpose: string;
+  /** 本关默认执行 Agent 展示名（模板声明）。 */
+  agent: string;
   /** 逗号分隔编辑态；提交时拆分。 */
   deliverables: string;
   /** 每行一条编辑态；提交时逐行还原（对象契约按原文保真，见 acceptanceOut）。 */
@@ -69,6 +72,7 @@ function gatesToDraft(gates: GateDefinition[]): GateDraft[] {
     gateId: g.gate_id,
     title: g.title,
     purpose: g.purpose ?? '',
+    agent: g.agent ?? '',
     deliverables: (g.deliverables ?? []).join(', '),
     acceptanceLines: (g.acceptance ?? []).map((a) =>
       typeof a === 'string' ? a : JSON.stringify(a),
@@ -102,6 +106,7 @@ function draftToGates(draft: GateDraft[]): Array<Record<string, unknown>> {
       gateId: d.gateId.trim(),
       title: d.title.trim(),
       purpose: d.purpose.trim(),
+      agent: d.agent.trim(),
       deliverables: d.deliverables.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
       acceptance,
     };
@@ -136,6 +141,7 @@ const emptyGate = (): GateDraft => ({
   gateId: '',
   title: '',
   purpose: '',
+  agent: '',
   deliverables: '',
   acceptanceLines: [],
   acceptanceRaw: [],
@@ -566,6 +572,10 @@ function GateListEditor({ gates, onChange }: {
             <input value={gate.purpose} onChange={(e) => patch(i, { purpose: e.target.value })} placeholder="这一关要达成什么" />
           </label>
           <label className="sg-field">
+            <span>执行 Agent</span>
+            <input value={gate.agent} onChange={(e) => patch(i, { agent: e.target.value })} placeholder="需求分析 Agent" />
+          </label>
+          <label className="sg-field">
             <span>交付物 kind *（逗号分隔）</span>
             <input value={gate.deliverables} onChange={(e) => patch(i, { deliverables: e.target.value })} placeholder="doc, prd" />
           </label>
@@ -636,6 +646,9 @@ function GateViewer({ templateId, versionId }: { templateId: string; versionId: 
           </div>
           {g.purpose ? (
             <div className="sg-muted" style={{ fontSize: 12, marginTop: 2 }}>{g.purpose}</div>
+          ) : null}
+          {g.agent ? (
+            <div className="sg-muted" style={{ fontSize: 12, marginTop: 2 }}>执行 Agent：{g.agent}</div>
           ) : null}
           <div className="sg-muted" style={{ fontSize: 12, marginTop: 4 }}>
             交付物：{(g.deliverables ?? []).join('、') || '—'}

@@ -731,6 +731,7 @@ mod tests {
                 gate_id: "build".into(),
                 title: "构建关".into(),
                 purpose: String::new(),
+                agent: String::new(),
                 deliverables: vec!["code".into()],
                 acceptance: vec![],
                 context_policy_ref: None,

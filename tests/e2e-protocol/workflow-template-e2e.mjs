@@ -103,7 +103,8 @@ async function main() {
       const list = await c.call('workflowTemplate.list', {});
       const builtin = list.items.find((t) => t.key === 'six-gate-default');
       assert(!!builtin, '内置 six-gate-default 存在');
-      assert(builtin.versions.some((v) => v.version_no === 1 && v.status === 'active'), '内置模板 v1 active');
+      assert(builtin.versions.some((v) => v.version_no === 2 && v.status === 'active'), '内置模板 v2 active');
+      assert(builtin.versions.some((v) => v.version_no === 1 && v.status === 'deprecated'), '内置模板 v1 已弃用（版本不可变）');
       const builtinDetail = await c.call('workflowTemplate.get', { templateId: 'six-gate-default' });
       assert(builtinDetail.activeVersion.gates.length === 6, '默认模板 6 关定义');
       assert(builtinDetail.activeVersion.gates[5].gate_id === 'verification', '默认模板顺序以 verification 收尾');

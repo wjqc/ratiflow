@@ -313,6 +313,7 @@ mod tests {
                 gate_id: "confirm".into(),
                 title: "确认关".into(),
                 purpose: String::new(),
+                agent: String::new(),
                 deliverables: vec!["verification".into()],
                 acceptance: vec![
                     json!({"verifier": "manual_confirm", "confirmation_subject": "gate_manual_confirm", "confirm_role": "user"}),

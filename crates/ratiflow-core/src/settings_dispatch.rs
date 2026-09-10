@@ -105,7 +105,7 @@ fn bind_inline_secret(
     Ok(())
 }
 
-  const PREFIXES: [&str; 26] = [
+const PREFIXES: [&str; 26] = [
     "skill.",
     "settings.",
     "modelProvider.",

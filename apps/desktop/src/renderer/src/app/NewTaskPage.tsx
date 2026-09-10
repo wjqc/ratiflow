@@ -64,15 +64,6 @@ const MODE_CHIPS: Array<{ mode: Mode; label: string; icon: ReactNode }> = [
   { mode: 'image', label: '图片', icon: <IconImage size={13} /> },
 ];
 
-const GATE_FLOW: Array<{ name: string; sub: string }> = [
-  { name: '需求关', sub: '需求澄清与范围确认' },
-  { name: '方案关', sub: '整体方案与技术设计' },
-  { name: '开发关', sub: '编码实现与单元测试' },
-  { name: '测试关', sub: '集成测试与质量验证' },
-  { name: '部署关', sub: '部署与环境准备' },
-  { name: '验证关', sub: '验收与交付验证' },
-];
-
 // 统一输入器：文字 / 本地文档 / GitLab Issue / 图片 四种来源（规范 §4.2）。
 // 组件不推断上传成功；状态以服务端返回为准。
 export default function NewTaskPage({
@@ -99,8 +90,8 @@ export default function NewTaskPage({
   // 关卡模板（配置化）：有 active 版本的模板可选；默认 six-gate-default。
   const [templates, setTemplates] = useState<{ key: string; name: string }[]>([]);
   const [templateKey, setTemplateKey] = useState('six-gate-default');
-  // 所选模板的关卡流预览：默认模板用本地常量（免请求），自定义模板读激活版本定义。
-  const [flowGates, setFlowGates] = useState<Array<{ name: string; sub: string }>>(GATE_FLOW);
+  // 所选模板的关卡流预览：统一读激活版本定义（默认模板亦然，无本地硬编码）。
+  const [flowGates, setFlowGates] = useState<Array<{ name: string; sub: string }>>([]);
   // "/" 与 "@"：快捷选择浮层（触发位置 start、过滤串、高亮序）与已选胶囊。
   const [picker, setPicker] = useState<{ kind: 'skill' | 'agent'; start: number } | null>(null);
   const [pickerQuery, setPickerQuery] = useState('');
@@ -155,10 +146,6 @@ export default function NewTaskPage({
   }, []);
 
   useEffect(() => {
-    if (templateKey === 'six-gate-default') {
-      setFlowGates(GATE_FLOW);
-      return;
-    }
     let cancelled = false;
     rpc<{ activeVersion?: { gates?: { gate_id: string; title: string; purpose?: string }[] } }>(
       'workflowTemplate.get',
@@ -772,7 +759,7 @@ export default function NewTaskPage({
           {flowOpen ? (
             <div className="sg-nt-flow-panel">
               <div className="sg-nt-flow-label">
-                交付流程（{flowGates.length} 关{templateKey !== 'six-gate-default' ? ' · 按所选模板' : ''}）
+                交付流程（{flowGates.length} 关 · 按所选模板）
               </div>
               <div className={`sg-nt-flow ${flowGates.length > 6 ? 'sg-nt-flow--dense' : ''}`}>
                 {flowGates.map((g, i) => (

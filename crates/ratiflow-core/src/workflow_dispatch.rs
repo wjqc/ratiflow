@@ -111,6 +111,11 @@ fn parse_gates(params: &Value) -> Result<Vec<sg_workflow::template::GateDefInput
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            agent: g
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             deliverables: str_list("deliverables"),
             acceptance: value_list("acceptance"),
             context_policy_ref: opt_ref("contextPolicyRef"),

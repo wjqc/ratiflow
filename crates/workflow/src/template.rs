@@ -141,6 +141,8 @@ pub struct GateDefinition {
     pub ordinal: i64,
     pub title: String,
     pub purpose: String,
+    /// 本关默认执行 Agent 展示名（模板声明，随版本冻结；空 = UI 通用文案）。
+    pub agent: String,
     pub deliverables: Vec<String>,
     /// 本关验收策略（WP-7 双形态：字符串=仅展示；对象=结构化机器契约，
     /// 形状由 sg-workflow acceptance 校验；空 = 沿用通用六输入门禁基线）。
@@ -171,6 +173,8 @@ pub struct GateDefInput {
     pub title: String,
     #[serde(default)]
     pub purpose: String,
+    #[serde(default)]
+    pub agent: String,
     #[serde(default)]
     pub deliverables: Vec<String>,
     #[serde(default)]
@@ -215,21 +219,23 @@ fn policy_slot<T: serde::Serialize>(policy: &Option<T>) -> String {
 }
 
 /// 版本内容 digest：
-/// sha256("v4|" + join("ordinal|gate_id|title|purpose|deliverables_csv|acceptance_v3|ctx_ref|team_ref|ws_ref|skip_policy|fast_track_policy", "\n"))。
+/// sha256("v5|" + join("ordinal|gate_id|title|purpose|agent|deliverables_csv|acceptance_v3|ctx_ref|team_ref|ws_ref|skip_policy|fast_track_policy", "\n"))。
 /// v3（WP-7）：acceptance 槽升级为逐元素 canonical 形态。
-/// v4（WP-8）：追加 skip_policy/fast_track_policy 两槽（canonical JSON / `-`）；
-/// v1/v2/v3 存量激活版本不重算，仅新版本生效。版本标签永不复用为两套 canonical schema。
+/// v4（WP-8）：追加 skip_policy/fast_track_policy 两槽（canonical JSON / `-`）。
+/// v5：追加 agent 展示名槽（关卡展示元数据收编入模板）。
+/// v1-v4 存量激活版本不重算，仅新版本生效。版本标签永不复用为两套 canonical schema。
 pub fn content_digest(defs: &[GateDefInput]) -> String {
     let lines: Vec<String> = defs
         .iter()
         .enumerate()
         .map(|(i, d)| {
             format!(
-                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                 i + 1,
                 d.gate_id,
                 d.title,
                 d.purpose,
+                d.agent,
                 d.deliverables.join(","),
                 acceptance_v3_slot(&d.acceptance),
                 ref_str(&d.context_policy_ref),
@@ -241,7 +247,7 @@ pub fn content_digest(defs: &[GateDefInput]) -> String {
         })
         .collect();
     let mut hasher = Sha256::new();
-    hasher.update(format!("v4|{}", lines.join("\n")).as_bytes());
+    hasher.update(format!("v5|{}", lines.join("\n")).as_bytes());
     sg_store::ids::hex(&hasher.finalize())
 }
 
@@ -430,8 +436,8 @@ fn insert_defs(
     let now = timefmt::now();
     for (i, d) in defs.iter().enumerate() {
         conn.execute(
-            "INSERT INTO workflow_gate_definitions(id, version_id, gate_id, ordinal, title, purpose, deliverables_json, acceptance_json, context_policy_ref, team_policy_ref, workspace_policy_ref, skip_policy_json, fast_track_policy_json, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            "INSERT INTO workflow_gate_definitions(id, version_id, gate_id, ordinal, title, purpose, agent, deliverables_json, acceptance_json, context_policy_ref, team_policy_ref, workspace_policy_ref, skip_policy_json, fast_track_policy_json, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             rusqlite::params![
                 ids::new_id("wgd"),
                 version_id,
@@ -439,6 +445,7 @@ fn insert_defs(
                 (i + 1) as i64,
                 d.title.trim(),
                 d.purpose.trim(),
+                d.agent.trim(),
                 serde_json::to_string(&d.deliverables).unwrap_or_else(|_| "[]".into()),
                 serde_json::to_string(&d.acceptance).unwrap_or_else(|_| "[]".into()),
                 d.context_policy_ref,
@@ -510,6 +517,7 @@ pub fn activate(store: &Store, version_id: &str) -> Result<VersionRecord, Error>
                 gate_id: d.gate_id.clone(),
                 title: d.title.clone(),
                 purpose: d.purpose.clone(),
+                agent: d.agent.clone(),
                 deliverables: d.deliverables.clone(),
                 acceptance: d.acceptance.clone(),
                 context_policy_ref: d.context_policy_ref.clone(),
@@ -601,7 +609,7 @@ pub fn definitions(
     let mut stmt = conn.prepare(
         "SELECT id, version_id, gate_id, ordinal, title, purpose, deliverables_json,
                 COALESCE(acceptance_json,'[]'), context_policy_ref, team_policy_ref, workspace_policy_ref,
-                COALESCE(skip_policy_json,'{}'), COALESCE(fast_track_policy_json,'{}')
+                COALESCE(skip_policy_json,'{}'), COALESCE(fast_track_policy_json,'{}'), COALESCE(agent,'')
          FROM workflow_gate_definitions WHERE version_id=?1 ORDER BY ordinal",
     )?;
     let rows = stmt.query_map([version_id], |r| {
@@ -614,6 +622,7 @@ pub fn definitions(
             ordinal: r.get(3)?,
             title: r.get(4)?,
             purpose: r.get(5)?,
+            agent: r.get(13)?,
             deliverables: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
             acceptance: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
             context_policy_ref: r.get(8)?,
@@ -706,6 +715,7 @@ mod tests {
                 gate_id: "triage".into(),
                 title: "分诊关".into(),
                 purpose: "快速分诊".into(),
+                agent: "分诊 Agent".into(),
                 deliverables: vec!["doc".into()],
                 acceptance: vec![serde_json::json!("分诊结论落档")],
                 context_policy_ref: None,
@@ -718,6 +728,7 @@ mod tests {
                 gate_id: "fix".into(),
                 title: "修复关".into(),
                 purpose: "实施热修复".into(),
+                agent: String::new(),
                 deliverables: vec!["code".into()],
                 acceptance: vec![],
                 context_policy_ref: None,
@@ -730,6 +741,7 @@ mod tests {
                 gate_id: "confirm".into(),
                 title: "确认关".into(),
                 purpose: "确认恢复".into(),
+                agent: String::new(),
                 deliverables: vec!["verification".into()],
                 acceptance: vec![],
                 context_policy_ref: None,
@@ -749,6 +761,13 @@ mod tests {
         assert_eq!(defs.len(), 6);
         assert_eq!(defs[0].gate_id, "requirements");
         assert_eq!(defs[5].deliverables, vec!["verification".to_string()]);
+        // v2 起展示元数据（acceptance/agent）收编入模板：非空即配置面生效。
+        assert_eq!(
+            defs[0].acceptance.len(),
+            3,
+            "默认模板需求关应有三条验收要求"
+        );
+        assert!(!defs[0].agent.is_empty(), "默认模板需求关应声明执行 Agent");
         // 内置模板 digest 与迁移常量一致（内容未被篡改）。
         let version = store.with_conn(|c| version_row(c, &version_id)).unwrap();
         let inputs: Vec<GateDefInput> = defs
@@ -757,6 +776,7 @@ mod tests {
                 gate_id: d.gate_id.clone(),
                 title: d.title.clone(),
                 purpose: d.purpose.clone(),
+                agent: d.agent.clone(),
                 deliverables: d.deliverables.clone(),
                 acceptance: d.acceptance.clone(),
                 context_policy_ref: d.context_policy_ref.clone(),
@@ -770,9 +790,9 @@ mod tests {
     }
 
     /// WP-8：skip/fast-track 策略——schema 严格（未知字段创建即拒）、部署/迁移类
-    /// 关恒 forbidden、策略参与 digest v4、roundtrip 读回保真。
+    /// 关恒 forbidden、策略参与 digest、roundtrip 读回保真（digest 公式现为 v5）。
     #[test]
-    fn skip_fast_track_policy_validation_and_digest_v4() {
+    fn skip_fast_track_policy_validation_and_digest_v5() {
         let store = setup();
         let t = create_template(&store, "wp8-skip", "跳关策略").unwrap();
         let defs = |skip: Option<SkipPolicy>, ft: Option<FastTrackPolicy>| -> Vec<GateDefInput> {
@@ -780,6 +800,7 @@ mod tests {
                 gate_id: "review".into(),
                 title: "评审关".into(),
                 purpose: String::new(),
+                agent: String::new(),
                 deliverables: vec!["doc".into()],
                 acceptance: vec![],
                 context_policy_ref: None,
@@ -808,6 +829,7 @@ mod tests {
             gate_id: "deploy".into(),
             title: "部署关".into(),
             purpose: String::new(),
+            agent: String::new(),
             deliverables: vec!["deployment".into()],
             acceptance: vec![],
             context_policy_ref: None,
@@ -880,6 +902,7 @@ mod tests {
                 gate_id: "fix".into(),
                 title: "a".into(),
                 purpose: String::new(),
+                agent: String::new(),
                 deliverables: vec!["code".into()],
                 acceptance: vec![],
                 context_policy_ref: None,
@@ -892,6 +915,7 @@ mod tests {
                 gate_id: "fix".into(),
                 title: "b".into(),
                 purpose: String::new(),
+                agent: String::new(),
                 deliverables: vec!["code".into()],
                 acceptance: vec![],
                 context_policy_ref: None,
@@ -942,6 +966,7 @@ mod tests {
                 gate_id: "confirm".into(),
                 title: "确认关".into(),
                 purpose: String::new(),
+                agent: String::new(),
                 deliverables: vec!["verification".into()],
                 acceptance: if structured {
                     vec![
