@@ -18,14 +18,14 @@ import {
   IconPlay,
   IconPlus,
   IconSearch,
-  IconSend,
   IconShield,
   IconTarget,
   IconText,
   IconX,
 } from '../components/Icons';
 import { ModelPicker } from './ModelPicker';
-import { QuickPalette } from './QuickPalette';
+import GateDeliveryReview from './GateDeliveryReview';
+import TaskComposer, { ComposerMenuItem } from './TaskComposer';
 import { useComposerAssignments } from './useComposerAssignments';
 import RecoveryPanel from './RecoveryPanel';
 import TaskGovernancePanel from './TaskGovernancePanel';
@@ -615,7 +615,7 @@ function formatElapsed(fromIso: string, toIso?: string): string {
   return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
-function ExecutionProcessView({
+export function ExecutionProcessView({
   workItemId,
   gate,
   stage,
@@ -638,13 +638,62 @@ function ExecutionProcessView({
 }) {
   const [showReasoning, setShowReasoning] = useState(true);
   const [showFinal, setShowFinal] = useState(false);
+  const [showCheckpoints, setShowCheckpoints] = useState(false);
+  const [artifactOutputs, setArtifactOutputs] = useState<{ id: string; title: string; revisionId: string; status: string }[]>([]);
+  const [outputError, setOutputError] = useState('');
+  const [outputLoading, setOutputLoading] = useState(true);
+  const [outputPreview, setOutputPreview] = useState<{ title: string; content: string } | null>(null);
+  // 本次 Run 的服务端版本绑定（agent.gateContext）：界面核对"已读取哪些上游交付物及版本"。
+  const [gateUpstream, setGateUpstream] = useState<{ gate: string; gateTitle: string; kind: string; title: string; revisionId: string; revNo: number; etag: string; baselineId: string }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    setOutputLoading(true);
+    void (async () => {
+      try {
+        const page = await rpc<{ items: { id: string; kind: string; title: string }[] }>('artifact.list', { workItemId });
+        const outputs = await Promise.all(page.items.map(async (artifact) => {
+          const revisions = await rpc<{ items: { id: string; rev_no: number; status: string }[] }>('artifact.listRevisions', { artifactId: artifact.id });
+          const latest = revisions.items.filter((r) => r.status !== 'superseded').sort((a, b) => b.rev_no - a.rev_no)[0];
+          return latest ? { id: artifact.id, title: artifact.title || artifact.kind, revisionId: latest.id, status: latest.status } : null;
+        }));
+        if (!cancelled) { setArtifactOutputs(outputs.filter((output) => output !== null)); setOutputError(''); }
+      } catch (reason) {
+        if (!cancelled) setOutputError(`产物加载失败：${reason instanceof Error ? reason.message : String(reason)}`);
+      } finally { if (!cancelled) setOutputLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [workItemId, runs, docs]);
+  const openOutput = async (output: { title: string; revisionId: string }) => {
+    try {
+      const result = await rpc<{ content: string }>('artifact.revisionContent', { revisionId: output.revisionId });
+      setOutputPreview({ title: output.title, content: result.content });
+    } catch (reason) { setOutputError(`无法打开产物：${reason instanceof Error ? reason.message : String(reason)}`); }
+  };
   const steps = trace?.steps ?? [];
   const toolSteps = steps.filter((s) => s.kind === 'tool');
-  const reasonSteps = steps.filter((s) => s.kind === 'reasoning');
+  const reasonSteps = steps.filter((s) => s.kind === 'reasoning' && s.name !== 'final');
   const latestReason = reasonSteps[reasonSteps.length - 1] ?? null;
-  const failedRun = runs.find((r) => r.status === 'failed');
-  const finishedRun = runs.find((r) => r.status === 'completed_execution');
   const activeRun = runs.find((r) => r.status === 'running' || r.status === 'queued') ?? runs[0] ?? null;
+  const failedRun = activeRun?.status === 'failed' ? activeRun : null;
+  const finishedRun = activeRun?.status === 'completed_execution' ? activeRun : null;
+
+  // 本次 Run 的服务端版本绑定（agent.gateContext）：核对"已读取哪些上游交付物及版本"。
+  // 旧 Run / 首关无绑定记录时如实留空。
+  useEffect(() => {
+    let cancelled = false;
+    setGateUpstream([]);
+    const runId = activeRun?.id;
+    if (!runId) return;
+    void (async () => {
+      try {
+        const ctx = await rpc<{ upstream: { gate: string; gateTitle: string; kind: string; title: string; revisionId: string; revNo: number; etag: string; baselineId: string }[] }>('agent.gateContext', { runId });
+        if (!cancelled) setGateUpstream(ctx.upstream ?? []);
+      } catch {
+        if (!cancelled) setGateUpstream([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeRun?.id]);
 
   // 进度：以迭代步数估算（预算 40 次工具调用上限对齐 max_iterations 语义），完成即 100%。
   const finished = activeRun?.status === 'completed_execution';
@@ -708,7 +757,7 @@ function ExecutionProcessView({
         <div className="sg-card sg-process-current">
           <div className="sg-process-current-head">
             当前步骤 {stepIndex}/{totalSteps}：
-            {latestReason ? (latestReason.name === 'final' ? '生成最终结果' : latestReason.name) : '等待启动'}
+            {finished ? '生成最终结果' : latestReason?.name || '等待启动'}
           </div>
           <div className="sg-process-progress">
             <div className="sg-process-progress-bar">
@@ -751,14 +800,21 @@ function ExecutionProcessView({
                       </div>
                     );
                   })}
-                  {toolSteps.length > 3 ? (
-                    <div className="sg-process-info-more">查看全部工具调用（{toolSteps.length}）</div>
-                  ) : null}
                 </>
               )}
             </div>
             <div className="sg-process-info">
               <div className="sg-process-info-head">输入（Input）</div>
+              {gateUpstream.length ? (
+                <>
+                  {gateUpstream.map((u) => (
+                    <div className="sg-process-file" key={u.revisionId} title={`基线 ${u.baselineId}`}>
+                      <IconDoc size={12} /> {u.gateTitle}《{u.title}》 · rev {u.revNo} · {u.etag}
+                    </div>
+                  ))}
+                  <div className="sg-process-info-empty">以上为本次运行绑定的上游已批准版本（服务端固定装配）</div>
+                </>
+              ) : null}
               {(inputDocs.length ? inputDocs : ['requirement.md']).map((d) => (
                 <div className="sg-process-file" key={d}>
                   <IconDoc size={12} /> {d}
@@ -770,18 +826,19 @@ function ExecutionProcessView({
             </div>
             <div className="sg-process-info">
               <div className="sg-process-info-head">输出（Output）</div>
-              {outputDocs.length === 0 ? (
-                <div className="sg-process-info-empty">暂无产出文件</div>
+              {outputError ? <div role="alert">{outputError}</div> : null}
+              {artifactOutputs.map((output) => <button className="sg-link-btn sg-process-file" key={output.id} onClick={() => void openOutput(output)}>
+                <IconDoc size={12} /> {output.title} · {output.status === 'frozen' ? '已冻结' : output.status === 'in_review' ? '评审中' : '草稿'}
+              </button>)}
+              {outputDocs.length === 0 && artifactOutputs.length === 0 ? (
+                <div className="sg-process-info-empty">{outputLoading ? '正在加载产物…' : outputError ? '产物状态暂不可用' : '暂无已保存产物'}</div>
               ) : (
                 <>
-                  {outputDocs.slice(0, 3).map((d) => (
+                  {outputDocs.map((d) => (
                     <div className="sg-process-file" key={d}>
                       <IconDoc size={12} /> {d}
                     </div>
                   ))}
-                  {outputDocs.length > 3 ? (
-                    <div className="sg-process-info-more">+ {outputDocs.length - 3} 个文件</div>
-                  ) : null}
                 </>
               )}
             </div>
@@ -791,25 +848,29 @@ function ExecutionProcessView({
                 <div className="sg-process-info-empty">暂无检查点</div>
               ) : (
                 <>
-                  {(trace?.checkpoints ?? []).slice(0, 2).map((c) => (
+                  {(showCheckpoints ? trace?.checkpoints ?? [] : (trace?.checkpoints ?? []).slice(0, 2)).map((c) => (
                     <div className="sg-process-file" key={c.seq}>
-                      已保存中间结果
+                      检查点 #{c.seq}
                       <span className="sg-process-tool-dur">{timelineTime(c.createdAt)}</span>
                     </div>
                   ))}
                   {(trace?.checkpoints ?? []).length > 2 ? (
-                    <div className="sg-process-info-more">
-                      查看全部检查点（{trace?.checkpoints.length}）
-                    </div>
+                    <button className="sg-link-btn sg-process-info-more" aria-expanded={showCheckpoints} onClick={() => setShowCheckpoints((value) => !value)}>
+                      {showCheckpoints ? '收起检查点' : `查看全部检查点（${trace?.checkpoints.length}）`}
+                    </button>
                   ) : null}
                 </>
               )}
             </div>
           </div>
 
+          {outputPreview ? <section className="sg-process-section" aria-label="产物预览">
+            <div className="sg-row"><strong>{outputPreview.title}</strong><button className="sg-link-btn" onClick={() => setOutputPreview(null)}>关闭产物预览</button></div>
+            <div className="sg-md-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(outputPreview.content) }} />
+          </section> : null}
           <div className="sg-process-section sg-process-section--row">
-            <span className="sg-process-ok-icon">
-              <IconCheck size={11} />
+            <span className={failedRun ? 'sg-process-error-icon' : 'sg-process-ok-icon'}>
+              {failedRun ? <IconAlert size={11} /> : <IconCheck size={11} />}
             </span>
             错误与警告
             <span className="sg-process-section-note">
@@ -1120,7 +1181,7 @@ function ConversationTurn({
     };
   }, [isLatest, showReasoning, turnTrace, run.id]);
 
-  const reasonSteps = (turnTrace?.steps ?? []).filter((s) => s.kind === 'reasoning');
+  const reasonSteps = (turnTrace?.steps ?? []).filter((s) => s.kind === 'reasoning' && s.name !== 'final');
   const toolSteps = (turnTrace?.steps ?? []).filter((s) => s.kind === 'tool');
   const liveSteps = [...reasonSteps, ...toolSteps].sort((a, b) => a.seq - b.seq);
 
@@ -1397,25 +1458,13 @@ function Composer({
   const [runId, setRunId] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  // “+”添加菜单：附件导入与 # 知识来源引用（均接真实 RPC）。
-  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  // “+”添加菜单：附件导入与 # 知识来源引用（均接真实 RPC）；菜单外壳与开关在 TaskComposer。
   const [addMenuView, setAddMenuView] = useState<'root' | 'context'>('root');
   const [contextSources, setContextSources] = useState<{ id: string; name: string }[]>([]);
   const [addStatus, setAddStatus] = useState('');
-  const addMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!addMenuOpen) return;
-    const close = (event: MouseEvent) => {
-      if (!addMenuRef.current?.contains(event.target as Node)) setAddMenuOpen(false);
-    };
-    window.addEventListener('mousedown', close);
-    return () => window.removeEventListener('mousedown', close);
-  }, [addMenuOpen]);
 
   // 附件：原生文件对话框 → attachment.import（对象存储 + 附件记录）。
   const importAttachment = async () => {
-    setAddMenuOpen(false);
     const file = await window.ratiflow.selectFile();
     if (!file) return;
     try {
@@ -1443,8 +1492,8 @@ function Composer({
     }
   };
 
-  const mentionSource = (name: string) => {
-    setAddMenuOpen(false);
+  const mentionSource = (name: string, close: () => void) => {
+    close();
     setText((prev) => `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}#${name} `);
   };
 
@@ -1537,133 +1586,74 @@ function Composer({
           ) : null}
         </div>
       ) : null}
-      <div className="sg-composer-main">
-        {assignments.agent || assignments.skills.length ? (
-          <div className="sg-composer-assignments" aria-label="已选 Agent 和技能">
-            {assignments.agent ? <span className="sg-composer-chip">@ {assignments.agent.label}
-              <button className="sg-icon-btn" disabled={busy} aria-label={`移除指派 Agent ${assignments.agent.label}`} onClick={assignments.removeAgent}><IconX size={12} /></button>
-            </span> : null}
-            {assignments.skills.map((skill) => <span className="sg-composer-chip" key={skill.versionId}>/ {skill.label}
-              <button className="sg-icon-btn" disabled={busy} aria-label={`移除技能 ${skill.label}`} onClick={() => assignments.removeSkill(skill.versionId)}><IconX size={12} /></button>
-            </span>)}
-          </div>
-        ) : null}
-        {assignments.picker ? <QuickPalette items={assignments.items} highlight={assignments.highlight} emptyText={assignments.emptyText} onPick={assignments.pick} /> : null}
-        {addStatus ? (
+      <TaskComposer
+        text={text}
+        assignments={assignments}
+        placeholder="提出后续修改要求"
+        ariaLabel="补充说明"
+        busy={busy}
+        sendDisabled={busy || text.trim() === ''}
+        sendTitle={busy ? '处理中…' : '发送（⌘↵）'}
+        sendAriaLabel={busy ? '处理中' : '发送'}
+        onSend={() => void submit()}
+        onAddMenuOpen={() => setAddMenuView('root')}
+        renderAddMenu={(close) => (addMenuView === 'root' ? (
+          <>
+            <ComposerMenuItem
+              icon={<IconPaperclip size={14} />}
+              label="添加附件"
+              onSelect={() => { close(); void importAttachment(); }}
+            />
+            <ComposerMenuItem
+              icon={<span aria-hidden="true">@</span>}
+              label="指派 Agent"
+              onSelect={() => { close(); assignments.open('agent'); }}
+            />
+            <ComposerMenuItem
+              icon={<span aria-hidden="true">/</span>}
+              label="选择技能"
+              onSelect={() => { close(); assignments.open('skill'); }}
+            />
+            <ComposerMenuItem
+              icon={<span aria-hidden="true">#</span>}
+              label="引用知识源"
+              onSelect={() => void openContextMenu()}
+            />
+          </>
+        ) : (
+          <>
+            <div className="sg-compose-add-title">引用知识来源</div>
+            {contextSources.length === 0 ? (
+              <div className="sg-compose-add-empty">
+                项目暂无知识来源，可到「知识库」添加后引用。
+              </div>
+            ) : (
+              contextSources.map((source) => (
+                <ComposerMenuItem
+                  key={source.id}
+                  icon={<IconBook size={14} />}
+                  label={`#${source.name}`}
+                  onSelect={() => mentionSource(source.name, close)}
+                />
+              ))
+            )}
+          </>
+        ))}
+        contextChip={(
+          <span className="sg-composer-chip sg-composer-chip--flat">
+            <IconBook size={12} />
+            本次上下文：知识库（{knowledgeCount} 个来源）
+          </span>
+        )}
+        aboveInput={addStatus ? (
           <div className="sg-compose-add-status" role="status">
             <span>{addStatus}</span>
             <button className="sg-link-btn" onClick={() => setAddStatus('')}>
               关闭
             </button>
           </div>
-        ) : null}
-        <textarea
-          className="sg-composer-input"
-          ref={assignments.inputRef}
-          readOnly={busy}
-          placeholder="提出后续修改要求"
-          rows={2}
-          value={text}
-          onChange={(e) => { setAddMenuOpen(false); assignments.change(e.target.value, e.target.selectionStart); }}
-          onBlur={assignments.close}
-          onKeyDown={(e) => {
-            if (assignments.onKeyDown(e)) return;
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-          aria-label="补充说明"
-        />
-        <div className="sg-composer-bar">
-          <div className="sg-composer-bar-left">
-            <div className="sg-compose-add" ref={addMenuRef}>
-              <button
-                className="sg-compose-add-btn"
-                title="添加"
-                aria-label="添加"
-                aria-expanded={addMenuOpen}
-                disabled={busy}
-                onClick={() => {
-                  assignments.close();
-                  setAddMenuOpen((v) => {
-                    if (!v) setAddMenuView('root');
-                    return !v;
-                  });
-                }}
-              >
-                <IconPlus size={15} />
-              </button>
-              {addMenuOpen ? (
-                <div className="sg-compose-add-menu" role="menu">
-                  {addMenuView === 'root' ? (
-                    <>
-                      <button
-                        className="sg-compose-add-item"
-                        role="menuitem"
-                        onClick={() => void importAttachment()}
-                      >
-                        <IconPaperclip size={14} />
-                        <span>添加附件</span>
-                      </button>
-                      <button className="sg-compose-add-item" role="menuitem" onClick={() => { setAddMenuOpen(false); assignments.open('agent'); }}>
-                        <span aria-hidden="true">@</span><span>指派 Agent</span>
-                      </button>
-                      <button className="sg-compose-add-item" role="menuitem" onClick={() => { setAddMenuOpen(false); assignments.open('skill'); }}>
-                        <span aria-hidden="true">/</span><span>选择技能</span>
-                      </button>
-                      <button
-                        className="sg-compose-add-item"
-                        role="menuitem"
-                        onClick={() => void openContextMenu()}
-                      >
-                        <span aria-hidden="true">#</span><span>引用知识源</span>
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <div className="sg-compose-add-title">引用知识来源</div>
-                      {contextSources.length === 0 ? (
-                        <div className="sg-compose-add-empty">
-                          项目暂无知识来源，可到「知识库」添加后引用。
-                        </div>
-                      ) : (
-                        contextSources.map((source) => (
-                          <button
-                            key={source.id}
-                            className="sg-compose-add-item"
-                            role="menuitem"
-                            onClick={() => mentionSource(source.name)}
-                          >
-                            <IconBook size={14} />
-                            <span>#{source.name}</span>
-                          </button>
-                        ))
-                      )}
-                    </>
-                  )}
-                </div>
-              ) : null}
-            </div>
-            <span className="sg-composer-chip sg-composer-chip--flat">
-              <IconBook size={12} />
-              本次上下文：知识库（{knowledgeCount} 个来源）
-            </span>
-          </div>
-          <div className="sg-composer-bar-right">
-            <ModelPicker />
-            <button
-              className="sg-compose-send"
-              title={busy ? '处理中…' : '发送（⌘↵）'}
-              aria-label={busy ? '处理中' : '发送'}
-              disabled={busy || text.trim() === ''}
-              onClick={() => void submit()}
-            >
-              <IconSend size={15} />
-            </button>
-          </div>
-        </div>
-      </div>
+        ) : undefined}
+      />
     </div>
   );
 }
@@ -1765,7 +1755,7 @@ function DeliverableChip({
   const MISSING_LABELS: Record<string, string> = {
     artifact_absent: '缺工件',
     revision_absent: '无修订',
-    not_frozen: '未冻结',
+    not_frozen: '待审阅通过',
     empty_content: '空内容',
   };
   const entries =
@@ -1787,12 +1777,12 @@ function DeliverableChip({
           className={`sg-gate-req${e.satisfied ? '' : ' sg-gate-req--missing'}`}
           title={
             e.satisfied
-              ? '交付物已冻结基线，可进入审批'
-              : '该交付物未就绪：无冻结交付物不可进入审批'
+              ? '交付物已就绪，可审阅后通过本关'
+              : '查看交付物后选择通过，或留下评语打回修改'
           }
         >
           {e.satisfied ? <IconCheck size={12} /> : '✗'} 交付物（{e.kind}）
-          {e.satisfied ? '已冻结' : MISSING_LABELS[e.missing ?? ''] ?? '未就绪'}
+          {e.satisfied ? '已就绪' : MISSING_LABELS[e.missing ?? ''] ?? '未就绪'}
         </div>
       ))}
       {!allSatisfied ? (
@@ -1905,6 +1895,18 @@ function GateWorkspace({
   const gateTitle = instanceGate?.title || gateLabel(gate);
   const gateSub = instanceGate?.purpose || '';
   const agentName = instanceGate?.agent || '执行 Agent';
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewRevision, setReviewRevision] = useState(0);
+  const onReviewChanged = () => {
+    setReviewRevision((value) => value + 1);
+    onChanged();
+  };
+  const reviewRef = useRef<HTMLElement>(null);
+  const hasDocumentPanel = Boolean(gate);
+  const openReview = () => {
+    setReviewOpen(true);
+    requestAnimationFrame(() => reviewRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+  };
   const gateReqs = instanceGate?.acceptance?.length
     ? instanceGate.acceptance
     : ['完成本关交付物并通过放行审批'];
@@ -1920,6 +1922,9 @@ function GateWorkspace({
           </span>
           <GitStatusChip projectId={projectId} />
         </div>
+        {hasDocumentPanel ? <button className="sg-btn sg-btn--primary" onClick={openReview}>
+          查看本关交付物
+        </button> : null}
       </div>
 
       {/* 门禁头卡：图标 + 本关要求 + 本关状态 */}
@@ -1939,7 +1944,7 @@ function GateWorkspace({
               {req}
             </div>
           ))}
-          <DeliverableChip gate={gate} workItemId={workItemId} onChanged={onChanged} />
+          <DeliverableChip key={`${gate}:${reviewRevision}`} gate={gate} workItemId={workItemId} onChanged={onChanged} />
         </div>
         <div className="sg-gate-summary-status">
           <div className="sg-gate-summary-label">本关状态</div>
@@ -1961,6 +1966,19 @@ function GateWorkspace({
           ) : null}
         </div>
       </div>
+
+      {hasDocumentPanel ? (
+        <section className="sg-card sg-gate-review" ref={reviewRef} aria-label="交付物审阅与关卡推进">
+          <div className="sg-card-head">
+            <strong>审阅本关交付物</strong>
+            <button className="sg-link-btn" aria-expanded={reviewOpen} onClick={() => setReviewOpen((value) => !value)}>
+              {reviewOpen ? '收起交付物' : '查看交付物'}
+            </button>
+          </div>
+          <p className="sg-gate-review-guide">查看交付物后，拒绝并留下评语打回修改，或通过并直接进入下一关。</p>
+          {reviewOpen ? <GateDeliveryReview key={`${workItemId}:${gate}`} workItemId={workItemId} gate={gate} onDone={onReviewChanged} onRevise={onBack} /> : null}
+        </section>
+      ) : null}
 
       {/* Agent 执行详情横条：只展示最新一次 Run；历史次数收进标题行小字 */}
       <div className="sg-agent-strip-wrap">
@@ -2039,8 +2057,8 @@ function GateWorkspace({
       {progress && progress.pendingApprovals > 0 ? (
         <div className="sg-approval-banner">
           <div className="sg-approval-banner-text">
-            <strong>等待你的放行审批</strong>
-            <span>请前往审批中心查看并放行本关产物，批准后将进入下一关。</span>
+            <strong>任务中还有待处理事项</strong>
+            <span>本关交付物可在上方直接审阅通过；其他授权事项可在审批中心查看。</span>
           </div>
           <div className="sg-approval-banner-actions">
             <span className="sg-chip">待审批 {progress.pendingApprovals} 项</span>

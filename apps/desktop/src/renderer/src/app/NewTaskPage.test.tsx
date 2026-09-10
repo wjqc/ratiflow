@@ -245,7 +245,7 @@ describe('新建任务', () => {
     );
   });
 
-  it('聚焦空输入框弹触发提示菜单，点选技能行直接唤起浮层', async () => {
+  it('聚焦空输入框不再弹提示菜单；"+" 菜单提供指派 Agent 与选择技能入口', async () => {
     rpcMock.mockImplementation((method: string, params?: { templateId?: string }) => {
       if (method === 'skill.activeList') {
         return Promise.resolve({
@@ -269,21 +269,20 @@ describe('新建任务', () => {
     // placeholder 不再携带触发提示。
     expect(screen.getByPlaceholderText('描述你的需求…')).toBeInTheDocument();
     const input = screen.getByLabelText('需求描述');
-    // 聚焦空输入框 → 提示菜单（附件 / @ Agent / / 技能）。
+    // 与工作台一致：聚焦空输入框不弹菜单，@ / / 触发全靠输入。
     fireEvent.focus(input);
-    const menu = await screen.findByRole('menu', { name: '输入提示' });
-    expect(menu).toBeInTheDocument();
-    expect(screen.getAllByRole('menuitem').length).toBe(3);
-    // 点选「使用 / 选择技能」→ 插入触发符并唤起技能浮层，菜单关闭。
-    fireEvent.mouseDown(screen.getByRole('menuitem', { name: /选择技能/ }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    // 点 "+" → 菜单：添加附件 / 指派 Agent / 选择技能 / 导入 GitLab Issue。
+    fireEvent.click(screen.getByRole('button', { name: '添加' }));
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: '添加附件' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: '指派 Agent' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: '导入 GitLab Issue' })).toBeInTheDocument();
+    // 点「选择技能」→ 触发符插入正文并唤起浮层，菜单收起（与工作台同一交互）。
+    fireEvent.click(screen.getByRole('menuitem', { name: '选择技能' }));
     await screen.findByRole('listbox', { name: '快捷选择' });
-    expect(screen.queryByRole('menu', { name: '输入提示' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     expect(input).toHaveValue('/');
-    // 输入文字后菜单不再出现（仅空输入聚焦时提示）。
-    fireEvent.change(input, { target: { value: '支付网关重构' } });
-    fireEvent.blur(input);
-    fireEvent.focus(input);
-    expect(screen.queryByRole('menu', { name: '输入提示' })).not.toBeInTheDocument();
   });
 
   it('Escape 关闭浮层不拾取；正文中的普通 "/" 不误触发', async () => {

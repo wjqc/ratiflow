@@ -1,6 +1,7 @@
 // QuickPalette：任务输入器内的快捷选择浮层——"/" 列技能（skill.activeList），
-// "@" 列 Agent（agentProfile.list）。触发、过滤、键盘导航由调用方（NewTaskPage）
-// 管理；本组件只负责渲染列表与点击拾取（受控），a11y 用 combobox/listbox 语义。
+// "@" 列 Agent（agentProfile.list）。触发、过滤、键盘导航由 useComposerAssignments
+// （TaskComposer 公共输入器）管理；本组件只负责渲染列表与点击拾取（受控），
+// a11y 用 combobox/listbox 语义。
 import { useEffect, useRef } from 'react';
 
 export interface PaletteItem {
@@ -51,42 +52,6 @@ export function QuickPalette({ items, highlight, emptyText, onPick }: Props) {
           ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-export interface HintRow {
-  key: string;
-  symbol: React.ReactNode;
-  label: React.ReactNode;
-  onPick: () => void;
-}
-
-// TriggerHintMenu：聚焦空输入框时的触发提示菜单（参照 ZCode 首页输入器）：
-// 附件 / @ Agent / / 技能 各一行，点选直接唤起对应面板或文件选择器。
-interface HintProps {
-  rows: HintRow[];
-}
-
-export function TriggerHintMenu({ rows }: HintProps) {
-  return (
-    <div className="sg-quick-palette sg-quick-hint" role="menu" aria-label="输入提示">
-      {rows.map((row) => (
-        <button
-          key={row.key}
-          type="button"
-          role="menuitem"
-          className="sg-quick-hint-row"
-          onMouseDown={(e) => {
-            // 先于 textarea blur 处理，避免菜单因失焦先关闭。
-            e.preventDefault();
-            row.onPick();
-          }}
-        >
-          <span className="sg-quick-hint-icon" aria-hidden="true">{row.symbol}</span>
-          {row.label}
-        </button>
-      ))}
     </div>
   );
 }

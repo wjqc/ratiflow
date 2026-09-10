@@ -6,7 +6,10 @@ import type { PaletteItem } from './QuickPalette';
 type Choice = PaletteItem & { versionId: string };
 type Kind = 'agent' | 'skill';
 
-/** Detail-page assignments use the same frozen task defaults as NewTaskPage. */
+/** 钩子返回面（TaskComposer 公共输入器与页面提交逻辑的共享契约）。 */
+export type ComposerAssignments = ReturnType<typeof useComposerAssignments>;
+
+/** 任务输入器的 @ / / 触发、浮层与指派状态：新建任务页与工作台共用（TaskComposer）。 */
 export function useComposerAssignments(text: string, setText: (text: string) => void) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [picker, setPicker] = useState<{ kind: Kind; start: number; end: number; query: string } | null>(null);

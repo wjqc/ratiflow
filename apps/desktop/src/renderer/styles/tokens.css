@@ -1992,48 +1992,6 @@ button.sg-step { cursor: pointer; }
 .sg-quick-palette-hint { font-size: 11px; color: var(--sg-text-secondary); flex-shrink: 0; }
 .sg-quick-palette-empty { padding: 10px 12px; font-size: 13px; color: var(--sg-text-secondary); }
 
-/* 聚焦空输入框时的触发提示菜单行（附件 / @ Agent / / 技能） */
-.sg-quick-hint { padding: 4px; }
-.sg-quick-hint-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  border: none;
-  background: none;
-  padding: 7px 10px;
-  border-radius: var(--sg-radius-sm);
-  cursor: pointer;
-  font: inherit;
-  font-size: 13px;
-  color: var(--sg-text-primary);
-  text-align: left;
-}
-.sg-quick-hint-row:hover { background: var(--sg-bg-subtle); }
-.sg-quick-hint-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  flex-shrink: 0;
-  border: 1px solid var(--sg-border-default);
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--sg-text-secondary);
-}
-.sg-quick-kbd {
-  display: inline-block;
-  margin: 0 2px;
-  padding: 0 5px;
-  border: 1px solid var(--sg-border-default);
-  border-radius: 4px;
-  font-family: inherit;
-  font-size: 11px;
-  line-height: 18px;
-  color: var(--sg-action-primary);
-  background: var(--sg-bg-subtle);
-}
 .sg-composer-box {
   border: 1px solid var(--sg-border-default);
   border-radius: var(--sg-radius-md);

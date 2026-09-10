@@ -126,19 +126,6 @@
 .sg-nt-flow-toggle:hover { color: var(--sg-text-primary); }
 .sg-nt-flow-toggle svg { transition: transform 160ms ease; }
 .sg-nt-flow-toggle svg.is-open { transform: rotate(180deg); }
-.sg-nt-composer {
-  position: relative;
-  z-index: 1;
-  margin-top: -2px;
-  min-height: 132px;
-  border-radius: 18px;
-  padding: 15px 16px 10px;
-  box-shadow: 0 2px 8px rgba(26, 35, 50, 0.05);
-}
-.sg-nt-composer:focus-within { border-color: var(--sg-border-strong); }
-.sg-nt-composer .sg-composer-input { min-height: 72px; font-size: 14px; }
-.sg-nt-composer .sg-composer-bar { margin-top: 2px; }
-.sg-nt-composer .sg-compose-send { width: 34px; height: 34px; border-radius: 10px; }
 .sg-nt-flow-panel {
   position: absolute;
   left: 32px;

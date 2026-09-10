@@ -9,13 +9,10 @@ import {
   IconIssue,
   IconLogo,
   IconPaperclip,
-  IconPlus,
-  IconSend,
   IconText,
 } from '../components/Icons';
-import { ModelPicker } from './ModelPicker';
-import { QuickPalette, TriggerHintMenu } from './QuickPalette';
-import type { PaletteItem } from './QuickPalette';
+import TaskComposer, { ComposerMenuItem } from './TaskComposer';
+import { useComposerAssignments } from './useComposerAssignments';
 import {
   friendlyAgentError,
   rememberAutomaticPrd,
@@ -25,21 +22,6 @@ import { WorkspacePicker } from './WorkspacePicker';
 import type { Project } from './ProjectSidebar';
 
 type Mode = 'text' | 'document' | 'issue' | 'image';
-
-// "/" 选择的技能（冻结 active 版本；提交时经 workitem.create/updateRunDefaults 落任务默认面）。
-interface SelectedSkill {
-  skillId: string;
-  name: string;
-  versionId: string;
-  versionNo: number;
-}
-
-// "@" 指派的 Agent（冻结当前最新版本；选路五级中的 workitem_default 档）。
-interface SelectedAgent {
-  profileId: string;
-  name: string;
-  versionId: string;
-}
 
 interface Props {
   projectId: string;
@@ -81,27 +63,17 @@ export default function NewTaskPage({
   const [issueIid, setIssueIid] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [flowOpen, setFlowOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const templateMenuRef = useRef<HTMLDivElement>(null);
   const templateTriggerRef = useRef<HTMLButtonElement>(null);
-  const modeMenuRef = useRef<HTMLDivElement>(null);
   // 关卡模板（配置化）：有 active 版本的模板可选；默认 six-gate-default。
   const [templates, setTemplates] = useState<{ key: string; name: string }[]>([]);
   const [templateKey, setTemplateKey] = useState('six-gate-default');
   // 所选模板的关卡流预览：统一读激活版本定义（默认模板亦然，无本地硬编码）。
   const [flowGates, setFlowGates] = useState<Array<{ name: string; sub: string }>>([]);
-  // "/" 与 "@"：快捷选择浮层（触发位置 start、过滤串、高亮序）与已选胶囊。
-  const [picker, setPicker] = useState<{ kind: 'skill' | 'agent'; start: number } | null>(null);
-  const [pickerQuery, setPickerQuery] = useState('');
-  const [pickerIndex, setPickerIndex] = useState(0);
-  // 聚焦空输入框时的触发提示菜单（附件 / @ Agent / / 技能）：点选直接唤起。
-  const [hintOpen, setHintOpen] = useState(false);
-  const [skillOptions, setSkillOptions] = useState<Array<PaletteItem & SelectedSkill>>([]);
-  const [agentOptions, setAgentOptions] = useState<Array<PaletteItem & SelectedAgent>>([]);
-  const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<SelectedAgent | null>(null);
+  // @ Agent 与 / 技能：触发、浮层、胶囊统一由公共输入器契约（useComposerAssignments）管理。
+  const assignments = useComposerAssignments(description, setDescription);
 
   useEffect(() => {
     if (!templateOpen) return;
@@ -166,16 +138,6 @@ export default function NewTaskPage({
     };
   }, [templateKey]);
 
-  // 点外部收起“+”来源菜单（与工作台输入器同一交互）。
-  useEffect(() => {
-    if (!modeMenuOpen) return;
-    const close = (event: MouseEvent) => {
-      if (!modeMenuRef.current?.contains(event.target as Node)) setModeMenuOpen(false);
-    };
-    window.addEventListener('mousedown', close);
-    return () => window.removeEventListener('mousedown', close);
-  }, [modeMenuOpen]);
-
   useEffect(() => setWorkspaceId(projectId), [projectId]);
 
   // 标题取需求描述首行（原型只有一个大输入框）。
@@ -184,188 +146,12 @@ export default function NewTaskPage({
     return first.length > 40 ? `${first.slice(0, 40)}…` : first;
   };
 
-  // ---------------- "/" 技能 与 "@" Agent 快捷选择 ----------------
-
-  // 选项按需加载（首次触发时拉取，之后复用缓存；失败静默——浮层显示空态）。
-  useEffect(() => {
-    if (picker?.kind !== 'skill' || skillOptions.length > 0) return;
-    let cancelled = false;
-    rpc<{ items: Array<{ skillId: string; name: string; versionId: string; versionNo: number }> }>(
-      'skill.activeList',
-      {},
-    )
-      .then((r) => {
-        if (cancelled) return;
-        setSkillOptions(
-          (r.items ?? []).map((s) => ({
-            id: s.versionId,
-            label: s.name,
-            hint: `v${s.versionNo}`,
-            skillId: s.skillId,
-            name: s.name,
-            versionId: s.versionId,
-            versionNo: s.versionNo,
-          })),
-        );
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [picker?.kind, skillOptions.length]);
-
-  useEffect(() => {
-    if (picker?.kind !== 'agent' || agentOptions.length > 0) return;
-    let cancelled = false;
-    rpc<{
-      items: Array<{
-        id: string;
-        name: string;
-        enabled?: boolean;
-        versions?: Array<{ id: string; versionNo: number }>;
-      }>;
-    }>('agentProfile.list', {})
-      .then((r) => {
-        if (cancelled) return;
-        setAgentOptions(
-          (r.items ?? [])
-            .filter((p) => p.enabled !== false && (p.versions?.length ?? 0) > 0)
-            .map((p) => {
-              const latest = p.versions!.reduce((a, b) => (b.versionNo > a.versionNo ? b : a));
-              return {
-                id: p.id,
-                label: p.name,
-                hint: 'Agent',
-                profileId: p.id,
-                name: p.name,
-                versionId: latest.id,
-              };
-            }),
-        );
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [picker?.kind, agentOptions.length]);
-
-  const closePicker = () => {
-    setPicker(null);
-    setPickerQuery('');
-    setPickerIndex(0);
-  };
-
-  // 菜单行点选：把触发符插入正文末尾并直接唤起对应浮层（@ Agent / / 技能）。
-  const insertTrigger = (trigger: '/' | '@') => {
-    const base = description.trimEnd();
-    const text = base ? `${base} ${trigger}` : trigger;
-    setDescription(text);
-    setHintOpen(false);
-    setPicker({ kind: trigger === '/' ? 'skill' : 'agent', start: text.length - 1 });
-    setPickerQuery('');
-    setPickerIndex(0);
-  };
-
-  const hintRows = [
-    {
-      key: 'attach',
-      symbol: '＋',
-      label: '添加附件（图片或文档）',
-      onPick: () => {
-        setHintOpen(false);
-        void attachFromMenu();
-      },
-    },
-    {
-      key: 'agent',
-      symbol: '@',
-      label: <>使用 <kbd className="sg-quick-kbd">@</kbd> 指派 Agent</>,
-      onPick: () => insertTrigger('@'),
-    },
-    {
-      key: 'skill',
-      symbol: '/',
-      label: <>使用 <kbd className="sg-quick-kbd">/</kbd> 选择技能</>,
-      onPick: () => insertTrigger('/'),
-    },
-  ];
-
-  // 触发检测：行首/空白后的 "/" 或 "@" 开启浮层；已开启时随输入过滤，遇空白/删除触发符关闭。
-  const onDescriptionChange = (value: string, caret: number) => {
-    setDescription(value);
-    if (value) setHintOpen(false);
-    if (picker) {
-      if (caret <= picker.start) {
-        closePicker();
-        return;
-      }
-      const query = value.slice(picker.start + 1, caret);
-      if (query.includes(' ') || query.includes('\n')) {
-        closePicker();
-        return;
-      }
-      setPickerQuery(query);
-      setPickerIndex(0);
-      return;
-    }
-    if (caret < 1) return;
-    const trigger = value[caret - 1];
-    if (trigger !== '/' && trigger !== '@') return;
-    const prev = caret >= 2 ? value[caret - 2] : '';
-    if (caret > 1 && prev !== ' ' && prev !== '\n') return;
-    setHintOpen(false);
-    setPicker({ kind: trigger === '/' ? 'skill' : 'agent', start: caret - 1 });
-    setPickerQuery('');
-    setPickerIndex(0);
-  };
-
-  const pickerItems = (picker?.kind === 'skill' ? skillOptions : agentOptions).filter((item) =>
-    pickerQuery ? item.label.toLowerCase().includes(pickerQuery.toLowerCase()) : true,
-  );
-
-  const pickFromPalette = (item: PaletteItem) => {
-    if (!picker) return;
-    // 从正文摘除触发片段（"/xxx"），选择以胶囊呈现而非落正文。
-    const caret = picker.start + 1 + pickerQuery.length;
-    setDescription((prev) => prev.slice(0, picker.start) + prev.slice(caret));
-    if (picker.kind === 'skill') {
-      const skill = item as PaletteItem & SelectedSkill;
-      setSelectedSkills((prev) =>
-        prev.some((s) => s.versionId === skill.versionId) ? prev : [...prev, skill],
-      );
-    } else {
-      const agent = item as PaletteItem & SelectedAgent;
-      setSelectedAgent(agent);
-    }
-    closePicker();
-  };
-
-  const onDescriptionKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (hintOpen && event.key === 'Escape') {
-      event.preventDefault();
-      setHintOpen(false);
-      return;
-    }
-    if (!picker) return;
-    if (event.key === 'ArrowDown') {
-      event.preventDefault();
-      setPickerIndex((i) => (i + 1) % Math.max(pickerItems.length, 1));
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      setPickerIndex((i) => (i - 1 + Math.max(pickerItems.length, 1)) % Math.max(pickerItems.length, 1));
-    } else if (event.key === 'Enter' && pickerItems.length > 0) {
-      event.preventDefault();
-      pickFromPalette(pickerItems[pickerIndex % pickerItems.length]);
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      closePicker();
-    }
-  };
-
   // 任务级默认面参数（"/" 技能 + "@" Agent；提交时统一走 create 参数或事后 updateRunDefaults）。
   const runDefaultsParams = (): Record<string, unknown> => ({
-    ...(selectedAgent ? { agentProfileVersionId: selectedAgent.versionId } : {}),
-    ...(selectedSkills.length ? { skillVersionIds: selectedSkills.map((s) => s.versionId) } : {}),
+    ...(assignments.agent ? { agentProfileVersionId: assignments.agent.versionId } : {}),
+    ...(assignments.skills.length
+      ? { skillVersionIds: assignments.skills.map((s) => s.versionId) }
+      : {}),
   });
 
   // 文档/Issue 导入路径没有 create 参数位：创建后统一补一次任务级默认面。
@@ -486,7 +272,6 @@ export default function NewTaskPage({
 
   // “+”菜单的添加附件：按文件类型自动落到 图片（多模态附件）或 文档 模式。
   const attachFromMenu = async () => {
-    setModeMenuOpen(false);
     const selected = await window.ratiflow.selectFile();
     if (!selected) {
       return;
@@ -588,67 +373,60 @@ export default function NewTaskPage({
               </button>
             </div>
 
-            <div className="sg-composer-main sg-nt-composer">
-            {(selectedAgent || selectedSkills.length > 0) && (
-              <div className="sg-composer-chips" style={{ marginBottom: 8 }}>
-                {selectedAgent ? (
-                  <span className="sg-composer-chip sg-composer-chip--active" title={`Agent @ ${selectedAgent.name}`}>
-                    @ {selectedAgent.name}
-                    <button
-                      type="button"
-                      aria-label={`移除指派 Agent ${selectedAgent.name}`}
-                      className="sg-chip-remove"
-                      onClick={() => setSelectedAgent(null)}
-                    >×</button>
-                  </span>
-                ) : null}
-                {selectedSkills.map((s) => (
-                  <span key={s.versionId} className="sg-composer-chip" title={`技能 / ${s.name}（v${s.versionNo}）`}>
-                    / {s.name}
-                    <button
-                      type="button"
-                      aria-label={`移除技能 ${s.name}`}
-                      className="sg-chip-remove"
-                      onClick={() => setSelectedSkills((prev) => prev.filter((x) => x.versionId !== s.versionId))}
-                    >×</button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <textarea
-              className="sg-composer-input"
-              placeholder={
-                mode === 'issue'
-                  ? '补充说明（可选）…'
-                  : '描述你的需求…'
-              }
-              value={description}
-              onFocus={() => {
-                if (!description) setHintOpen(true);
-              }}
-              onBlur={() => setHintOpen(false)}
-              onChange={(e) => {
-                // jsdom 合成事件不携带光标位（selectionStart 恒 0）：非空文本回退按末位处理，
-                // 真实浏览器走真实光标。
-                const value = e.target.value;
-                const caret = e.target.selectionStart || value.length;
-                onDescriptionChange(value, caret);
-              }}
-              onKeyDown={onDescriptionKeyDown}
-              aria-label="需求描述"
-            />
-            {hintOpen && !picker ? <TriggerHintMenu rows={hintRows} /> : null}
-            {picker ? (
-              <QuickPalette
-                items={pickerItems}
-                highlight={pickerIndex % Math.max(pickerItems.length, 1)}
-                emptyText={picker.kind === 'skill' ? '无匹配技能（需先在设置中激活）' : '无匹配 Agent'}
-                onPick={pickFromPalette}
-              />
-            ) : null}
-
-            {(mode === 'document' || mode === 'image' || mode === 'issue') && (
-              <div className="sg-nt-extra">
+            <TaskComposer
+              text={description}
+              assignments={assignments}
+              placeholder={mode === 'issue' ? '补充说明（可选）…' : '描述你的需求…'}
+              ariaLabel="需求描述"
+              busy={busy}
+              sendDisabled={busy}
+              sendTitle={busy ? '创建中…' : '创建并进入需求关'}
+              sendAriaLabel="创建并进入需求关"
+              onSend={() => void submit()}
+              renderAddMenu={(close) => (
+                <>
+                  <ComposerMenuItem
+                    icon={<IconPaperclip size={14} />}
+                    label="添加附件"
+                    onSelect={() => {
+                      close();
+                      void attachFromMenu();
+                    }}
+                  />
+                  <ComposerMenuItem
+                    icon={<span aria-hidden="true">@</span>}
+                    label="指派 Agent"
+                    onSelect={() => {
+                      close();
+                      assignments.open('agent');
+                    }}
+                  />
+                  <ComposerMenuItem
+                    icon={<span aria-hidden="true">/</span>}
+                    label="选择技能"
+                    onSelect={() => {
+                      close();
+                      assignments.open('skill');
+                    }}
+                  />
+                  <ComposerMenuItem
+                    icon={<IconIssue size={14} />}
+                    label="导入 GitLab Issue"
+                    onSelect={() => {
+                      close();
+                      setMode('issue');
+                    }}
+                  />
+                </>
+              )}
+              contextChip={(
+                <span className="sg-composer-chip sg-composer-chip--flat">
+                  {MODE_CHIPS.find(({ mode: m }) => m === mode)?.icon}
+                  来源：{MODE_CHIPS.find(({ mode: m }) => m === mode)?.label}
+                </span>
+              )}
+              belowInput={(mode === 'document' || mode === 'image' || mode === 'issue') ? (
+                <div className="sg-nt-extra">
                 {mode === 'document' || mode === 'image' ? (
                   <>
                     <button className="sg-btn sg-btn--sm" onClick={() => void pickFile()}>
@@ -690,64 +468,9 @@ export default function NewTaskPage({
                     </label>
                   </div>
                 ) : null}
-              </div>
-            )}
-
-            <div className="sg-composer-bar">
-              <div className="sg-composer-bar-left">
-                <div className="sg-compose-add" ref={modeMenuRef}>
-                  <button
-                    className="sg-compose-add-btn"
-                    title="添加"
-                    aria-label="添加"
-                    aria-expanded={modeMenuOpen}
-                    onClick={() => setModeMenuOpen((v) => !v)}
-                  >
-                    <IconPlus size={15} />
-                  </button>
-                  {modeMenuOpen ? (
-                    <div className="sg-compose-add-menu" role="menu">
-                      <button
-                        className="sg-compose-add-item"
-                        role="menuitem"
-                        onClick={() => void attachFromMenu()}
-                      >
-                        <IconPaperclip size={14} />
-                        <span>添加附件</span>
-                      </button>
-                      <button
-                        className="sg-compose-add-item"
-                        role="menuitem"
-                        onClick={() => {
-                          setMode('issue');
-                          setModeMenuOpen(false);
-                        }}
-                      >
-                        <IconIssue size={14} />
-                        <span>导入 GitLab Issue</span>
-                      </button>
-                    </div>
-                  ) : null}
                 </div>
-                <span className="sg-composer-chip sg-composer-chip--flat">
-                  {MODE_CHIPS.find(({ mode: m }) => m === mode)?.icon}
-                  来源：{MODE_CHIPS.find(({ mode: m }) => m === mode)?.label}
-                </span>
-              </div>
-              <div className="sg-composer-bar-right">
-                <ModelPicker />
-                <button
-                  className="sg-compose-send"
-                  disabled={busy}
-                  onClick={() => void submit()}
-                  title={busy ? '创建中…' : '创建并进入需求关'}
-                  aria-label="创建并进入需求关"
-                >
-                  <IconSend size={15} />
-                </button>
-              </div>
-            </div>
-          </div>
+              ) : undefined}
+            />
           </div>
 
           {error ? (
