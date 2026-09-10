@@ -8,6 +8,7 @@ interface Props {
   workItemId: string;
   gate: string;
   onDone: () => void;
+  onOpenApprovals?: () => void;
 }
 
 // kind 与后端交付物门禁映射对齐（workitem/deliverable.rs required_kind），
@@ -34,48 +35,52 @@ const REVISION_STATUS: Record<string, string> = {
 };
 
 // 文档驱动关（需求/方案/测试）：创建工件 → 草稿（可让 Agent 起草）→ 评审 → 冻结 → 证据 → 门禁。
-export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
+export default function DocGatePanel({ workItemId, gate, onDone, onOpenApprovals }: Props) {
   const config = DOC_GATES[gate];
   const [artifact, setArtifact] = useState<ArtifactInfo | null>(null);
   const [revision, setRevision] = useState<RevisionInfo | null>(null);
   const [draft, setDraft] = useState('');
+  const [savedDraft, setSavedDraft] = useState('');
   const [reviewer, setReviewer] = useState('local-user');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const run = useCallback(async (action: () => Promise<string>) => {
+  const run = async (action: () => Promise<string>) => {
     setBusy(true);
     setError('');
     setNotice('');
     try {
       setNotice(await action());
       await reload();
+      onDone();
     } catch (reason) {
       setError(friendlyAgentError(reason));
     } finally {
       setBusy(false);
     }
-  }, []);
+  };
 
   const reload = useCallback(async () => {
+    if (!config) return;
     try {
       const page = await rpc<{ items: ArtifactInfo[] }>('artifact.list', { workItemId });
       const found = page.items.find((a) => a.kind === config.kind) ?? null;
       setArtifact(found);
       if (found) {
         const revisions = await rpc<{ items: RevisionInfo[] }>('artifact.listRevisions', { artifactId: found.id });
-        const latest = revisions.items.find((r) => r.status !== 'superseded') ?? revisions.items[0] ?? null;
+        const latest = [...revisions.items].filter((r) => r.status !== 'superseded').sort((a, b) => b.rev_no - a.rev_no)[0] ?? null;
         setRevision(latest);
         if (latest) {
           const content = await rpc<{ content: string }>('artifact.revisionContent', { revisionId: latest.id });
           setDraft(content.content);
+          setSavedDraft(content.content);
         }
       }
     } catch (reason) {
       setError(rpcErrorMessage(reason));
     }
-  }, [workItemId, config.kind]);
+  }, [workItemId, config?.kind]);
 
   useEffect(() => {
     void reload();
@@ -121,7 +126,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
           <div className="sg-row">
             <button
               className="sg-button"
-              disabled={busy}
+              disabled={busy || (revision !== null && revision.status !== 'draft')}
               onClick={() => {
                 void run(async () => {
                   if (gate === 'requirements') {
@@ -156,7 +161,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
             </button>
             <button
               className="sg-button sg-button--primary"
-              disabled={busy || draft.trim() === ''}
+              disabled={busy || draft.trim() === '' || (revision !== null && revision.status !== 'draft')}
               onClick={() => {
                 void run(async () => {
                   const keys = await activeRequirementKeys(workItemId);
@@ -176,7 +181,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
             </button>
             {revision ? <span className="sg-muted">r{revision.rev_no} · {REVISION_STATUS[revision.status] ?? revision.status}</span> : null}
           </div>
-          <textarea className="sg-textarea sg-doc-editor" rows={12} value={draft} onChange={(e) => setDraft(e.target.value)}
+          <textarea className="sg-textarea sg-doc-editor" aria-label={`${config.label}草稿`} readOnly={busy || (revision !== null && revision.status !== 'draft')} rows={12} value={draft} onChange={(e) => setDraft(e.target.value)}
             placeholder={`# ${config.label}\n\n范围…\n非目标…\n验收标准…`} />
 
           {revision?.status === 'draft' ? (
@@ -185,7 +190,8 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
                 <span>评审人</span>
                 <input className="sg-input" value={reviewer} onChange={(e) => setReviewer(e.target.value)} />
               </label>
-              <button className="sg-button sg-button--primary" disabled={busy} onClick={() => {
+              {draft !== savedDraft ? <span className="sg-muted">有未保存的修改，请先保存草稿再评审。</span> : null}
+              <button className="sg-button sg-button--primary" disabled={busy || draft !== savedDraft || !draft.trim()} onClick={() => {
                 void run(async () => {
                   await rpc('artifact.addReview', { revisionId: revision.id, reviewer: reviewer || 'local-user', verdict: 'approved', comment: '工作台评审' });
                   return '评审通过；可冻结基线。';
@@ -222,7 +228,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
               }}>
                 记录证据并复验
               </button>
-              <EvaluateButton workItemId={workItemId} gate={gate} busy={busy} onDone={onDone} />
+              <EvaluateButton workItemId={workItemId} gate={gate} busy={busy} onDone={onDone} onOpenApprovals={onOpenApprovals} />
             </div>
           ) : null}
         </>
@@ -231,7 +237,7 @@ export default function DocGatePanel({ workItemId, gate, onDone }: Props) {
   );
 }
 
-export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId: string; gate: string; busy: boolean; onDone: () => void }) {
+export function EvaluateButton({ workItemId, gate, busy, onDone, onOpenApprovals }: { workItemId: string; gate: string; busy: boolean; onDone: () => void; onOpenApprovals?: () => void }) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [pendingRelease, setPendingRelease] = useState<{ id: string } | null>(null);
@@ -283,9 +289,12 @@ export function EvaluateButton({ workItemId, gate, busy, onDone }: { workItemId:
       {error ? <div className="sg-banner sg-banner--error">{error}</div> : null}
       {notice ? <div className="sg-banner sg-banner--info" role="status">{notice}</div> : null}
       {pendingRelease ? (
+        <>
         <span className="sg-chip" title="在审批中心完成批准 / 要求修改 / 拒绝">
           放行审批等待用户决定
         </span>
+        {onOpenApprovals ? <button className="sg-button sg-button--primary" onClick={onOpenApprovals}>前往审批中心，批准后进入下一关</button> : null}
+        </>
       ) : (
         <button className="sg-button sg-button--primary" disabled={busy || evaluating} onClick={evaluateAndRequest}>
           <IconShield size={14} />

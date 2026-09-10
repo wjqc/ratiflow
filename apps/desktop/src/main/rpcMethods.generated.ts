@@ -296,5 +296,6 @@ export const RPC_METHODS: readonly string[] = [
   'mcp.importGet',
   'impact.forProposal',
   'agent.trace',
+  'agent.gateContext',
   'skill.body',
 ];

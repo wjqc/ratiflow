@@ -236,13 +236,23 @@ impl ModelHttp {
         };
         // 429 瞬态退避重试一次（与非流式路径语义一致；重试挂在错误分支）。
         let first = send().await;
-        let response = match first {
+        let mut response = match first {
             Ok(r) if r.status().as_u16() == 429 => {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 send().await
             }
             other => other,
         };
+        // TLS 握手/连接类瞬态（企业 LB 掐断握手 EOF 等，仅发生在响应前阶段）：退避后重试一次。
+        // is_timeout 的读超时不重试（300s 级挂起，重试会双倍耗时）。
+        if response
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.is_connect() && !e.is_timeout())
+        {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            response = send().await;
+        }
         let response = response.map_err(|e| {
             let text = e.to_string();
             if text.contains("timed out") || text.contains("TimedOut") {

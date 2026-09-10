@@ -971,16 +971,29 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             Ok(json!({"status": "removed"}))
         }
         "knowledge.scan" => {
-            let src = sg_knowledge::scan_source(
-                store,
-                &str_param(params, "sourceId")?,
-                opt_str_param(params, "projectRoot")
-                    .map(std::path::PathBuf::from)
-                    .as_deref(),
-                500,
-                2 << 20,
-            )
-            .map_err(store_err)?;
+            let source_id = str_param(params, "sourceId")?;
+            // locator 相对项目根时由服务端解析扫描根：取 locator 的最近存在祖先目录
+            // （与 generation worktree 分支同语义）；显式 projectRoot / 绝对 locator 保持原行为。
+            let scan_root = match opt_str_param(params, "projectRoot").map(std::path::PathBuf::from)
+            {
+                Some(p) => p,
+                None => {
+                    let src = sg_knowledge::get_source(store, &source_id).map_err(store_err)?;
+                    let locator = std::path::Path::new(&src.locator);
+                    if locator.is_absolute() {
+                        locator.to_path_buf()
+                    } else {
+                        let project_root = sg_knowledge::reconcile::project_root(
+                            store,
+                            &src.project_id,
+                        )
+                        .map_err(store_err)?;
+                        sg_knowledge::reconcile::ancestor_root(&project_root.join(&src.locator))
+                    }
+                }
+            };
+            let src = sg_knowledge::scan_source(store, &source_id, Some(&scan_root), 500, 2 << 20)
+                .map_err(store_err)?;
             Ok(serde_json::to_value(src).unwrap_or_default())
         }
         "knowledge.syncFromRepo" => {
@@ -2286,6 +2299,11 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
             let run_id = str_param(params, "runId")?;
             sg_agent::trace(store, &run_id).map_err(store_err)
         }
+        // 本次 Run 已读取的上游交付物及版本（gate_context 0062 运行时绑定）。
+        "agent.gateContext" => {
+            let run_id = str_param(params, "runId")?;
+            sg_workitem::gate_context::for_run(store, &run_id).map_err(store_err)
+        }
         "agent.cancel" => {
             let run_id = str_param(params, "runId")?;
             cancel_run_shared(state, store, &run_id)
@@ -2978,6 +2996,11 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     ),
                 ));
             }
+            // 关卡运行上下文（服务端固定装配 + 版本绑定）：原始目标 + 验收标准 +
+            // 上游已批准产物（冻结修订）。上游缺失/失效在此 fail-closed——不启动
+            // Run、不产生 attempt 状态变更，杜绝 Agent 在不完整上下文里自行猜测。
+            let gate_ctx =
+                sg_workitem::gate_context::build(store, &workitem_id, &gate_name).map_err(store_err)?;
             let attempt = sg_workitem::attempt::ensure_active(store, &workitem_id, &gate_name)
                 .map_err(store_err)?;
             let activities =
@@ -3095,10 +3118,12 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                 .get("budget")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
+            // 契约段固定前置于用户输入（检索仍按原始 goal 取词，见上方 build_manifest）。
+            let composed_goal = format!("{}\n\n【用户输入】\n{}", gate_ctx.text, goal);
             let config = sg_agent::RunConfig {
                 workitem_id: &workitem_id,
                 task_id: &activity_id,
-                goal: &goal,
+                goal: &composed_goal,
                 manifest_id: &manifest_id,
                 tool_allowlist: &allowlist,
                 idempotency_key: &idem,
@@ -3135,6 +3160,15 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                         Ok(())
                     })
                     .map_err(store_err)?;
+                // 运行时版本绑定持久化：界面核对与产出核验的对照基准（0062）。
+                sg_workitem::gate_context::persist(
+                    store,
+                    &run.id,
+                    &manifest_id,
+                    &gate_name,
+                    &gate_ctx.meta,
+                )
+                .map_err(store_err)?;
                 if trace_writes_enabled() {
                     sg_provenance::register_node(
                         store,
@@ -3154,12 +3188,14 @@ pub fn dispatch(state: &AppState, store: &Store, method: &str, params: &Value) -
                     "runId": run.id, "status": run.status, "instructions": instructions,
                     "attemptId": attempt.id, "activityKey": activity_key,
                     "selection": selection,
+                    "gateContext": gate_ctx.meta,
                 }));
             }
             Ok(json!({
                 "runId": run.id, "status": run.status,
                 "attemptId": attempt.id, "activityKey": activity_key,
                 "selection": serde_json::to_value(&selection).unwrap_or_default(),
+                "gateContext": gate_ctx.meta,
             }))
         }
         "agentProfile.list" => {

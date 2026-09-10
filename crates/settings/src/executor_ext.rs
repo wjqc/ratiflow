@@ -76,7 +76,9 @@ pub fn update(store: &Store, settings: &Value, expected_revision: i64) -> Settin
             ));
         }
         let merged = json!({
-            "mode": settings.get("mode").or_else(|| current.get("mode")).cloned().unwrap_or(json!("safe_restricted")),
+            // mode 空/缺省 = 跟随自动探测（内核沙箱优先，2026-09-10 决策）；
+            // 不再钉死 safe_restricted（比探测结果更弱的隐式默认）。
+            "mode": settings.get("mode").or_else(|| current.get("mode")).cloned().unwrap_or(serde_json::Value::Null),
             "memoryMB": settings.get("memoryMB").or(current.get("memoryMB")),
             "cpus": settings.get("cpus").or(current.get("cpus")),
             "timeoutSec": settings.get("timeoutSec").or(current.get("timeoutSec")),
@@ -109,10 +111,12 @@ pub struct SelfCheckStep {
 /// 同时返回 sandbox capability（backend/version/保护范围/阻塞原因）。
 pub fn check(store: &Store) -> SettingsResult<Value> {
     let settings = get(store)?;
+    // 未显式选模式 = 自动探测（内核沙箱优先）：自检按 kernel_restricted 验证
+    // （内核不可用的机器上探测步骤会如实显示 unavailable，实际执行回落 Docker）。
     let mode = settings
         .get("mode")
         .and_then(|m| m.as_str())
-        .unwrap_or("safe_restricted");
+        .unwrap_or("kernel_restricted");
     let mut steps = Vec::new();
 
     let overall = match mode {

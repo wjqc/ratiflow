@@ -5497,6 +5497,18 @@
       "result": "value"
     },
     {
+      "name": "agent.gateContext",
+      "params": [
+        {
+          "name": "runId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "result": "value",
+      "description": "本次 Run 已读取的上游交付物及版本（gate_context 运行时绑定；产出核验对照基准）"
+    },
+    {
       "name": "skill.body",
       "params": [
         {

@@ -211,13 +211,19 @@ fn compute_input_revision(root: &Path, locator: &str) -> Result<(String, String)
 }
 
 /// worktree 目录 Merkle：路径字节排序 + 每文件正文 hash 组合（§7.1）。
+/// locator 指向文件（如文档附件 source.md）时按单文件计算，否则 read_dir 直接报错，
+/// 模式永远算不出来 → 误回 committed 扫描（非 git 项目必失败）。
 pub fn worktree_merkle(root: &Path, locator: &str) -> Result<String, Error> {
     let base = root.join(locator);
     if !base.exists() {
         return Err(Error::Message("manifest_locator_missing".into()));
     }
     let mut files: Vec<PathBuf> = Vec::new();
-    walk(&base, &mut files)?;
+    if base.is_dir() {
+        walk(&base, &mut files)?;
+    } else {
+        files.push(base.clone());
+    }
     files.sort_by(|a, b| {
         a.to_string_lossy()
             .as_bytes()
@@ -618,7 +624,7 @@ pub fn build_and_activate_generation(
 }
 
 /// locator 可能指向文件：扫描器根取存在的最近祖先目录。
-fn ancestor_root(path: &Path) -> PathBuf {
+pub fn ancestor_root(path: &Path) -> PathBuf {
     let mut cur = path.to_path_buf();
     loop {
         if cur.is_dir() {
@@ -1353,5 +1359,36 @@ mod g5g6_tests {
         assert_eq!(payload, 1);
         let hits = crate::search(&store, "pj", "认证", 10).unwrap();
         assert!(!hits.is_empty(), "回退后检索恢复");
+    }
+
+    /// 文件型 locator（文档附件 source.md）在非 git 项目下的输入版本计算：
+    /// worktree_merkle 必须支持单文件（曾经 read_dir 文件直接报错 → 模式永远停在
+    /// committed → 非 git 项目扫描必失败）。
+    #[test]
+    fn worktree_merkle_supports_file_locator() {
+        let dir = std::env::temp_dir().join(format!("sg-wm-file-{}", sg_store::ids::new_id("t")));
+        std::fs::create_dir_all(dir.join("repo/knowledge/attachments/doc-x")).unwrap();
+        let root = dir.join("repo");
+        let att = root.join("knowledge/attachments/doc-x/source.md");
+        std::fs::write(&att, "# PRD 正文\n").unwrap();
+
+        // 非 git 项目 + 文件 locator → worktree 模式可计算（不再 manifest_locator_missing）。
+        let (mode, rev) = compute_input_revision(&root, "knowledge/attachments/doc-x/source.md")
+            .expect("file locator revision computable");
+        assert_eq!(mode, "worktree");
+        assert!(rev.starts_with("worktree|"));
+
+        // 确定性：同内容两次一致；内容变化 → 版本变化（drift 检测有效）。
+        let again = compute_input_revision(&root, "knowledge/attachments/doc-x/source.md").unwrap();
+        assert_eq!(again.1, rev);
+        std::fs::write(&att, "# 改过的正文\n").unwrap();
+        let changed = compute_input_revision(&root, "knowledge/attachments/doc-x/source.md").unwrap();
+        assert_ne!(changed.1, rev);
+
+        // 目录 locator 行为不回退。
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.md"), "x").unwrap();
+        let (dir_mode, _) = compute_input_revision(&root, "docs").unwrap();
+        assert_eq!(dir_mode, "worktree");
     }
 }

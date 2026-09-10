@@ -6,6 +6,7 @@ pub mod deliverable;
 pub mod docs;
 pub mod fast_track;
 pub mod gate;
+pub mod gate_context;
 pub mod manual_confirm;
 pub mod progress;
 pub mod release;

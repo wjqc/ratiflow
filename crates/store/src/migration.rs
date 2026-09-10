@@ -144,6 +144,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0060_skill_market_public_sources.sql"),
     ),
     (61, include_str!("../migrations/0061_gate_agent.sql")),
+    (
+        62,
+        include_str!("../migrations/0062_run_gate_context.sql"),
+    ),
 ];
 
 /// 运行迁移：建版本表 →（接管 v2 骨架库）→ 单事务逐文件执行 + 登记 → quick_check。

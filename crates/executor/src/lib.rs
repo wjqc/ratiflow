@@ -30,15 +30,18 @@ pub fn detect_mode(docker_available: bool, unsafe_explicit: bool) -> Mode {
 }
 
 /// 可注入探测结果的形式（设置页自检/测试复用）。
+/// 优先级（2026-09-10 产品决策，覆盖 ADR-034 §5 原排序）：内核沙箱首选——
+/// 简单读取类命令零外部依赖，不要求 Docker 守护进程常驻；Docker（命名空间级
+/// 隔离 + 镜像钉扎）降为显式选择（设置/env 选 docker 仍受尊重）。
 pub fn detect_mode_with_kernel(
     docker_available: bool,
     unsafe_explicit: bool,
     kernel_available: bool,
 ) -> Mode {
-    if docker_available {
-        Mode::Docker
-    } else if kernel_available {
+    if kernel_available {
         Mode::KernelRestricted
+    } else if docker_available {
+        Mode::Docker
     } else if unsafe_explicit {
         Mode::UnsafeExplicit
     } else {
@@ -140,6 +143,12 @@ pub fn validate(mode: Mode, m: &ExecutionManifest) -> Result<(), ExecError> {
     }
     if m.timeout_sec <= 0 {
         return Err(ExecError::Rejected("timeout required".into()));
+    }
+    // 诚实降级：kernel 模式跑在宿主机上，钉扎镜像无法兑现——拒绝而非静默忽略。
+    if mode == Mode::KernelRestricted && !m.image.is_empty() {
+        return Err(ExecError::Rejected(
+            "image pinning requires docker mode".into(),
+        ));
     }
     Ok(())
 }
@@ -246,7 +255,8 @@ mod tests {
         ExecutionManifest {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             work_dir: String::new(),
-            image: "alpine:3".into(),
+            // 默认空：生产 tool_exec 不设镜像；kernel 首选模式下钉镜像会被 validate 拒绝。
+            image: String::new(),
             network_off: true,
             memory_mb: 256,
             cpus: 0.5,
@@ -265,13 +275,13 @@ mod tests {
 
     #[test]
     fn detect_mode_no_silent_degrade() {
-        // Docker 优先；Docker 不可用但内核沙箱可用 → kernel_restricted；
+        // 内核沙箱优先（2026-09-10 决策）；内核不可用但 Docker 可用 → docker；
         // 全部不可用且未显式开启 → Disabled（fail-closed）。
-        assert_eq!(detect_mode_with_kernel(true, false, true), Mode::Docker);
         assert_eq!(
-            detect_mode_with_kernel(false, false, true),
+            detect_mode_with_kernel(true, false, true),
             Mode::KernelRestricted
         );
+        assert_eq!(detect_mode_with_kernel(true, false, false), Mode::Docker);
         assert_eq!(detect_mode_with_kernel(false, false, false), Mode::Disabled);
         assert_eq!(
             detect_mode_with_kernel(false, true, false),
@@ -291,6 +301,15 @@ mod tests {
         let mut no_timeout = manifest(&["ls"]);
         no_timeout.timeout_sec = 0;
         assert!(validate(Mode::Docker, &no_timeout).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_image_pinning_in_kernel_mode() {
+        // kernel 模式跑宿主机：钉扎镜像无法兑现 → 拒绝（诚实降级，不静默忽略）。
+        let mut pinned = manifest(&["ls"]);
+        pinned.image = "alpine:3".into();
+        assert!(validate(Mode::KernelRestricted, &pinned).is_err());
+        assert!(validate(Mode::Docker, &pinned).is_ok());
     }
 
     #[test]

@@ -30,8 +30,9 @@ interface SandboxCapability {
 interface CheckResponse { status: string; steps: CheckStep[]; sandbox?: SandboxCapability }
 
 const MODE_HINT: Record<string, string> = {
-  docker: '推荐。一次性容器、禁网、资源限制。',
-  kernel_restricted: '内核沙箱（macOS Seatbelt / Linux Landlock）强制路径与网络边界；写仅限受管 worktree 与工件目录。无 Docker 时推荐。',
+  auto: '自动探测：内核沙箱（macOS Seatbelt / Linux Landlock）可用即优先，否则 Docker，均不可用则禁用（fail-closed）。',
+  docker: '可选强隔离：一次性容器、禁网、资源限制、镜像钉扎（需本机 Docker 常驻）。',
+  kernel_restricted: '推荐。内核沙箱（macOS Seatbelt / Linux Landlock）强制路径与网络边界；写仅限受管 worktree 与工件目录，读取类命令零 Docker 依赖。',
   safe_restricted: '本机白名单（非强隔离）；自动写/执行禁用。',
   disabled: '全部执行禁用。',
   unsafe_explicit: '不提供容器隔离；所有执行进入日志与证据标注。',
@@ -101,22 +102,24 @@ export function ExecutionPage() {
 
       <SettingsSection title="模式与资源">
         <div className="sg-setting-list">
-          <SettingsRow title="执行模式" htmlFor="ex-mode" description={MODE_HINT[draft.mode ?? 'safe_restricted']}>
+          <SettingsRow title="执行模式" htmlFor="ex-mode" description={MODE_HINT[draft.mode ?? 'auto']}>
             <select
               id="ex-mode"
               className="sg-select"
-              value={draft.mode ?? 'safe_restricted'}
+              value={draft.mode ?? 'auto'}
               onChange={(e) => {
                 const next = e.target.value;
                 if (next === 'unsafe_explicit') {
                   const ok = window.confirm('不安全模式不提供容器级隔离。确定切换到显式不安全模式吗？');
                   if (!ok) return;
                 }
-                set('mode', next, true);
+                // auto = 清空显式模式，跟随探测（内核沙箱优先）；core 以 null 表示未固定。
+                set('mode', next === 'auto' ? null : next, true);
               }}
             >
-              <option value="docker">Docker（推荐）</option>
-              <option value="kernel_restricted">内核沙箱（无 Docker 时推荐）</option>
+              <option value="auto">自动探测（内核沙箱优先）</option>
+              <option value="docker">Docker（可选强隔离）</option>
+              <option value="kernel_restricted">内核沙箱（推荐）</option>
               <option value="safe_restricted">本机白名单（非强隔离）</option>
               <option value="disabled">禁用</option>
               <option value="unsafe_explicit">显式不安全（需确认）</option>

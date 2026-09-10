@@ -195,7 +195,8 @@ pub fn build_manifest(
             Ok(ExecutionManifest {
                 argv: vec!["cat".into(), abs.to_string_lossy().to_string()],
                 work_dir: String::new(),
-                image: "alpine:3".into(),
+                // kernel 首选模式下钉镜像会被 validate 拒绝（诚实降级）；不设镜像。
+                image: String::new(),
                 network_off: true,
                 memory_mb: 256,
                 cpus: 0.5,
@@ -226,7 +227,8 @@ pub fn build_manifest(
             Ok(ExecutionManifest {
                 argv,
                 work_dir,
-                image: "alpine:3".into(),
+                // kernel 首选模式下钉镜像会被 validate 拒绝（诚实降级）；不设镜像。
+                image: String::new(),
                 network_off: true,
                 memory_mb: 256,
                 cpus: 0.5,

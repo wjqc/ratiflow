@@ -387,7 +387,22 @@ function registerIpc(): void {
     if (!client) {
       throw new Error('core 未初始化');
     }
-    return client.call(method, params ?? {});
+    try {
+      return { __sgRpc: true as const, ok: true, result: await client.call(method, params ?? {}) };
+    } catch (error) {
+      // RPC 错误信封化消音：core 业务错误（如 feature_disabled，渲染层按语义静默降级）
+      // 不再以 handler rejection 触发 Electron 主进程日志；信封由 renderer rpc() 还原。
+      const err = error as { message?: unknown; code?: unknown; retryable?: unknown };
+      return {
+        __sgRpc: true as const,
+        ok: false,
+        error: {
+          message: typeof err?.message === 'string' ? err.message : 'core 调用失败',
+          ...(typeof err?.code === 'string' ? { code: err.code } : {}),
+          ...(err?.retryable === true ? { retryable: true } : {}),
+        },
+      };
+    }
   });
 
   ipcMain.handle('sg:hello', async () => {

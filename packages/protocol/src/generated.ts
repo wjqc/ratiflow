@@ -299,6 +299,7 @@ export type RpcMethodName =
   | 'mcp.importGet'
   | 'impact.forProposal'
   | 'agent.trace'
+  | 'agent.gateContext'
   | 'skill.body';
 
 export const RPC_METHODS: readonly RpcMethodName[] = [
@@ -598,6 +599,7 @@ export const RPC_METHODS: readonly RpcMethodName[] = [
   'mcp.importGet',
   'impact.forProposal',
   'agent.trace',
+  'agent.gateContext',
   'skill.body',
 ] as const;
 
@@ -2320,6 +2322,10 @@ export interface ImpactForProposalParams {
 }
 
 export interface AgentTraceParams {
+  runId: string;
+}
+
+export interface AgentGateContextParams {
   runId: string;
 }
 

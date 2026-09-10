@@ -137,8 +137,9 @@ impl AppState {
         };
         let ssh: Arc<dyn sg_integrations::SSHAdapter> = Arc::new(FakeSSH::default());
         let _ = gitlab_fake;
-        // 执行模式：RATIFLOW_EXEC_MODE 显式覆盖（开发/E2E 用），否则按 Docker 可用性探测
-        // （不静默降级，ADR-024）。设置域 executionProfile 接线在 M3/F10 重排来源优先级。
+        // 执行模式：RATIFLOW_EXEC_MODE 显式覆盖（开发/E2E 用），否则按内核沙箱优先探测
+        // （2026-09-10 决策：简单读取类命令零 Docker 依赖；Docker 为显式可选项，不静默降级，ADR-024）。
+        // 设置域 executionProfile 接线在 M3/F10 重排来源优先级。
         let executor_mode = std::env::var("RATIFLOW_EXEC_MODE")
             .ok()
             .and_then(|m| match m.as_str() {

@@ -34,8 +34,29 @@ export interface AgentRunInfo {
   result: string;
 }
 
+/** main 侧 sg:rpc 的错误信封：core RPC 错误经信封回传（不在主进程打 handler rejection 日志），
+ * code/retryable 不再被 Electron 序列化剥掉；无信封标记的返回值按原样透传（测试 mock 直连桥）。 */
+interface SgRpcEnvelope<T> {
+  __sgRpc: true;
+  ok: boolean;
+  result?: T;
+  error?: { message: string; code?: string; retryable?: boolean };
+}
+
 export async function rpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  return (await window.ratiflow.rpc(method, params)) as T;
+  const res = (await window.ratiflow.rpc(method, params)) as SgRpcEnvelope<T> | T;
+  if (res !== null && typeof res === 'object' && (res as SgRpcEnvelope<T>).__sgRpc === true) {
+    const envelope = res as SgRpcEnvelope<T>;
+    if (envelope.ok) {
+      return envelope.result as T;
+    }
+    throw Object.assign(
+      new Error(envelope.error?.message ?? 'core 调用失败'),
+      envelope.error?.code !== undefined ? { code: envelope.error.code } : {},
+      envelope.error?.retryable === true ? { retryable: true } : {},
+    );
+  }
+  return res as T;
 }
 
 /** M0-②：agent.start 立即返回 runId，终态经轮询 agent.get 获得（事件订阅到达后同样触发刷新）。 */

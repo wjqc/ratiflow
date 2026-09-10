@@ -165,6 +165,16 @@ impl ModelProvider for ModelHttp {
         // 限流是长任务（如 PRD 起草）最常撞上的瞬态错误：429 退避后重试一次。
         // ureq 对 4xx 一律返回 Err——重试只能挂在错误分支上，Ok 分支里判状态码是死代码。
         let mut result = send(&body);
+        // 传输/网关瞬态（企业 LB 掐断 TLS 握手 EOF、连接重置、5xx）：退避后重试一次。
+        // 读超时除外（300s 级挂起，重试会双倍耗时）。
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.starts_with("model_unavailable"))
+        {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            result = send(&body);
+        }
         if result
             .as_ref()
             .err()

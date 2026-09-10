@@ -39,6 +39,7 @@ pub struct Entry {
 pub const REGISTRY: &[Entry] = &[
     // BEGIN_REGISTRY_ENTRIES（generate.mjs 按标记双向校验；勿删标记行）
     Entry { method: "agent.cancel", kind: Kind::Mutation, receipt: ReceiptMode::None, domain_key: "" },
+    Entry { method: "agent.gateContext", kind: Kind::Read, receipt: ReceiptMode::None, domain_key: "" },
     Entry { method: "agent.list", kind: Kind::Read, receipt: ReceiptMode::None, domain_key: "" },
     Entry { method: "agent.get", kind: Kind::Read, receipt: ReceiptMode::None, domain_key: "" },
     Entry { method: "agent.proposals", kind: Kind::Read, receipt: ReceiptMode::None, domain_key: "" },
